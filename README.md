@@ -37,10 +37,10 @@ composable, upgradeable, and access-controlled multi-contract systems on Soroban
 | Contract | Description | Tests |
 |---|---|---|
 | `router-core` | Central dispatcher, route registration/resolution, pause controls | 8 |
-| `router-registry` | Versioned contract address registry with deprecation | 8 |
-| `router-access` | Role-based access control, blacklisting, role admins | 7 |
-| `router-middleware` | Rate limiting, route enable/disable, call event logging | 6 |
-| `router-timelock` | Delayed execution queue for sensitive config changes | 7 |
+| `router-registry` | Versioned contract address registry with deprecation support | 8 |
+| `router-access` | Role-based access control, blacklisting, and role admins | 7 |
+| `router-middleware` | Rate limiting, route enable/disable, and call event logging | 6 |
+| `router-timelock` | Delayed execution queue for sensitive configuration changes | 7 |
 | `router-multicall` | Batch multiple cross-contract calls in one transaction | 6 |
 
 ## Architecture
@@ -61,7 +61,7 @@ Role-based access control with three tiers:
 - **Role admin** — can grant/revoke a specific named role
 - **Role members** — hold a named role
 
-Addresses can be blacklisted to prevent them from ever being granted a role.
+Addresses can be blacklisted to prevent them from being granted any role.
 
 ### router-middleware
 Pre/post call hooks for any route. Supports:
@@ -78,7 +78,7 @@ Operations can be cancelled before execution.
 ### router-multicall
 Batches multiple cross-contract calls into a single transaction. Each call can be
 marked `required` (failure aborts the batch) or optional (failure is tracked but
-does not abort). Returns a `BatchSummary` with success/fail counts.
+does not abort). Returns a `BatchSummary` with success/failure counts.
 
 ## Getting Started
 
@@ -106,7 +106,7 @@ cargo test
 cargo build --target wasm32-unknown-unknown --release
 ```
 
-WASM files will be at:
+WASM files will be output to:
 ```
 target/wasm32-unknown-unknown/release/router_core.wasm
 target/wasm32-unknown-unknown/release/router_registry.wasm
