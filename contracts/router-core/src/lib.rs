@@ -14,7 +14,7 @@
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, contracterror,
-    Address, Env, String, Symbol,
+    Address, Env, String, Symbol, Vec,
 };
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -410,6 +410,27 @@ impl RouterCore {
         Ok(())
     }
 
+/// Returns all currently registered route names as a vector of strings.
+    /// This is a read-only operation that scans all instance storage keys.
+    /// The order of returned names is not guaranteed.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// A `Vec<String>` containing all registered route names.
+    pub fn get_all_routes(env: Env) -> Vec<String> {
+        let mut routes = Vec::new(&env);
+        let mut iter = env.storage().instance().iter();
+        while let Some(kv) = iter.next() {
+            let (key, _) = kv.unwrap();
+            if let DataKey::Route(name) = key {
+                routes.append(name);
+            }
+        }
+        routes
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn require_admin(env: &Env, caller: &Address) -> Result<(), RouterError> {
@@ -498,6 +519,34 @@ mod tests {
     }
 
     #[test]
+    fn test_pause_and_unpause_route() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        
+        // Register a route
+        client.register_route(&admin, &name, &addr);
+        
+        // Verify resolve works initially
+        let resolved = client.resolve(&name);
+        assert_eq!(resolved, addr);
+        
+        // Pause the route
+        client.set_route_paused(&admin, &name, &true);
+        
+        // Assert that resolve now fails with RoutePaused error
+        let result = client.try_resolve(&name);
+        assert_eq!(result, Err(Ok(RouterError::RoutePaused)));
+        
+        // Unpause the route
+        client.set_route_paused(&admin, &name, &false);
+        
+        // Assert that resolve works again
+        let resolved = client.resolve(&name);
+        assert_eq!(resolved, addr);
+    }
+
+    #[test]
     fn test_pause_router() {
         let (env, admin, client) = setup();
         let name = String::from_str(&env, "oracle");
@@ -551,5 +600,29 @@ mod tests {
         
         // Verify an event was emitted
         assert_eq!(events_after, events_before + 1);
+    fn test_resolve_unknown_route_fails() {
+        let (env, _admin, client) = setup();
+        let name = String::from_str(&env, "unknown");
+        let result = client.try_resolve(&name);
+        assert_eq!(result, Err(Ok(RouterError::RouteNotFound)));
+    fn test_get_all_routes_empty() {
+        let (env, _, client) = setup();
+        let routes: Vec<String> = client.get_all_routes();
+        assert!(routes.is_empty());
+    }
+
+    #[test]
+    fn test_get_all_routes_multiple() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let vault = String::from_str(&env, "vault");
+        let addr1 = Address::generate(&env);
+        let addr2 = Address::generate(&env);
+        client.register_route(&admin, &oracle, &addr1);
+        client.register_route(&admin, &vault, &addr2);
+        let routes: Vec<String> = client.get_all_routes();
+        assert_eq!(routes.len(), 2);
+        assert!(routes.contains(&oracle));
+        assert!(routes.contains(&vault));
     }
 }

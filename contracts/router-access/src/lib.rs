@@ -139,7 +139,7 @@ impl RouterAccess {
 
         env.storage()
             .instance()
-            .set(&DataKey::HasRole(role, target), &false);
+            .remove(&DataKey::HasRole(role, target));
         Ok(())
     }
 

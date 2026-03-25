@@ -1,4 +1,4 @@
-# stellar-router
+# stellar-router [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Language: Rust](https://img.shields.io/badge/language-Rust-orange.svg)](https://www.rust-lang.org/)
 
 A modular cross-contract routing infrastructure suite for Stellar/Soroban.
 
