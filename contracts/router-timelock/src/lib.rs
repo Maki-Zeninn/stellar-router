@@ -11,7 +11,7 @@
 //! - Cancel queued operations before execution
 //! - Executed operations cannot be re-executed
 
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, String};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, String, Symbol};
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -244,6 +244,51 @@ impl RouterTimelock {
         Ok(())
     }
 
+    /// Cancel all pending operations.
+    ///
+    /// Iterates through all queued operations and marks those that have not yet
+    /// been executed or cancelled as cancelled. This is an emergency function
+    /// that can only be called by the admin.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `admin` - The address initiating the call; must be the admin.
+    ///
+    /// # Returns
+    /// The number of operations that were successfully cancelled.
+    ///
+    /// # Errors
+    /// * [`TimelockError::Unauthorized`] — if `admin` is not the authorized admin.
+    /// * [`TimelockError::NotInitialized`] — if the contract has not been initialized.
+    pub fn cancel_all(env: Env, admin: Address) -> Result<u32, TimelockError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        let next_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextOpId)
+            .unwrap_or(0);
+
+        let mut count = 0u32;
+        for id in 0..next_id {
+            let key = DataKey::Operation(id);
+            if let Some(mut op) = env.storage().instance().get::<DataKey, TimelockOp>(&key) {
+                if !op.executed && !op.cancelled {
+                    op.cancelled = true;
+                    env.storage().instance().set(&key, &op);
+                    count += 1;
+
+                    env.events().publish(
+                        (Symbol::new(&env, "cancel"), id),
+                        (op.description.clone(), op.target.clone()),
+                    );
+                }
+            }
+        }
+        Ok(count)
+    }
+
     /// Get an operation by ID.
     ///
     /// # Arguments
@@ -409,5 +454,55 @@ mod tests {
         let desc = String::from_str(&env, "malicious");
         let result = client.try_queue(&attacker, &desc, &target, &3600);
         assert_eq!(result, Err(Ok(TimelockError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_cancel_all_no_pending() {
+        let (_env, admin, client) = setup();
+        let cancelled = client.cancel_all(&admin);
+        assert_eq!(cancelled, 0);
+    }
+
+    #[test]
+    fn test_cancel_all_one_pending() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "upgrade oracle");
+        client.queue(&admin, &desc, &target, &3600);
+        let cancelled = client.cancel_all(&admin);
+        assert_eq!(cancelled, 1);
+        let op = client.get_op(&0).unwrap();
+        assert!(op.cancelled);
+    }
+
+    #[test]
+    fn test_cancel_all_multiple_pending() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "upgrade oracle");
+
+        client.queue(&admin, &desc, &target, &3600);
+        client.queue(&admin, &desc, &target, &3600);
+        client.queue(&admin, &desc, &target, &3600);
+
+        // Mark one as executed
+        env.ledger().with_mut(|l| l.timestamp += 3601);
+        client.execute(&admin, &0);
+
+        // Mark one as already cancelled
+        client.cancel(&admin, &1);
+
+        // Remaining: 1 pending
+        let cancelled = client.cancel_all(&admin);
+        assert_eq!(cancelled, 1);
+
+        let op0 = client.get_op(&0).unwrap();
+        assert!(op0.executed);
+
+        let op1 = client.get_op(&1).unwrap();
+        assert!(op1.cancelled);
+
+        let op2 = client.get_op(&2).unwrap();
+        assert!(op2.cancelled);
     }
 }
