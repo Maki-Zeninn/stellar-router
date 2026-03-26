@@ -240,7 +240,7 @@ impl RouterAccess {
     pub fn unblacklist(env: Env, caller: Address, target: Address) -> Result<(), AccessError> {
         caller.require_auth();
         Self::require_super_admin(&env, &caller)?;
-        env.storage().instance().set(&DataKey::Blacklisted(target), &false);
+        env.storage().instance().remove(&DataKey::Blacklisted(target));
         Ok(())
     }
 
@@ -510,6 +510,11 @@ mod tests {
         
         // Remove from blacklist
         client.unblacklist(&admin, &user);
+        let contract_id = client.address.clone();
+        let blacklist_key_present = env.as_contract(&contract_id, || {
+            env.storage().instance().has(&DataKey::Blacklisted(user.clone()))
+        });
+        assert!(!blacklist_key_present);
         assert!(!client.is_blacklisted(&user));
         
         // Now grant should succeed
