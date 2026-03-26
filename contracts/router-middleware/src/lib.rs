@@ -18,7 +18,7 @@ use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, 
 #[contracttype]
 pub enum DataKey {
     Admin,
-    RateLimit(Address),         // address -> RateLimitState
+    RateLimit(String, Address),  // (route, address) -> RateLimitState
     RouteConfig(String),        // route_name -> RouteConfig
     GlobalEnabled,
     TotalCalls,
@@ -186,7 +186,7 @@ impl RouterMiddleware {
                 let state: RateLimitState = env
                     .storage()
                     .instance()
-                    .get(&DataKey::RateLimit(caller.clone()))
+                    .get(&DataKey::RateLimit(route.clone(), caller.clone()))
                     .unwrap_or(RateLimitState {
                         calls_in_window: 0,
                         window_start: now,
@@ -201,7 +201,7 @@ impl RouterMiddleware {
                 }
 
                 env.storage().instance().set(
-                    &DataKey::RateLimit(caller.clone()),
+                    &DataKey::RateLimit(route.clone(), caller.clone()),
                     &RateLimitState {
                         calls_in_window: calls + 1,
                         window_start,
@@ -286,20 +286,21 @@ impl RouterMiddleware {
         env.storage().instance().get(&DataKey::TotalCalls).unwrap_or(0)
     }
 
-    /// Get rate limit state for a caller.
+    /// Get rate limit state for a caller on a specific route.
     ///
-    /// Returns the current [`RateLimitState`] for `caller`, which includes the
+    /// Returns the current [`RateLimitState`] for `caller` on `route`, which includes the
     /// number of calls made in the current window and when the window started.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
+    /// * `route` - The route name to look up.
     /// * `caller` - The address whose rate limit state to retrieve.
     ///
     /// # Returns
-    /// `Some(`[`RateLimitState`]`)` if the caller has made at least one call,
+    /// `Some(`[`RateLimitState`]`)` if the caller has made at least one call on this route,
     /// `None` otherwise.
-    pub fn rate_limit_state(env: Env, caller: Address) -> Option<RateLimitState> {
-        env.storage().instance().get(&DataKey::RateLimit(caller))
+    pub fn rate_limit_state(env: Env, route: String, caller: Address) -> Option<RateLimitState> {
+        env.storage().instance().get(&DataKey::RateLimit(route, caller))
     }
 
     /// Get config for a route.
@@ -466,6 +467,34 @@ mod tests {
         // post_call should succeed with both true and false outcomes
         client.post_call(&caller, &route, &true);
         client.post_call(&caller, &route, &false);
+    }
+
+    #[test]
+    fn test_rate_limit_isolated_per_route() {
+        let (env, admin, client) = setup();
+        let route_a = String::from_str(&env, "oracle/price");
+        let route_b = String::from_str(&env, "vault/deposit");
+        // route_a: 10 calls per minute, route_b: 5 calls per minute
+        client.configure_route(&admin, &route_a, &10, &60, &true);
+        client.configure_route(&admin, &route_b, &5, &60, &true);
+
+        let caller = Address::generate(&env);
+        // Make 4 calls on route_a — drains route_a counter to 4
+        for _ in 0..4 {
+            client.pre_call(&caller, &route_a);
+        }
+        // First call on route_b should succeed (independent counter starts at 0)
+        assert!(client.try_pre_call(&caller, &route_b).is_ok());
+        // Exhaust route_b (4 more calls → total 5 on route_b)
+        for _ in 0..4 {
+            client.pre_call(&caller, &route_b);
+        }
+        // route_b is now at its limit; route_a still has headroom
+        assert_eq!(
+            client.try_pre_call(&caller, &route_b),
+            Err(Ok(MiddlewareError::RateLimitExceeded))
+        );
+        assert!(client.try_pre_call(&caller, &route_a).is_ok());
     }
 
     #[test]
