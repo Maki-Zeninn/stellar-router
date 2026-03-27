@@ -11,7 +11,7 @@
 //! - Check role membership on-chain
 //! - Whitelist/blacklist individual callers
 
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, String};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, String, Symbol};
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -103,7 +103,11 @@ impl RouterAccess {
 
         env.storage()
             .instance()
-            .set(&DataKey::HasRole(role, target), &true);
+            .set(&DataKey::HasRole(role.clone(), target.clone()), &true);
+        env.events().publish(
+            (Symbol::new(&env, "role_granted"),),
+            (role, target),
+        );
         Ok(())
     }
 
@@ -139,7 +143,11 @@ impl RouterAccess {
 
         env.storage()
             .instance()
-            .remove(&DataKey::HasRole(role, target));
+            .remove(&DataKey::HasRole(role.clone(), target.clone()));
+        env.events().publish(
+            (Symbol::new(&env, "role_revoked"),),
+            (role, target),
+        );
         Ok(())
     }
 
@@ -217,7 +225,13 @@ impl RouterAccess {
             return Err(AccessError::CannotBlacklistAdmin);
         }
 
-        env.storage().instance().set(&DataKey::Blacklisted(target), &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::Blacklisted(target.clone()), &true);
+        env.events().publish(
+            (Symbol::new(&env, "address_blacklisted"),),
+            target,
+        );
         Ok(())
     }
 
@@ -240,7 +254,13 @@ impl RouterAccess {
     pub fn unblacklist(env: Env, caller: Address, target: Address) -> Result<(), AccessError> {
         caller.require_auth();
         Self::require_super_admin(&env, &caller)?;
-        env.storage().instance().remove(&DataKey::Blacklisted(target));
+        env.storage()
+            .instance()
+            .remove(&DataKey::Blacklisted(target.clone()));
+        env.events().publish(
+            (Symbol::new(&env, "address_unblacklisted"),),
+            target,
+        );
         Ok(())
     }
 
@@ -280,6 +300,10 @@ impl RouterAccess {
         current.require_auth();
         Self::require_super_admin(&env, &current)?;
         env.storage().instance().set(&DataKey::SuperAdmin, &new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "admin_transferred"),),
+            (current, new_admin),
+        );
         Ok(())
     }
 
@@ -355,7 +379,14 @@ impl RouterAccess {
 mod tests {
     extern crate std;
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env, String};
+    use soroban_sdk::{
+        testutils::{Address as _, Events},
+        vec,
+        Env,
+        IntoVal,
+        String,
+        Val,
+    };
 
     fn setup() -> (Env, Address, RouterAccessClient<'static>) {
         let env = Env::default();
@@ -377,6 +408,21 @@ mod tests {
     }
 
     #[test]
+    fn test_grant_role_emits_event() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let user = Address::generate(&env);
+
+        client.grant_role(&admin, &role, &user);
+
+        let event = env.events().all().last().unwrap().clone();
+        assert_eq!(event.0, client.address);
+        assert_eq!(event.1, vec![&env, Symbol::new(&env, "role_granted").into_val(&env)]);
+        let expected_data: Val = (role, user).into_val(&env);
+        assert_eq!(event.2, expected_data);
+    }
+
+    #[test]
     fn test_revoke_role() {
         let (env, admin, client) = setup();
         let role = String::from_str(&env, "operator");
@@ -384,6 +430,22 @@ mod tests {
         client.grant_role(&admin, &role, &user);
         client.revoke_role(&admin, &role, &user);
         assert!(!client.has_role(&role, &user));
+    }
+
+    #[test]
+    fn test_revoke_role_emits_event() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let user = Address::generate(&env);
+        client.grant_role(&admin, &role, &user);
+
+        client.revoke_role(&admin, &role, &user);
+
+        let event = env.events().all().last().unwrap().clone();
+        assert_eq!(event.0, client.address);
+        assert_eq!(event.1, vec![&env, Symbol::new(&env, "role_revoked").into_val(&env)]);
+        let expected_data: Val = (role, user).into_val(&env);
+        assert_eq!(event.2, expected_data);
     }
 
     #[test]
@@ -404,6 +466,23 @@ mod tests {
         client.blacklist(&admin, &user);
         let result = client.try_grant_role(&admin, &role, &user);
         assert_eq!(result, Err(Ok(AccessError::Blacklisted)));
+    }
+
+    #[test]
+    fn test_blacklist_emits_event() {
+        let (env, admin, client) = setup();
+        let user = Address::generate(&env);
+
+        client.blacklist(&admin, &user);
+
+        let event = env.events().all().last().unwrap().clone();
+        assert_eq!(event.0, client.address);
+        assert_eq!(
+            event.1,
+            vec![&env, Symbol::new(&env, "address_blacklisted").into_val(&env)]
+        );
+        let expected_data: Val = user.into_val(&env);
+        assert_eq!(event.2, expected_data);
     }
 
     #[test]
@@ -440,6 +519,23 @@ mod tests {
         let new_admin = Address::generate(&env);
         client.transfer_super_admin(&admin, &new_admin);
         assert_eq!(client.super_admin(), new_admin);
+    }
+
+    #[test]
+    fn test_transfer_super_admin_emits_event() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        client.transfer_super_admin(&admin, &new_admin);
+
+        let event = env.events().all().last().unwrap().clone();
+        assert_eq!(event.0, client.address);
+        assert_eq!(
+            event.1,
+            vec![&env, Symbol::new(&env, "admin_transferred").into_val(&env)]
+        );
+        let expected_data: Val = (admin, new_admin).into_val(&env);
+        assert_eq!(event.2, expected_data);
     }
 
     #[test]
@@ -520,5 +616,23 @@ mod tests {
         // Now grant should succeed
         client.grant_role(&admin, &role, &user);
         assert!(client.has_role(&role, &user));
+    }
+
+    #[test]
+    fn test_unblacklist_emits_event() {
+        let (env, admin, client) = setup();
+        let user = Address::generate(&env);
+        client.blacklist(&admin, &user);
+
+        client.unblacklist(&admin, &user);
+
+        let event = env.events().all().last().unwrap().clone();
+        assert_eq!(event.0, client.address);
+        assert_eq!(
+            event.1,
+            vec![&env, Symbol::new(&env, "address_unblacklisted").into_val(&env)]
+        );
+        let expected_data: Val = user.into_val(&env);
+        assert_eq!(event.2, expected_data);
     }
 }
