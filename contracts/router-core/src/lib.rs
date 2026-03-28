@@ -26,6 +26,7 @@ pub enum DataKey {
     RouteNames,
     Paused,
     TotalRouted,
+    Alias(String),    // alias -> original_name
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -235,7 +236,8 @@ impl RouterCore {
     ///
     /// Looks up the contract address registered under `name`, validates that
     /// neither the router nor the individual route is paused, increments the
-    /// total-routed counter, and emits a `routed` event.
+    /// total-routed counter, and emits a `routed` event. If `name` is an alias,
+    /// resolves to the original route.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -258,10 +260,17 @@ impl RouterCore {
             return Err(RouterError::RouterPaused);
         }
 
+        // Resolve alias if present
+        let resolved_name = if let Some(original) = env.storage().instance().get::<DataKey, String>(&DataKey::Alias(name.clone())) {
+            original
+        } else {
+            name.clone()
+        };
+
         let entry: RouteEntry = env
             .storage()
             .instance()
-            .get(&DataKey::Route(name.clone()))
+            .get(&DataKey::Route(resolved_name.clone()))
             .ok_or(RouterError::RouteNotFound)?;
 
         if entry.paused {
@@ -385,6 +394,92 @@ impl RouterCore {
     /// The total number of times a route has been resolved.
     pub fn total_routed(env: Env) -> u64 {
         env.storage().instance().get(&DataKey::TotalRouted).unwrap_or(0)
+    }
+
+    /// Create an alias for an existing route.
+    ///
+    /// Associates `alias_name` with the same address as `existing_name`.
+    /// When `alias_name` is resolved, it returns the address of `existing_name`.
+    /// Caller must be the admin.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `caller` - The address initiating the call; must be the admin.
+    /// * `existing_name` - The name of the route to alias.
+    /// * `alias_name` - The new alias name.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`RouterError::Unauthorized`] — if `caller` is not the admin.
+    /// * [`RouterError::RouteNotFound`] — if `existing_name` does not exist.
+    /// * [`RouterError::RouteAlreadyExists`] — if `alias_name` already exists.
+    pub fn add_alias(
+        env: Env,
+        caller: Address,
+        existing_name: String,
+        alias_name: String,
+    ) -> Result<(), RouterError> {
+        caller.require_auth();
+        Self::require_admin(&env, &caller)?;
+
+        // Verify existing route exists
+        if !env.storage().instance().has(&DataKey::Route(existing_name.clone())) {
+            return Err(RouterError::RouteNotFound);
+        }
+
+        // Check alias doesn't already exist as route or alias
+        if env.storage().instance().has(&DataKey::Route(alias_name.clone())) {
+            return Err(RouterError::RouteAlreadyExists);
+        }
+        if env.storage().instance().has(&DataKey::Alias(alias_name.clone())) {
+            return Err(RouterError::RouteAlreadyExists);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Alias(alias_name.clone()), &existing_name);
+
+        env.events().publish(
+            (Symbol::new(&env, "alias_added"),),
+            (existing_name, alias_name),
+        );
+
+        Ok(())
+    }
+
+    /// Remove an alias.
+    ///
+    /// Deletes the alias mapping for `alias_name`. Caller must be the admin.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `caller` - The address initiating the call; must be the admin.
+    /// * `alias_name` - The alias to remove.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`RouterError::Unauthorized`] — if `caller` is not the admin.
+    /// * [`RouterError::RouteNotFound`] — if `alias_name` does not exist.
+    pub fn remove_alias(env: Env, caller: Address, alias_name: String) -> Result<(), RouterError> {
+        caller.require_auth();
+        Self::require_admin(&env, &caller)?;
+
+        if !env.storage().instance().has(&DataKey::Alias(alias_name.clone())) {
+            return Err(RouterError::RouteNotFound);
+        }
+
+        env.storage().instance().remove(&DataKey::Alias(alias_name.clone()));
+
+        env.events().publish(
+            (Symbol::new(&env, "alias_removed"),),
+            alias_name,
+        );
+
+        Ok(())
     }
 
     /// Get current admin.
@@ -712,5 +807,51 @@ mod tests {
         assert_eq!(routes.len(), 2);
         assert!(routes.contains(&oracle));
         assert!(routes.contains(&vault));
+    }
+
+    #[test]
+    fn test_add_alias_resolves_to_original() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let alias = String::from_str(&env, "oracle_v1");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr);
+        client.add_alias(&admin, &name, &alias);
+        assert_eq!(client.resolve(&alias), addr);
+    }
+
+    #[test]
+    fn test_remove_alias() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let alias = String::from_str(&env, "oracle_v1");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr);
+        client.add_alias(&admin, &name, &alias);
+        client.remove_alias(&admin, &alias);
+        let result = client.try_resolve(&alias);
+        assert_eq!(result, Err(Ok(RouterError::RouteNotFound)));
+    }
+
+    #[test]
+    fn test_alias_for_nonexistent_route_fails() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let alias = String::from_str(&env, "oracle_v1");
+        let result = client.try_add_alias(&admin, &name, &alias);
+        assert_eq!(result, Err(Ok(RouterError::RouteNotFound)));
+    }
+
+    #[test]
+    fn test_alias_name_cannot_be_existing_route() {
+        let (env, admin, client) = setup();
+        let name1 = String::from_str(&env, "oracle");
+        let name2 = String::from_str(&env, "vault");
+        let addr1 = Address::generate(&env);
+        let addr2 = Address::generate(&env);
+        client.register_route(&admin, &name1, &addr1);
+        client.register_route(&admin, &name2, &addr2);
+        let result = client.try_add_alias(&admin, &name1, &name2);
+        assert_eq!(result, Err(Ok(RouterError::RouteAlreadyExists)));
     }
 }
