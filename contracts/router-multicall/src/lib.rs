@@ -128,6 +128,9 @@ impl RouterMulticall {
     ///   Can be any address, not restricted to admin.
     /// * `calls` - A list of [`CallDescriptor`]s describing each call to make.
     ///   Must be non-empty and no larger than the configured `max_batch_size`.
+    /// * `simulate` - If `true`, executes in dry-run mode: all calls are validated
+    ///   but no state changes are committed. Returns the same [`BatchSummary`]
+    ///   as a real execution would.
     ///
     /// # Returns
     /// A [`BatchSummary`] with the total, succeeded, and failed call counts.
@@ -141,6 +144,7 @@ impl RouterMulticall {
         env: Env,
         caller: Address,
         calls: Vec<CallDescriptor>,
+        simulate: bool,
     ) -> Result<BatchSummary, MulticallError> {
         caller.require_auth();
 
@@ -184,13 +188,15 @@ impl RouterMulticall {
             );
         }
 
-        // Increment batch counter
-        let batches: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::TotalBatches)
-            .unwrap_or(0);
-        env.storage().instance().set(&DataKey::TotalBatches, &(batches + 1));
+        // Only increment batch counter if not simulating
+        if !simulate {
+            let batches: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey::TotalBatches)
+                .unwrap_or(0);
+            env.storage().instance().set(&DataKey::TotalBatches, &(batches + 1));
+        }
 
         Ok(BatchSummary {
             total,
@@ -429,7 +435,7 @@ mod tests {
             required: false,
         });
 
-        let summary = client.execute_batch(&caller, &calls);
+        let summary = client.execute_batch(&caller, &calls, &false);
         assert_eq!(summary.total, 2);
         assert_eq!(summary.succeeded, 2);
         assert_eq!(summary.failed, 0);
@@ -462,7 +468,7 @@ mod tests {
             required: false,
         });
 
-        let summary = client.execute_batch(&caller, &calls);
+        let summary = client.execute_batch(&caller, &calls, &false);
         assert_eq!(summary.total, 3);
         assert_eq!(summary.succeeded, 2);
         assert_eq!(summary.failed, 1);
@@ -495,7 +501,7 @@ mod tests {
             required: false,
         });
 
-        let result = client.try_execute_batch(&caller, &calls);
+        let result = client.try_execute_batch(&caller, &calls, &false);
         assert_eq!(result, Err(Ok(MulticallError::RequiredCallFailed)));
         // Total batches should NOT increment if it failed
         assert_eq!(client.total_batches(), 0);
@@ -538,5 +544,74 @@ mod tests {
         // new admin should be able to update config
         assert!(client.try_set_max_batch_size(&new_admin, &5).is_ok());
         assert_eq!(client.max_batch_size(), 5);
+    }
+
+    #[test]
+    fn test_simulate_mode_does_not_increment_counter() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: true,
+        });
+
+        let summary = client.execute_batch(&caller, &calls, &true);
+        assert_eq!(summary.total, 1);
+        assert_eq!(summary.succeeded, 1);
+        assert_eq!(summary.failed, 0);
+        // Batch counter should NOT increment in simulate mode
+        assert_eq!(client.total_batches(), 0);
+    }
+
+    #[test]
+    fn test_simulate_mode_returns_correct_summary() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: true,
+        });
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "fail"),
+            required: false,
+        });
+
+        let summary = client.execute_batch(&caller, &calls, &true);
+        assert_eq!(summary.total, 2);
+        assert_eq!(summary.succeeded, 1);
+        assert_eq!(summary.failed, 1);
+    }
+
+    #[test]
+    fn test_optional_panic_increments_failure_count() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: true,
+        });
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "fail"),
+            required: false,
+        });
+
+        let summary = client.execute_batch(&caller, &calls, &false);
+        assert_eq!(summary.total, 2);
+        assert_eq!(summary.succeeded, 1);
+        assert_eq!(summary.failed, 1);
     }
 }
