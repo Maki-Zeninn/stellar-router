@@ -98,7 +98,7 @@ impl RouterCore {
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `caller` - The address initiating the call; must be the admin.
-    /// * `name` - A unique human-readable identifier for the route.
+    /// * `name` - A unique human-readable identifier for the route. Must not be empty or whitespace-only.
     /// * `address` - The contract address this route resolves to.
     ///
     /// # Returns
@@ -116,6 +116,10 @@ impl RouterCore {
     ) -> Result<(), RouterError> {
         caller.require_auth();
         Self::require_admin(&env, &caller)?;
+
+        if Self::is_empty_or_whitespace(&name) {
+            return Err(RouterError::RouteNotFound);
+        }
 
         if env.storage().instance().has(&DataKey::Route(name.clone())) {
             return Err(RouterError::RouteAlreadyExists);
@@ -464,6 +468,10 @@ impl RouterCore {
             .get(&DataKey::RouteNames)
             .unwrap_or(Vec::new(env))
     }
+
+    fn is_empty_or_whitespace(name: &String) -> bool {
+        name.len() == 0 || name.as_bytes().iter().all(|&b| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r')
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -712,5 +720,23 @@ mod tests {
         assert_eq!(routes.len(), 2);
         assert!(routes.contains(&oracle));
         assert!(routes.contains(&vault));
+    }
+
+    #[test]
+    fn test_register_empty_route_name_fails() {
+        let (env, admin, client) = setup();
+        let empty_name = String::from_str(&env, "");
+        let addr = Address::generate(&env);
+        let result = client.try_register_route(&admin, &empty_name, &addr);
+        assert_eq!(result, Err(Ok(RouterError::RouteNotFound)));
+    }
+
+    #[test]
+    fn test_register_whitespace_route_name_fails() {
+        let (env, admin, client) = setup();
+        let whitespace_name = String::from_str(&env, "   ");
+        let addr = Address::generate(&env);
+        let result = client.try_register_route(&admin, &whitespace_name, &addr);
+        assert_eq!(result, Err(Ok(RouterError::RouteNotFound)));
     }
 }
