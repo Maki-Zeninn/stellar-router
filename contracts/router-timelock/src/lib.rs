@@ -236,7 +236,8 @@ impl RouterTimelock {
     /// Marks the operation as cancelled, preventing future execution. The
     /// operation must not have been previously executed or cancelled. Caller
     /// must be the admin. Dependencies are cleared but can be cancelled
-    /// independently.
+    /// independently. The operation's state is fully cleared to prevent
+    /// re-execution if re-queued.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -709,5 +710,55 @@ mod tests {
 
         // op0 can still be cancelled independently
         assert!(client.try_cancel(&admin, &op0).is_ok());
+    }
+
+    #[test]
+    fn test_requeued_operation_has_fresh_eta() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "upgrade oracle to v2");
+        let deps = soroban_sdk::Vec::new(&env);
+
+        // Queue operation with delay 86400
+        let op_id_1 = client.queue(&admin, &desc, &target, &86400, &deps);
+        let op_1 = client.get_op(&op_id_1).unwrap();
+        let eta_1 = op_1.eta;
+
+        // Cancel it immediately
+        client.cancel(&admin, &op_id_1);
+
+        // Advance time by 1 second
+        env.ledger().with_mut(|l| l.timestamp += 1);
+
+        // Re-queue with identical description and target
+        let op_id_2 = client.queue(&admin, &desc, &target, &86400, &deps);
+        let op_2 = client.get_op(&op_id_2).unwrap();
+        let eta_2 = op_2.eta;
+
+        // New operation should have a different ID
+        assert_ne!(op_id_1, op_id_2);
+
+        // New operation should have a fresh ETA (1 second later)
+        assert_eq!(eta_2, eta_1 + 1);
+
+        // Verify old operation is still cancelled
+        let old_op = client.get_op(&op_id_1).unwrap();
+        assert!(old_op.cancelled);
+
+        // Verify new operation is not cancelled
+        assert!(!op_2.cancelled);
+
+        // Try to execute old operation — should fail
+        env.ledger().with_mut(|l| l.timestamp += 86400);
+        let result = client.try_execute(&admin, &op_id_1);
+        assert_eq!(result, Err(Ok(TimelockError::AlreadyCancelled)));
+
+        // New operation should still be too early (needs 86400 from its own queue time)
+        let result = client.try_execute(&admin, &op_id_2);
+        assert_eq!(result, Err(Ok(TimelockError::TooEarly)));
+
+        // Advance to new operation's ETA
+        env.ledger().with_mut(|l| l.timestamp += 1);
+        assert!(client.try_execute(&admin, &op_id_2).is_ok());
     }
 }
