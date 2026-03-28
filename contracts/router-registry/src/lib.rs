@@ -145,7 +145,12 @@ impl RouterRegistry {
         // Update version list
         let mut versions = Self::get_versions_list(&env, &name);
         versions.push_back(version);
-        env.storage().instance().set(&DataKey::Versions(name), &versions);
+        env.storage().instance().set(&DataKey::Versions(name.clone()), &versions);
+
+        env.events().publish(
+            (Symbol::new(&env, "contract_registered"),),
+            (name, version),
+        );
 
         Ok(())
     }
@@ -307,7 +312,11 @@ impl RouterRegistry {
         }
 
         entry.deprecated = true;
-        env.storage().instance().set(&DataKey::Entry(name, version), &entry);
+        env.storage().instance().set(&DataKey::Entry(name.clone(), version), &entry);
+        env.events().publish(
+            (Symbol::new(&env, "contract_deprecated"),),
+            (name, version),
+        );
         Ok(())
     }
 
@@ -601,6 +610,43 @@ mod tests {
         let new_admin = Address::generate(&env);
         client.transfer_admin(&admin, &new_admin);
         assert_eq!(client.admin(), new_admin);
+    }
+
+    #[test]
+    fn test_register_emits_event() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register(&admin, &name, &addr, &1);
+
+        let event = env.events().all().last().unwrap().clone();
+        assert_eq!(event.0, client.address);
+        assert_eq!(
+            event.1,
+            vec![&env, Symbol::new(&env, "contract_registered").into_val(&env)]
+        );
+        let (n, v): (String, u32) = event.2.into_val(&env);
+        assert_eq!(n, name);
+        assert_eq!(v, 1u32);
+    }
+
+    #[test]
+    fn test_deprecate_emits_event() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register(&admin, &name, &addr, &1);
+        client.deprecate(&admin, &name, &1);
+
+        let event = env.events().all().last().unwrap().clone();
+        assert_eq!(event.0, client.address);
+        assert_eq!(
+            event.1,
+            vec![&env, Symbol::new(&env, "contract_deprecated").into_val(&env)]
+        );
+        let (n, v): (String, u32) = event.2.into_val(&env);
+        assert_eq!(n, name);
+        assert_eq!(v, 1u32);
     }
 
     #[test]
