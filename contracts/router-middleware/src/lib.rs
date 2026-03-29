@@ -571,10 +571,22 @@ impl RouterMiddleware {
     /// # Errors
     /// * [`MiddlewareError::Unauthorized`] — if `current` is not the admin.
     /// * [`MiddlewareError::NotInitialized`] — if the contract has not been initialized.
-    pub fn transfer_admin(env: Env, current: Address, new_admin: Address) -> Result<(), MiddlewareError> {
+    pub fn transfer_admin(
+        env: Env,
+        current: Address,
+        new_admin: Address,
+    ) -> Result<(), MiddlewareError> {
         current.require_auth();
         Self::require_admin(&env, &current)?;
+
         env.storage().instance().set(&DataKey::Admin, &new_admin);
+
+        // ← FIXED: Emit event to match other contracts (router-access, router-core, etc.)
+        env.events().publish(
+            (Symbol::new(&env, "admin_transferred"),),
+            (current.clone(), new_admin.clone()),
+        );
+
         Ok(())
     }
 
@@ -862,3 +874,37 @@ mod tests {
         let result = client.try_reset_circuit_breaker(&attacker, &route);
         assert_eq!(result, Err(Ok(MiddlewareError::Unauthorized)));
     }
+
+    #[test]
+    fn test_transfer_admin_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, RouterMiddleware);
+        let client = RouterMiddlewareClient::new(&env, &contract_id);
+
+        let old_admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        // Initialize with old_admin
+        client.initialize(&old_admin);
+
+        // Perform transfer
+        client.transfer_admin(&old_admin, &new_admin);
+
+        // Verify event was emitted
+        let events = env.events().all();
+        let last_event = events.last().unwrap();
+
+        assert_eq!(last_event.0, contract_id); // contract address as publisher
+
+        // Topic should be "admin_transferred"
+        let topic: Symbol = last_event.1.get(0).unwrap().into_val(&env);
+        assert_eq!(topic, Symbol::new(&env, "admin_transferred"));
+
+        // Data should contain (old_admin, new_admin)
+        let (emitted_old, emitted_new): (Address, Address) = last_event.2.into_val(&env);
+        assert_eq!(emitted_old, old_admin);
+        assert_eq!(emitted_new, new_admin);
+    }
+}

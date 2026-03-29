@@ -12,6 +12,7 @@
 //! - Admin-controlled with ownership transfer
 
 use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, String, Symbol, Vec};
+use alloc::string::ToString;
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
