@@ -17,7 +17,6 @@ pub enum DataKey {
     RoleMembers(String),        // role -> Vec<Address>
     AddressRoles(Address),      // address -> Vec<String>
     RoleExpiry(String, Address),
-    RoleExpiry(Address, Symbol), // (role, address) -> u64 (ledger timestamp)
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -51,22 +50,19 @@ impl RouterAccess {
     }
 
     /// Grant a role to an address.
-    pub fn grant_role(env: Env, admin: Address, account: Address, role: Symbol, expires_in: Option<u64>) {
+    pub fn grant_role(env: Env, admin: Address, account: Address, role: String, expires_in: Option<u64>) {
         admin.require_auth();
-
-        // Optional: add admin check via storage if needed
 
         let expiry_timestamp = match expires_in {
             Some(seconds) => env.ledger().timestamp() + seconds,
-            None => u64::MAX, // No expiry (permanent role)
+            None => u64::MAX,
         };
 
-        let key = DataKey::RoleExpiry(account.clone(), role.clone());
+        let key = DataKey::RoleExpiry(role.clone(), account.clone());
         env.storage().instance().set(&key, &expiry_timestamp);
 
-        // Optional: emit event
         env.events().publish(
-            (symbol_short!("role_grant"),),
+            (Symbol::new(&env, "role_grant"),),
             (account, role, expiry_timestamp),
         );
     }
@@ -81,7 +77,7 @@ impl RouterAccess {
         caller.require_auth();
         Self::require_role_manager(&env, &caller, &role)?;
 
-        if !Self::has_role_internal(&env, &role, &target) {
+        if !Self::has_role_internal(&env, &target, &role) {
             return Err(AccessError::RoleNotFound);
         }
 
@@ -113,30 +109,21 @@ impl RouterAccess {
     }
 
     /// Check if an address has a role (and it has not expired).
-    pub fn has_role(env: Env, account: Address, role: Symbol) -> bool {
-        Self::has_role_internal(&env, &account, role)
+    pub fn has_role(env: Env, account: Address, role: String) -> bool {
+        Self::has_role_internal(&env, &account, &role)
     }
 
-    /// Internal helper — FIXED for #125
-    fn has_role_internal(env: &Env, account: &Address, role: Symbol) -> bool {
-        // Check blacklist first
+    fn has_role_internal(env: &Env, account: &Address, role: &String) -> bool {
         if Self::is_blacklisted_internal(env, account) {
             return false;
         }
 
-        // Use RoleExpiry key with (Address, Symbol)
-        let key = DataKey::RoleExpiry(account.clone(), role.clone());
+        let key = DataKey::RoleExpiry(role.clone(), account.clone());
         let expires_at: Option<u64> = env.storage().instance().get(&key);
 
         match expires_at {
-            Some(expires_at) => {
-                let current_time = env.ledger().timestamp();   // ← FIXED: timestamp() instead of sequence()
-                if current_time >= expires_at {
-                    return false; // Role has expired
-                }
-                true
-            }
-            None => false, // No role assigned
+            Some(expires_at) => env.ledger().timestamp() < expires_at,
+            None => false,
         }
     }
 
@@ -162,7 +149,8 @@ impl RouterAccess {
     ) -> Result<(), AccessError> {
         caller.require_auth();
         Self::require_super_admin(&env, &caller)?;
-        env.storage().instance().set(&DataKey::RoleAdmin(role), &admin);
+        env.storage().instance().set(&DataKey::RoleAdmin(role.clone()), &admin);
+        env.events().publish((Symbol::new(&env, "role_admin_set"),), (role, admin));
         Ok(())
     }
 
@@ -307,11 +295,11 @@ mod tests {
     extern crate std;
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Ledger},
-        vec, Env, Symbol,
+        testutils::{Address as _, Events, Ledger},
+        Env, IntoVal, Symbol,
     };
 
-    fn setup() -> (Env, Address, RouterAccessClient) {
+    fn setup() -> (Env, Address, RouterAccessClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, RouterAccess);
@@ -326,30 +314,43 @@ mod tests {
     #[test]
     fn test_expired_role_not_recognized() {
         let (env, admin, client) = setup();
-        let role = Symbol::new(&env, "operator");
+        let role = String::from_str(&env, "operator");
         let user = Address::generate(&env);
 
         client.grant_role(&admin, &user, &role, &Some(10));
 
-        // Advance time past expiry
         env.ledger().set_timestamp(env.ledger().timestamp() + 20);
 
         assert!(!client.has_role(&user, &role));
     }
 
-    // NEW TEST requested by the issue
     #[test]
     fn test_role_expires_correctly_with_timestamp() {
         let (env, admin, client) = setup();
-        let role = Symbol::new(&env, "operator");
+        let role = String::from_str(&env, "operator");
         let user = Address::generate(&env);
 
-        // Grant role that expires 1 second ago
         client.grant_role(&admin, &user, &role, &Some(1));
 
-        // Advance ledger time
         env.ledger().set_timestamp(env.ledger().timestamp() + 5);
 
         assert!(!client.has_role(&user, &role));
+    }
+
+    #[test]
+    fn test_set_role_admin_emits_event() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let new_role_admin = Address::generate(&env);
+
+        client.set_role_admin(&admin, &role, &new_role_admin);
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        let topic: Symbol = last.1.get(0).unwrap().into_val(&env);
+        assert_eq!(topic, Symbol::new(&env, "role_admin_set"));
+        let (emitted_role, emitted_admin): (String, Address) = last.2.into_val(&env);
+        assert_eq!(emitted_role, role);
+        assert_eq!(emitted_admin, new_role_admin);
     }
 }
