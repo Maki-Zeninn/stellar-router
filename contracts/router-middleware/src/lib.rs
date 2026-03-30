@@ -241,7 +241,9 @@ impl RouterMiddleware {
 
                     if cb_state.is_open {
                         let now = env.ledger().timestamp();
-                        if now < cb_state.opened_at + config.recovery_window_seconds {
+                        let recovers = config.recovery_window_seconds > 0
+                            && now >= cb_state.opened_at + config.recovery_window_seconds;
+                        if !recovers {
                             return Err(MiddlewareError::CircuitOpen);
                         }
                     }
@@ -408,6 +410,21 @@ impl RouterMiddleware {
                     env.storage()
                         .instance()
                         .set(&DataKey::CircuitBreaker(route), &cb_state);
+                }
+            }
+        } else {
+            if let Some(config) = env.storage().instance()
+                .get::<DataKey, RouteConfig>(&DataKey::RouteConfig(route.clone()))
+            {
+                if config.failure_threshold > 0 {
+                    let mut cb_state: CircuitBreakerState = env.storage().instance()
+                        .get(&DataKey::CircuitBreaker(route.clone()))
+                        .unwrap_or(CircuitBreakerState { failure_count: 0, opened_at: 0, is_open: false });
+
+                    if !cb_state.is_open && cb_state.failure_count > 0 {
+                        cb_state.failure_count = 0;
+                        env.storage().instance().set(&DataKey::CircuitBreaker(route), &cb_state);
+                    }
                 }
             }
         }
@@ -905,5 +922,41 @@ mod tests {
         let (emitted_old, emitted_new): (Address, Address) = last_event.2.into_val(&env);
         assert_eq!(emitted_old, old_admin);
         assert_eq!(emitted_new, new_admin);
+    }
+
+    #[test]
+    fn test_success_resets_failure_count() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        // threshold=3, so 2 failures then a success then 2 more should NOT trip
+        client.configure_route(&admin, &route, &0, &0, &true, &3, &0, &0);
+        let caller = Address::generate(&env);
+
+        client.post_call(&caller, &route, &false); // failure_count = 1
+        client.post_call(&caller, &route, &false); // failure_count = 2
+        client.post_call(&caller, &route, &true);  // success → reset to 0
+        client.post_call(&caller, &route, &false); // failure_count = 1
+        client.post_call(&caller, &route, &false); // failure_count = 2
+
+        // Circuit should still be closed (threshold=3, count=2)
+        let result = client.try_pre_call(&caller, &route);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_open_circuit_not_reset_by_success() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &0, &0);
+        let caller = Address::generate(&env);
+
+        client.post_call(&caller, &route, &false); // trips circuit (threshold=1)
+        client.post_call(&caller, &route, &true);  // success — must NOT reset is_open
+
+        // Circuit must still be open
+        assert_eq!(
+            client.try_pre_call(&caller, &route),
+            Err(Ok(MiddlewareError::CircuitOpen))
+        );
     }
 }
