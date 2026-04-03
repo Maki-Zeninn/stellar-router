@@ -228,6 +228,10 @@ impl RouterTimelock {
             return Err(TimelockError::FastTrackDisabled);
         }
 
+        if description.len() == 0 {
+            return Err(TimelockError::InvalidDescription);
+        }
+
         let min_delay: u64 = env
             .storage()
             .instance()
@@ -1119,6 +1123,28 @@ mod tests {
             client.try_queue_critical(&admin, &desc, &target, &100),
             Err(Ok(TimelockError::InvalidDelay))
         );
+    }
+
+    #[test]
+    fn test_queue_critical_empty_description_fails() {
+        let (env, admin, client, _, _, _) = setup_with_council();
+        let target = Address::generate(&env);
+        let empty = String::from_str(&env, "");
+        assert_eq!(
+            client.try_queue_critical(&admin, &empty, &target, &3600),
+            Err(Ok(TimelockError::InvalidDescription))
+        );
+    }
+
+    #[test]
+    fn test_queue_critical_valid_description_succeeds() {
+        let (env, admin, client, _, _, _) = setup_with_council();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "fast-track hotfix");
+        let op_id = client.queue_critical(&admin, &desc, &target, &3600);
+        let op = client.get_op(&op_id).unwrap();
+        assert_eq!(op.description, desc);
+        assert!(op.is_critical);
     }
 
     // ── approve_critical ──────────────────────────────────────────────────────
