@@ -1221,6 +1221,113 @@ mod tests {
     }
 
     #[test]
+    fn test_update_metadata_clears_when_none() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        let metadata = Some(RouteMetadata {
+            description: String::from_str(&env, "Configured"),
+            tags: vec![&env, String::from_str(&env, "core")],
+            owner: None,
+        });
+
+        client.register_route(&admin, &name, &addr, &metadata);
+        assert_eq!(client.get_metadata(&name), metadata);
+
+        client.update_metadata(&admin, &name, &None);
+        assert_eq!(client.get_metadata(&name), None);
+    }
+
+    #[test]
+    fn test_update_metadata_description_at_limit() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        let metadata = Some(RouteMetadata {
+            description: String::from_str(&env, &"a".repeat(256)),
+            tags: vec![&env, String::from_str(&env, "stable")],
+            owner: None,
+        });
+
+        assert!(client.try_update_metadata(&admin, &name, &metadata).is_ok());
+        assert_eq!(client.get_metadata(&name), metadata);
+    }
+
+    #[test]
+    fn test_update_metadata_description_over_limit() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        let metadata = Some(RouteMetadata {
+            description: String::from_str(&env, &"a".repeat(257)),
+            tags: vec![&env, String::from_str(&env, "stable")],
+            owner: None,
+        });
+
+        assert_eq!(
+            client.try_update_metadata(&admin, &name, &metadata),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(client.get_metadata(&name), None);
+    }
+
+    #[test]
+    fn test_update_metadata_tags_at_limit() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        let metadata = Some(RouteMetadata {
+            description: String::from_str(&env, "Configured"),
+            tags: vec![
+                &env,
+                String::from_str(&env, "a"),
+                String::from_str(&env, "b"),
+                String::from_str(&env, "c"),
+                String::from_str(&env, "d"),
+                String::from_str(&env, "e"),
+            ],
+            owner: None,
+        });
+
+        assert!(client.try_update_metadata(&admin, &name, &metadata).is_ok());
+        assert_eq!(client.get_metadata(&name), metadata);
+    }
+
+    #[test]
+    fn test_update_metadata_tags_over_limit() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        let metadata = Some(RouteMetadata {
+            description: String::from_str(&env, "Configured"),
+            tags: vec![
+                &env,
+                String::from_str(&env, "a"),
+                String::from_str(&env, "b"),
+                String::from_str(&env, "c"),
+                String::from_str(&env, "d"),
+                String::from_str(&env, "e"),
+                String::from_str(&env, "f"),
+            ],
+            owner: None,
+        });
+
+        assert_eq!(
+            client.try_update_metadata(&admin, &name, &metadata),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(client.get_metadata(&name), None);
+    }
+
+    #[test]
     fn test_get_metadata_nonexistent_route() {
         let (env, _admin, client) = setup();
         let name = String::from_str(&env, "nonexistent");
