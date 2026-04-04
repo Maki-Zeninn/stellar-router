@@ -60,8 +60,16 @@ impl RouterAccess {
         account: Address,
         role: String,
         expires_in: Option<u64>,
-    ) {
+    ) -> Result<(), AccessError> {
         admin.require_auth();
+        Self::require_role_manager(&env, &admin, &role)?;
+
+        if Self::is_blacklisted_internal(&env, &account) {
+            return Err(AccessError::Blacklisted);
+        }
+        if Self::has_role_internal(&env, &account, &role) {
+            return Err(AccessError::AlreadyHasRole);
+        }
 
         let expiry_timestamp = match expires_in {
             Some(seconds) => env.ledger().timestamp() + seconds,
@@ -75,6 +83,7 @@ impl RouterAccess {
             (Symbol::new(&env, "role_grant"),),
             (account, role, expiry_timestamp),
         );
+        Ok(())
     }
 
     /// Removes `role` from `target`.
@@ -360,6 +369,41 @@ mod tests {
         env.ledger().set_timestamp(env.ledger().timestamp() + 5);
 
         assert!(!client.has_role(&user, &role));
+    }
+
+    #[test]
+    fn test_grant_role_blacklisted_account_fails() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let user = Address::generate(&env);
+
+        client.blacklist(&admin, &user);
+
+        let result = client.try_grant_role(&admin, &user, &role, &Some(10));
+        assert_eq!(result, Err(Ok(AccessError::Blacklisted)));
+    }
+
+    #[test]
+    fn test_grant_role_already_has_role_fails() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let user = Address::generate(&env);
+
+        client.grant_role(&admin, &user, &role, &Some(10));
+
+        let result = client.try_grant_role(&admin, &user, &role, &Some(20));
+        assert_eq!(result, Err(Ok(AccessError::AlreadyHasRole)));
+    }
+
+    #[test]
+    fn test_grant_role_returns_error_on_unauthorized() {
+        let (env, _admin, client) = setup();
+        let attacker = Address::generate(&env);
+        let user = Address::generate(&env);
+        let role = String::from_str(&env, "operator");
+
+        let result = client.try_grant_role(&attacker, &user, &role, &Some(10));
+        assert_eq!(result, Err(Ok(AccessError::Unauthorized)));
     }
 
     #[test]
