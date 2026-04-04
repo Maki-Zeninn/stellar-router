@@ -476,13 +476,15 @@ impl RouterCore {
             }
         }
 
-        entry.metadata = metadata;
+        entry.metadata = metadata.clone();
         env.storage()
             .instance()
             .set(&DataKey::Route(name.clone()), &entry);
 
-        env.events()
-            .publish((Symbol::new(&env, "metadata_updated"),), name.clone());
+        env.events().publish(
+            (Symbol::new(&env, "metadata_updated"),),
+            (name.clone(), metadata),
+        );
 
         Ok(())
     }
@@ -1218,6 +1220,34 @@ mod tests {
 
         let retrieved = client.get_metadata(&name);
         assert_eq!(retrieved, metadata);
+    }
+
+    #[test]
+    fn test_metadata_updated_event_includes_metadata() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        let description = String::from_str(&env, "Updated oracle");
+        let tags = vec![&env, String::from_str(&env, "v2")];
+        let metadata = Some(RouteMetadata {
+            description,
+            tags,
+            owner: Some(admin.clone()),
+        });
+
+        client.register_route(&admin, &name, &addr, &None);
+        client.update_metadata(&admin, &name, &metadata);
+
+        let event = env.events().all().last().unwrap().clone();
+        assert_eq!(event.0, client.address);
+        assert_eq!(
+            event.1,
+            vec![&env, Symbol::new(&env, "metadata_updated").into_val(&env)]
+        );
+
+        let (emitted_name, emitted_metadata): (String, Option<RouteMetadata>) = event.2.into_val(&env);
+        assert_eq!(emitted_name, name);
+        assert_eq!(emitted_metadata, metadata);
     }
 
     #[test]
