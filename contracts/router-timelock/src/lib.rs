@@ -642,6 +642,20 @@ impl RouterTimelock {
         Ok(())
     }
 
+    /// Returns whether the fast-track execution path is currently enabled.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// `true` if fast-track is enabled, `false` otherwise.
+    pub fn get_fast_track_enabled(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::FastTrackEnabled)
+            .unwrap_or(false)
+    }
+
     /// Get an operation by ID.
     ///
     /// # Arguments
@@ -1270,6 +1284,29 @@ mod tests {
             client.try_set_fast_track_enabled(&attacker, &true),
             Err(Ok(TimelockError::Unauthorized))
         );
+    }
+
+    #[test]
+    fn test_fast_track_disabled_by_default() {
+        let (_env, _admin, client) = setup();
+        assert!(!client.get_fast_track_enabled());
+    }
+
+    #[test]
+    fn test_fast_track_enabled_after_set_emergency_council() {
+        let (_env, _admin, client, _, _, _) = setup_with_council();
+        assert!(client.get_fast_track_enabled());
+    }
+
+    #[test]
+    fn test_fast_track_toggled_by_set_fast_track_enabled() {
+        let (_env, admin, client, _, _, _) = setup_with_council();
+
+        client.set_fast_track_enabled(&admin, &false);
+        assert!(!client.get_fast_track_enabled());
+
+        client.set_fast_track_enabled(&admin, &true);
+        assert!(client.get_fast_track_enabled());
     }
 
     #[test]
