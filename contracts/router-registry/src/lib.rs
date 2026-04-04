@@ -278,6 +278,7 @@ impl RouterRegistry {
         }
 
         let constraint_str = constraint.unwrap();
+        let mut matched_constraint = false;
 
         // Iterate in reverse to find latest matching non-deprecated version
         let len = versions.len();
@@ -290,11 +291,21 @@ impl RouterRegistry {
                 .instance()
                 .get(&DataKey::Entry(name.clone(), v))
                 .ok_or(RegistryError::NotFound)?;
-            if !entry.deprecated && Self::version_matches_constraint(v, &constraint_str)? {
+            if Self::version_matches_constraint(v, &constraint_str)? {
+                matched_constraint = true;
+            } else {
+                continue;
+            }
+
+            if !entry.deprecated {
                 return Ok(entry);
             }
         }
-        Err(RegistryError::NotFound)
+        if matched_constraint {
+            Err(RegistryError::AllVersionsDeprecated)
+        } else {
+            Err(RegistryError::NotFound)
+        }
     }
 
     /// Deprecate a specific version of a contract.
@@ -976,6 +987,27 @@ mod tests {
         assert!(result.is_ok());
         let entry = result.unwrap().unwrap();
         assert_eq!(entry.version, 2);
+    }
+
+    #[test]
+    fn test_get_latest_with_constraint_all_deprecated_returns_all_versions_deprecated() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let (a1, a2, a3) = (
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        );
+        client.register(&admin, &name, &a1, &1);
+        client.register(&admin, &name, &a2, &2);
+        client.register(&admin, &name, &a3, &3);
+        client.deprecate(&admin, &name, &1);
+        client.deprecate(&admin, &name, &2);
+        client.deprecate(&admin, &name, &3);
+
+        let constraint = String::from_str(&env, ">=1");
+        let result = client.try_get_latest_with_constraint(&name, &Some(constraint));
+        assert_eq!(result, Err(Ok(RegistryError::AllVersionsDeprecated)));
     }
 
     #[test]
