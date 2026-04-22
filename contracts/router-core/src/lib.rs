@@ -481,8 +481,10 @@ impl RouterCore {
             .instance()
             .set(&DataKey::Route(name.clone()), &entry);
 
-        env.events()
-            .publish((Symbol::new(&env, "metadata_updated"),), name.clone());
+        env.events().publish(
+            (Symbol::new(&env, "metadata_updated"),),
+            (name.clone(), metadata.is_some()),
+        );
 
         Ok(())
     }
@@ -1214,10 +1216,79 @@ mod tests {
             owner: None,
         });
 
+        let events_before = env.events().all().len();
         client.update_metadata(&admin, &name, &metadata);
+        let events_after = env.events().all().len();
+
+        assert_eq!(events_after, events_before + 1);
 
         let retrieved = client.get_metadata(&name);
         assert_eq!(retrieved, metadata);
+    }
+
+    #[test]
+    fn test_metadata_updated_event_includes_metadata() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+
+        client.register_route(&admin, &name, &addr, &None);
+
+        let description = String::from_str(&env, "Test metadata");
+        let tags = vec![&env, String::from_str(&env, "test")];
+        let metadata = Some(RouteMetadata {
+            description: description.clone(),
+            tags,
+            owner: None,
+        });
+
+        client.update_metadata(&admin, &name, &metadata);
+
+        let events = env.events().all();
+        let meta_event = events.iter().find(|e| {
+            e.1.get(0)
+                .map(|v| {
+                    let s: Symbol = v.into_val(&env);
+                    s == Symbol::new(&env, "metadata_updated")
+                })
+                .unwrap_or(false)
+        }).unwrap();
+
+        let (emitted_name, has_metadata): (String, bool) = meta_event.2.into_val(&env);
+        assert_eq!(emitted_name, name);
+        assert!(has_metadata);
+    }
+
+    #[test]
+    fn test_metadata_updated_event_when_cleared() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+
+        let description = String::from_str(&env, "Initial metadata");
+        let tags = vec![&env, String::from_str(&env, "test")];
+        let metadata = Some(RouteMetadata {
+            description,
+            tags,
+            owner: None,
+        });
+
+        client.register_route(&admin, &name, &addr, &metadata);
+
+        client.update_metadata(&admin, &name, &None);
+
+        let events = env.events().all();
+        let meta_event = events.iter().find(|e| {
+            e.1.get(0)
+                .map(|v| {
+                    let s: Symbol = v.into_val(&env);
+                    s == Symbol::new(&env, "metadata_updated")
+                })
+                .unwrap_or(false)
+        }).unwrap();
+
+        let (_emitted_name, has_metadata): (String, bool) = meta_event.2.into_val(&env);
+        assert!(!has_metadata);
     }
 
     #[test]
