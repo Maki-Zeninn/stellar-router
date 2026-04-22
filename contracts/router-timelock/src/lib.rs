@@ -748,6 +748,34 @@ impl RouterTimelock {
             .ok_or(TimelockError::NotInitialized)
     }
 
+    /// Returns the current emergency council member list.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// A [`Vec<Address>`] of emergency council members.
+    pub fn get_council(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::EmergencyCouncil)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Returns the number of approvals required for fast-track execution.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// The required number of approvals as `u32`.
+    pub fn get_required_approvals(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::RequiredApprovals)
+            .unwrap_or(0)
+    }
+
     /// Update the minimum delay.
     ///
     /// # Arguments
@@ -1348,6 +1376,44 @@ mod tests {
         let (old, new): (u64, u64) = last.2.into_val(&env);
         assert_eq!(old, 3600);
         assert_eq!(new, 7200);
+    }
+
+    // ── Issue #186: get_council and get_required_approvals getters ───────────────
+
+    #[test]
+    fn test_get_council_empty_before_setup() {
+        let (_env, _admin, client) = setup();
+        let council = client.get_council();
+        assert!(council.is_empty());
+    }
+
+    #[test]
+    fn test_get_council_after_set_emergency_council() {
+        let (env, admin, client) = setup();
+        let m1 = Address::generate(&env);
+        let m2 = Address::generate(&env);
+        let mut council = Vec::new(&env);
+        council.push_back(m1.clone());
+        council.push_back(m2.clone());
+        client.set_emergency_council(&admin, &council, &2);
+
+        let retrieved = client.get_council();
+        assert_eq!(retrieved.len(), 2);
+        assert!(retrieved.contains(&m1));
+        assert!(retrieved.contains(&m2));
+    }
+
+    #[test]
+    fn test_get_required_approvals_after_set_emergency_council() {
+        let (env, admin, client) = setup();
+        let m1 = Address::generate(&env);
+        let m2 = Address::generate(&env);
+        let mut council = Vec::new(&env);
+        council.push_back(m1.clone());
+        council.push_back(m2.clone());
+        client.set_emergency_council(&admin, &council, &2);
+
+        assert_eq!(client.get_required_approvals(), 2);
     }
 
     #[test]
