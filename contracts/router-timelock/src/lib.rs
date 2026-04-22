@@ -238,6 +238,10 @@ impl RouterTimelock {
             return Err(TimelockError::InvalidDelay);
         }
 
+        if description.len() == 0 {
+            return Err(TimelockError::InvalidDescription);
+        }
+
         let op_id = Self::next_op_id(&env);
         let eta = env.ledger().timestamp() + delay;
 
@@ -297,6 +301,15 @@ impl RouterTimelock {
     ) -> Result<(), TimelockError> {
         approver.require_auth();
         Self::require_council_member(&env, &approver)?;
+
+        let enabled: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::FastTrackEnabled)
+            .unwrap_or(false);
+        if !enabled {
+            return Err(TimelockError::FastTrackDisabled);
+        }
 
         let op: TimelockOp = env
             .storage()
@@ -639,6 +652,10 @@ impl RouterTimelock {
         caller.require_auth();
         Self::require_admin(&env, &caller)?;
         env.storage().instance().set(&DataKey::FastTrackEnabled, &enabled);
+        env.events().publish(
+            (Symbol::new(&env, "fast_track_toggled"),),
+            enabled,
+        );
         Ok(())
     }
 
