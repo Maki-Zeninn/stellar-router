@@ -60,8 +60,9 @@ impl RouterAccess {
         account: Address,
         role: String,
         expires_in: Option<u64>,
-    ) {
+    ) -> Result<(), AccessError> {
         admin.require_auth();
+        Self::require_role_manager(&env, &admin, &role)?;
 
         let expiry_timestamp = match expires_in {
             Some(seconds) => env.ledger().timestamp() + seconds,
@@ -75,6 +76,7 @@ impl RouterAccess {
             (Symbol::new(&env, "role_grant"),),
             (account, role, expiry_timestamp),
         );
+        Ok(())
     }
 
     /// Removes `role` from `target`.
@@ -291,6 +293,9 @@ impl RouterAccess {
     }
 
     fn require_role_manager(env: &Env, caller: &Address, role: &String) -> Result<(), AccessError> {
+        if Self::is_blacklisted_internal(env, caller) {
+            return Err(AccessError::Blacklisted);
+        }
         if let Some(admin) = env
             .storage()
             .instance()
@@ -410,5 +415,45 @@ mod tests {
         let (emitted_role, emitted_admin): (String, Address) = last.2.into_val(&env);
         assert_eq!(emitted_role, role);
         assert_eq!(emitted_admin, valid_addr);
+    }
+
+    #[test]
+    fn test_blacklisted_role_admin_cannot_grant() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "editor");
+        let attacker = Address::generate(&env);
+        let victim = Address::generate(&env);
+
+        // Designate attacker as editor admin
+        client.set_role_admin(&admin, &role, &attacker);
+
+        // Blacklist the attacker
+        client.blacklist(&admin, &attacker);
+
+        // Try to grant role - should fail with Blacklisted
+        let result = client.try_grant_role(&attacker, &victim, &role, &None);
+        assert_eq!(result, Err(Ok(AccessError::Blacklisted)));
+    }
+
+    #[test]
+    fn test_blacklisted_role_admin_cannot_revoke() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "editor");
+        let attacker = Address::generate(&env);
+        let victim = Address::generate(&env);
+
+        // Designate attacker as editor admin
+        client.set_role_admin(&admin, &role, &attacker);
+
+        // Grant role to victim
+        client.grant_role(&admin, &victim, &role, &None)
+            .expect("grant_role should succeed");
+
+        // Blacklist the attacker
+        client.blacklist(&admin, &attacker);
+
+        // Try to revoke role - should fail with Blacklisted
+        let result = client.try_revoke_role(&attacker, &role, &victim);
+        assert_eq!(result, Err(Ok(AccessError::Blacklisted)));
     }
 }
