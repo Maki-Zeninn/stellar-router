@@ -75,6 +75,8 @@ pub struct CallLogEntry {
     pub timestamp: u64,
     /// Whether the call succeeded
     pub success: bool,
+    /// The route that was called
+    pub route: String,
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -373,6 +375,7 @@ impl RouterMiddleware {
                     caller: caller.clone(),
                     timestamp: env.ledger().timestamp(),
                     success,
+                    route: route.clone(),
                 };
                 log.push_back(entry);
 
