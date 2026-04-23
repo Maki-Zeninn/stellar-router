@@ -15,6 +15,8 @@
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
 };
+extern crate alloc;
+use alloc::string::ToString;
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -701,6 +703,15 @@ impl RouterCore {
         Ok(())
     }
 
+    /// Returns `true` if `name` is empty or consists entirely of ASCII whitespace
+    /// characters (space 0x20, tab 0x09, newline 0x0A, vertical tab 0x0B,
+    /// form feed 0x0C, carriage return 0x0D).
+    fn is_empty_or_whitespace(name: &String) -> bool {
+        let s = name.to_string();
+        if s.is_empty() {
+            return true;
+        }
+        s.bytes().all(|b| matches!(b, 9 | 10 | 11 | 12 | 13 | 32))
     fn get_route_names(env: &Env) -> Vec<String> {
         env.storage()
             .instance()
@@ -897,6 +908,34 @@ mod tests {
     }
 
     #[test]
+    fn test_register_empty_name_fails() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+        let result = client.try_register_route(&admin, &String::from_str(&env, ""), &addr);
+        assert_eq!(result, Err(Ok(RouterError::InvalidRouteName)));
+    }
+
+    #[test]
+    fn test_register_space_only_name_fails() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+        let result = client.try_register_route(&admin, &String::from_str(&env, "   "), &addr);
+        assert_eq!(result, Err(Ok(RouterError::InvalidRouteName)));
+    }
+
+    #[test]
+    fn test_register_tab_only_name_fails() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+        let result = client.try_register_route(&admin, &String::from_str(&env, "\t"), &addr);
+        assert_eq!(result, Err(Ok(RouterError::InvalidRouteName)));
+    }
+
+    #[test]
+    fn test_register_newline_only_name_fails() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+        let result = client.try_register_route(&admin, &String::from_str(&env, "\n"), &addr);
     fn test_transfer_admin_emits_event() {
         let (env, admin, client) = setup();
         let new_admin = Address::generate(&env);
@@ -1050,6 +1089,10 @@ mod tests {
     }
 
     #[test]
+    fn test_register_carriage_return_only_name_fails() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+        let result = client.try_register_route(&admin, &String::from_str(&env, "\r"), &addr);
     fn test_register_whitespace_route_name_succeeds() {
         // Soroban strings don't support byte iteration so whitespace-only names
         // are treated as valid non-empty names.
@@ -1062,6 +1105,11 @@ mod tests {
     }
 
     #[test]
+    fn test_register_mixed_whitespace_name_fails() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+        let result = client.try_register_route(&admin, &String::from_str(&env, " \t\n\r"), &addr);
+        assert_eq!(result, Err(Ok(RouterError::InvalidRouteName)));
     fn test_get_all_routes_updates_after_remove() {
         let (env, admin, client) = setup();
         let oracle = String::from_str(&env, "oracle");

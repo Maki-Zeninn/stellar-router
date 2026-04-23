@@ -29,5 +29,6 @@ jobs:
       - run: cargo fmt --check
       - run: cargo check
       - run: cargo clippy -- -D warnings
+      # cargo test runs all workspace members including router-common
       - run: cargo test
       - run: cargo build --target wasm32-unknown-unknown --release

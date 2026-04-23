@@ -22,6 +22,7 @@ pub enum DataKey {
     MinDelay,
     Operation(u64),       // op_id -> TimelockOp
     NextOpId,
+    FastTrackEnabled,
     OperationDeps(u64),   // op_id -> Vec<u64>
     EmergencyCouncil,     // Vec<Address>
     RequiredApprovals,    // u32 (M in M-of-N)
@@ -894,6 +895,44 @@ impl RouterTimelock {
         Ok(())
     }
 
+    /// Returns whether the fast-track execution path is currently enabled.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// `true` if fast-track is enabled, `false` otherwise.
+    pub fn get_fast_track_enabled(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::FastTrackEnabled)
+            .unwrap_or(false)
+    }
+
+    /// Enable or disable the fast-track execution path.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `caller` - The address initiating the call; must be the admin.
+    /// * `enabled` - `true` to enable fast-track, `false` to disable it.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`TimelockError::Unauthorized`] — if `caller` is not the admin.
+    /// * [`TimelockError::NotInitialized`] — if the contract has not been initialized.
+    pub fn set_fast_track_enabled(
+        env: Env,
+        caller: Address,
+        enabled: bool,
+    ) -> Result<(), TimelockError> {
+        caller.require_auth();
+        Self::require_admin(&env, &caller)?;
+        env.storage().instance().set(&DataKey::FastTrackEnabled, &enabled);
+        Ok(())
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn require_admin(env: &Env, caller: &Address) -> Result<(), TimelockError> {
@@ -1587,5 +1626,31 @@ mod tests {
         let (env, _admin, client) = setup();
         // No council set — required_approvals defaults to 0, must return false
         assert!(!client.has_sufficient_approvals(&0));
+    }
+
+    #[test]
+    fn test_fast_track_disabled_by_default() {
+        let (_env, _admin, client) = setup();
+        assert!(!client.get_fast_track_enabled());
+    }
+
+    #[test]
+    fn test_fast_track_toggled_by_set_fast_track_enabled() {
+        let (_env, admin, client) = setup();
+        assert!(!client.get_fast_track_enabled());
+        client.set_fast_track_enabled(&admin, &true);
+        assert!(client.get_fast_track_enabled());
+        client.set_fast_track_enabled(&admin, &false);
+        assert!(!client.get_fast_track_enabled());
+    }
+
+    #[test]
+    fn test_set_fast_track_enabled_unauthorized_fails() {
+        let (env, _admin, client) = setup();
+        let attacker = Address::generate(&env);
+        assert_eq!(
+            client.try_set_fast_track_enabled(&attacker, &true),
+            Err(Ok(TimelockError::Unauthorized))
+        );
     }
 }

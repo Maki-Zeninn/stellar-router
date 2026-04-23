@@ -887,6 +887,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "router-common"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "router-core"
 version = "0.1.0"
 dependencies = [
