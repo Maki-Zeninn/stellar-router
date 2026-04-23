@@ -1170,6 +1170,47 @@ mod tests {
         }
 
         assert_eq!(client.get_call_log_length(&route), 3);
+    }
+
+    // ── Issue: log retention off-by-one ──────────────────────────────────────
+
+    #[test]
+    fn test_call_log_never_exceeds_retention() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &3);
+
+        let caller = Address::generate(&env);
+        for _ in 0..10 {
+            client.pre_call(&caller, &route);
+            client.post_call(&caller, &route, &true);
+        }
+
+        assert_eq!(client.get_call_log(&route).len(), 3);
+    }
+
+    #[test]
+    fn test_call_log_retains_most_recent() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &3);
+
+        let caller = Address::generate(&env);
+        // Make 5 calls with distinct timestamps so we can identify order
+        for i in 0..5u64 {
+            env.ledger().set_timestamp(1000 + i);
+            client.pre_call(&caller, &route);
+            client.post_call(&caller, &route, &true);
+        }
+
+        let log = client.get_call_log(&route);
+        assert_eq!(log.len(), 3);
+        // Oldest retained entry should be call #2 (timestamp 1002)
+        assert_eq!(log.get(0).unwrap().timestamp, 1002);
+        // Newest entry should be call #4 (timestamp 1004)
+        assert_eq!(log.get(2).unwrap().timestamp, 1004);
+    }
+
     // ── Issue #154: rate_limit_state window expiry ────────────────────────────
 
     #[test]
