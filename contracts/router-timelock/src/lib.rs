@@ -722,7 +722,6 @@ impl RouterTimelock {
     /// A `Vec<Address>` of council members who have approved the operation.
     pub fn get_approvals(env: Env, op_id: u64) -> Vec<Address> {
         env.storage()
-            .instance()
             .get(&DataKey::FastTrackApprovals(op_id))
             .unwrap_or(Vec::new(&env))
     }
