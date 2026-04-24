@@ -255,10 +255,20 @@ impl RouterAccess {
     }
 
     pub fn get_role_members(env: Env, role: String) -> Vec<Address> {
-        env.storage()
+        let all_members: Vec<Address> = env
+            .storage()
             .instance()
-            .get(&DataKey::RoleMembers(role))
-            .unwrap_or_else(|| Vec::new(&env))
+            .get(&DataKey::RoleMembers(role.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Filter out expired roles
+        let mut active_members = Vec::new(&env);
+        for member in all_members.iter() {
+            if Self::has_role_internal(&env, &member, &role) {
+                active_members.push_back(member.clone());
+            }
+        }
+        active_members
     }
 
     pub fn get_roles_for_address(env: Env, addr: Address) -> Vec<String> {
@@ -544,7 +554,8 @@ mod tests {
         let role = String::from_str(&env, "editor");
         let user = Address::generate(&env);
 
-        client.grant_role(&admin, &user, &role, &Some(100))
+        client
+            .grant_role(&admin, &user, &role, &Some(100))
             .expect("grant_role should succeed");
 
         client.revoke_role(&admin, &role, &user);
@@ -554,7 +565,9 @@ mod tests {
 
         // No RoleExpiry key exists in storage
         let has_expiry: bool = env.as_contract(&client.address, || {
-            env.storage().instance().has(&DataKey::RoleExpiry(role.clone(), user.clone()))
+            env.storage()
+                .instance()
+                .has(&DataKey::RoleExpiry(role.clone(), user.clone()))
         });
         assert!(!has_expiry);
     }
@@ -782,5 +795,31 @@ mod tests {
         client.grant_role(&admin, &user, &role, &Some(9999));
         let result = client.try_expire_role(&attacker, &role, &user);
         assert_eq!(result, Err(Ok(AccessError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_get_role_members_excludes_expired_roles() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let user = Address::generate(&env);
+
+        // Grant role with short expiry
+        client.grant_role(&admin, &user, &role, &Some(10));
+
+        // Verify user is initially in role members
+        let members_before = client.get_role_members(&role);
+        assert!(members_before.contains(&user));
+        assert_eq!(members_before.len(), 1);
+
+        // Advance time past expiry
+        env.ledger().set_timestamp(env.ledger().timestamp() + 20);
+
+        // has_role correctly returns false
+        assert!(!client.has_role(&user, &role));
+
+        // get_role_members should not contain the expired user
+        let members_after = client.get_role_members(&role);
+        assert!(!members_after.contains(&user));
+        assert!(members_after.is_empty());
     }
 }

@@ -28,6 +28,7 @@ pub enum DataKey {
     Paused,
     TotalRouted,
     Alias(String), // alias -> original_name
+    Aliases,       // Vec<String> of all alias names
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -104,6 +105,9 @@ impl RouterCore {
         env.storage()
             .instance()
             .set(&DataKey::RouteNames, &Vec::<String>::new(&env));
+        env.storage()
+            .instance()
+            .set(&DataKey::Aliases, &Vec::<String>::new(&env));
         env.storage().instance().set(&DataKey::Paused, &false);
         env.storage().instance().set(&DataKey::TotalRouted, &0u64);
         Ok(())
@@ -235,7 +239,8 @@ impl RouterCore {
 
     /// Remove a route entirely.
     ///
-    /// Deletes the route entry for `name` from storage. Caller must be the admin.
+    /// Deletes the route entry for `name` from storage and removes any aliases 
+    /// that point to this route. Caller must be the admin.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -271,6 +276,25 @@ impl RouterCore {
         env.storage()
             .instance()
             .set(&DataKey::RouteNames, &updated_route_names);
+
+        // Clean up any aliases pointing to this route
+        let aliases = Self::get_aliases(&env);
+        let mut updated_aliases = Vec::new(&env);
+        for alias in aliases.iter() {
+            if let Some(original_name) = env.storage().instance().get::<DataKey, String>(&DataKey::Alias(alias.clone())) {
+                if original_name == name {
+                    // Remove this dangling alias
+                    env.storage().instance().remove(&DataKey::Alias(alias.clone()));
+                } else {
+                    // Keep this alias
+                    updated_aliases.push_back(alias);
+                }
+            } else {
+                // Alias doesn't exist in storage, remove from list
+                // (this shouldn't happen but cleans up inconsistencies)
+            }
+        }
+        env.storage().instance().set(&DataKey::Aliases, &updated_aliases);
 
         env.events()
             .publish((Symbol::new(&env, "route_removed"),), name.clone());
@@ -584,6 +608,13 @@ impl RouterCore {
             .instance()
             .set(&DataKey::Alias(alias_name.clone()), &existing_name);
 
+        // Track alias name for cleanup
+        let mut aliases = Self::get_aliases(&env);
+        if !aliases.contains(&alias_name) {
+            aliases.push_back(alias_name.clone());
+            env.storage().instance().set(&DataKey::Aliases, &aliases);
+        }
+
         env.events().publish(
             (Symbol::new(&env, "alias_added"),),
             (existing_name, alias_name),
@@ -622,6 +653,16 @@ impl RouterCore {
         env.storage()
             .instance()
             .remove(&DataKey::Alias(alias_name.clone()));
+
+        // Remove from aliases list
+        let mut aliases = Self::get_aliases(&env);
+        let mut updated_aliases = Vec::new(&env);
+        for alias in aliases.iter() {
+            if alias != alias_name {
+                updated_aliases.push_back(alias);
+            }
+        }
+        env.storage().instance().set(&DataKey::Aliases, &updated_aliases);
 
         env.events()
             .publish((Symbol::new(&env, "alias_removed"),), alias_name);
@@ -708,6 +749,13 @@ impl RouterCore {
         env.storage()
             .instance()
             .get(&DataKey::RouteNames)
+            .unwrap_or(Vec::new(env))
+    }
+
+    fn get_aliases(env: &Env) -> Vec<String> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Aliases)
             .unwrap_or(Vec::new(env))
     }
 
@@ -1442,6 +1490,9 @@ mod tests {
         assert_eq!(
             client.try_resolve(&alias),
             Err(Ok(RouterError::RoutePaused))
+        );
+    }
+
     // ── RouteMetadata validation tests (issues #180 & #191) ──────────────────
 
     #[test]
@@ -1634,5 +1685,35 @@ mod tests {
         let (env, _admin, client) = setup();
         let name = String::from_str(&env, "nonexistent");
         assert_eq!(client.get_metadata(&name), None);
+    }
+
+    #[test]
+    fn test_remove_route_cleans_up_dangling_aliases() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let oracle_v1 = String::from_str(&env, "oracle_v1");
+        let addr = Address::generate(&env);
+
+        // Register route and create alias
+        client.register_route(&admin, &oracle, &addr, &None);
+        client.add_alias(&admin, &oracle, &oracle_v1);
+
+        // Verify alias works initially
+        assert_eq!(client.resolve(&oracle_v1), addr);
+
+        // Remove the original route
+        client.remove_route(&admin, &oracle);
+
+        // Alias should now return RouteNotFound (not dangling)
+        assert_eq!(
+            client.try_resolve(&oracle_v1),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+
+        // Original route should also return RouteNotFound
+        assert_eq!(
+            client.try_resolve(&oracle),
+            Err(Ok(RouterError::RouteNotFound))
+        );
     }
 }
