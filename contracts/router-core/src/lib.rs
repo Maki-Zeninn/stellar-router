@@ -720,8 +720,8 @@ impl RouterCore {
         }
         let bytes = name.clone().to_bytes();
         for i in 0..bytes.len() {
-            if bytes.get_unchecked(i) != 32 {
-                // space
+            let b = bytes.get_unchecked(i);
+            if !matches!(b, 9 | 10 | 11 | 12 | 13 | 32) {
                 return false;
             }
         }

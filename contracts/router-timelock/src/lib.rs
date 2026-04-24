@@ -25,7 +25,6 @@ pub enum DataKey {
     MinDelay,
     Operation(u64), // op_id -> TimelockOp
     NextOpId,
-    FastTrackEnabled,
     OperationDeps(u64),      // op_id -> Vec<u64>
     EmergencyCouncil,        // Vec<Address>
     RequiredApprovals,       // u32 (M in M-of-N)
@@ -253,10 +252,6 @@ impl RouterTimelock {
 
         if delay < min_delay {
             return Err(TimelockError::InvalidDelay);
-        }
-
-        if description.len() == 0 {
-            return Err(TimelockError::InvalidDescription);
         }
 
         let op_id = Self::next_op_id(&env);
@@ -975,32 +970,6 @@ impl RouterTimelock {
             .instance()
             .get(&DataKey::FastTrackEnabled)
             .unwrap_or(false)
-    }
-
-    /// Enable or disable the fast-track execution path.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    /// * `caller` - The address initiating the call; must be the admin.
-    /// * `enabled` - `true` to enable fast-track, `false` to disable it.
-    ///
-    /// # Returns
-    /// `Ok(())` on success.
-    ///
-    /// # Errors
-    /// * [`TimelockError::Unauthorized`] — if `caller` is not the admin.
-    /// * [`TimelockError::NotInitialized`] — if the contract has not been initialized.
-    pub fn set_fast_track_enabled(
-        env: Env,
-        caller: Address,
-        enabled: bool,
-    ) -> Result<(), TimelockError> {
-        caller.require_auth();
-        Self::require_admin(&env, &caller)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::FastTrackEnabled, &enabled);
-        Ok(())
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
