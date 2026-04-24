@@ -71,6 +71,7 @@ pub enum RouterError {
     RouterPaused = 6,
     RouteAlreadyExists = 7,
     InvalidRouteName = 8,
+    InvalidMetadata = 9,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -147,10 +148,10 @@ impl RouterCore {
         // Validate metadata if provided
         if let Some(ref meta) = metadata {
             if meta.description.len() > 256 {
-                return Err(RouterError::RouteNotFound); // Using existing error for simplicity
+                return Err(RouterError::InvalidMetadata);
             }
             if meta.tags.len() > 5 {
-                return Err(RouterError::RouteNotFound);
+                return Err(RouterError::InvalidMetadata);
             }
         }
 
@@ -471,10 +472,10 @@ impl RouterCore {
         // Validate metadata if provided
         if let Some(ref meta) = metadata {
             if meta.description.len() > 256 {
-                return Err(RouterError::RouteNotFound);
+                return Err(RouterError::InvalidMetadata);
             }
             if meta.tags.len() > 5 {
-                return Err(RouterError::RouteNotFound);
+                return Err(RouterError::InvalidMetadata);
             }
         }
 
@@ -1409,5 +1410,173 @@ mod tests {
         // Verify updated_by is now B
         let entry = client.get_route(&name).unwrap();
         assert_eq!(entry.updated_by, new_admin);
+    }
+
+    // ── RouteMetadata validation tests (issues #180 & #191) ──────────────────
+
+    #[test]
+    fn test_update_metadata_description_too_long_returns_invalid_metadata() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        // 257-char description — must fail
+        let long_desc = String::from_str(&env, &"a".repeat(257));
+        let metadata = Some(RouteMetadata {
+            description: long_desc,
+            tags: Vec::new(&env),
+            owner: None,
+        });
+        assert_eq!(
+            client.try_update_metadata(&admin, &name, &metadata),
+            Err(Ok(RouterError::InvalidMetadata))
+        );
+    }
+
+    #[test]
+    fn test_update_metadata_too_many_tags_returns_invalid_metadata() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        // 6 tags — must fail
+        let mut tags = Vec::new(&env);
+        for i in 0..6u32 {
+            tags.push_back(String::from_str(&env, &i.to_string()));
+        }
+        let metadata = Some(RouteMetadata {
+            description: String::from_str(&env, "valid"),
+            tags,
+            owner: None,
+        });
+        assert_eq!(
+            client.try_update_metadata(&admin, &name, &metadata),
+            Err(Ok(RouterError::InvalidMetadata))
+        );
+    }
+
+    #[test]
+    fn test_update_metadata_valid_succeeds() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        let mut tags = Vec::new(&env);
+        tags.push_back(String::from_str(&env, "defi"));
+        let metadata = Some(RouteMetadata {
+            description: String::from_str(&env, "valid description"),
+            tags,
+            owner: None,
+        });
+        assert!(client.try_update_metadata(&admin, &name, &metadata).is_ok());
+        assert_eq!(client.get_metadata(&name), metadata);
+    }
+
+    #[test]
+    fn test_update_metadata_clears_when_none() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+
+        let metadata = Some(RouteMetadata {
+            description: String::from_str(&env, "initial"),
+            tags: Vec::new(&env),
+            owner: None,
+        });
+        client.register_route(&admin, &name, &addr, &metadata);
+        assert!(client.get_metadata(&name).is_some());
+
+        client.update_metadata(&admin, &name, &None);
+        assert_eq!(client.get_metadata(&name), None);
+    }
+
+    #[test]
+    fn test_update_metadata_description_at_limit() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        // Exactly 256 chars — must succeed
+        let desc = String::from_str(&env, &"a".repeat(256));
+        let metadata = Some(RouteMetadata {
+            description: desc,
+            tags: Vec::new(&env),
+            owner: None,
+        });
+        assert!(client.try_update_metadata(&admin, &name, &metadata).is_ok());
+    }
+
+    #[test]
+    fn test_update_metadata_description_over_limit() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        // 257 chars — must fail
+        let desc = String::from_str(&env, &"a".repeat(257));
+        let metadata = Some(RouteMetadata {
+            description: desc,
+            tags: Vec::new(&env),
+            owner: None,
+        });
+        assert_eq!(
+            client.try_update_metadata(&admin, &name, &metadata),
+            Err(Ok(RouterError::InvalidMetadata))
+        );
+    }
+
+    #[test]
+    fn test_update_metadata_tags_at_limit() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        // Exactly 5 tags — must succeed
+        let mut tags = Vec::new(&env);
+        for i in 0..5u32 {
+            tags.push_back(String::from_str(&env, &i.to_string()));
+        }
+        let metadata = Some(RouteMetadata {
+            description: String::from_str(&env, "valid"),
+            tags,
+            owner: None,
+        });
+        assert!(client.try_update_metadata(&admin, &name, &metadata).is_ok());
+    }
+
+    #[test]
+    fn test_update_metadata_tags_over_limit() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        // 6 tags — must fail
+        let mut tags = Vec::new(&env);
+        for i in 0..6u32 {
+            tags.push_back(String::from_str(&env, &i.to_string()));
+        }
+        let metadata = Some(RouteMetadata {
+            description: String::from_str(&env, "valid"),
+            tags,
+            owner: None,
+        });
+        assert_eq!(
+            client.try_update_metadata(&admin, &name, &metadata),
+            Err(Ok(RouterError::InvalidMetadata))
+        );
+    }
+
+    #[test]
+    fn test_get_metadata_nonexistent_route_returns_none() {
+        let (env, _admin, client) = setup();
+        let name = String::from_str(&env, "nonexistent");
+        assert_eq!(client.get_metadata(&name), None);
     }
 }

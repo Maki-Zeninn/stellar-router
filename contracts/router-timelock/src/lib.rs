@@ -807,6 +807,21 @@ impl RouterTimelock {
             .unwrap_or(0)
     }
 
+    /// Returns true if the given address is a member of the emergency council.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `addr` - The address to check.
+    ///
+    /// # Returns
+    /// `true` if `addr` is in the emergency council list, `false` otherwise.
+    pub fn is_council_member(env: Env, addr: Address) -> bool {
+        let council: Vec<Address> = env.storage().instance()
+            .get(&DataKey::EmergencyCouncil)
+            .unwrap_or_else(|| Vec::new(&env));
+        council.iter().any(|m| m == addr)
+    }
+
     /// Returns true if a critical operation has collected enough approvals to be fast-tracked.
     ///
     /// # Arguments
@@ -1652,5 +1667,27 @@ mod tests {
             client.try_set_fast_track_enabled(&attacker, &true),
             Err(Ok(TimelockError::Unauthorized))
         );
+    }
+
+    // ── is_council_member (issue #188) ────────────────────────────────────────
+
+    #[test]
+    fn test_is_council_member_false_before_setup() {
+        let (env, _admin, client) = setup();
+        let addr = Address::generate(&env);
+        assert!(!client.is_council_member(&addr));
+    }
+
+    #[test]
+    fn test_is_council_member_true_after_setup() {
+        let (env, admin, client, m1, _, _) = setup_with_council();
+        assert!(client.is_council_member(&m1));
+    }
+
+    #[test]
+    fn test_is_council_member_false_for_non_member() {
+        let (env, admin, client, _, _, _) = setup_with_council();
+        let outsider = Address::generate(&env);
+        assert!(!client.is_council_member(&outsider));
     }
 }
