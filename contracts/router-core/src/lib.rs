@@ -15,6 +15,8 @@
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
 };
+extern crate alloc;
+use alloc::string::ToString;
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -69,6 +71,7 @@ pub enum RouterError {
     RouterPaused = 6,
     RouteAlreadyExists = 7,
     InvalidRouteName = 8,
+    InvalidMetadata = 9,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -145,10 +148,10 @@ impl RouterCore {
         // Validate metadata if provided
         if let Some(ref meta) = metadata {
             if meta.description.len() > 256 {
-                return Err(RouterError::RouteNotFound); // Using existing error for simplicity
+                return Err(RouterError::InvalidMetadata);
             }
             if meta.tags.len() > 5 {
-                return Err(RouterError::RouteNotFound);
+                return Err(RouterError::InvalidMetadata);
             }
         }
 
@@ -323,7 +326,7 @@ impl RouterCore {
         if entry.paused {
             env.events().publish(
                 (Symbol::new(&env, "route_resolve_paused"),),
-                (name.clone(),),
+                (resolved_name.clone(),),
             );
             return Err(RouterError::RoutePaused);
         }
@@ -469,10 +472,10 @@ impl RouterCore {
         // Validate metadata if provided
         if let Some(ref meta) = metadata {
             if meta.description.len() > 256 {
-                return Err(RouterError::RouteNotFound);
+                return Err(RouterError::InvalidMetadata);
             }
             if meta.tags.len() > 5 {
-                return Err(RouterError::RouteNotFound);
+                return Err(RouterError::InvalidMetadata);
             }
         }
 
@@ -708,8 +711,10 @@ impl RouterCore {
             .unwrap_or(Vec::new(env))
     }
 
+    /// Returns `true` if `name` is empty or consists entirely of ASCII whitespace
+    /// characters (space 0x20, tab 0x09, newline 0x0A, vertical tab 0x0B,
+    /// form feed 0x0C, carriage return 0x0D).
     fn is_empty_or_whitespace(name: &String) -> bool {
-        name.len() == 0
         if name.len() == 0 {
             return true;
         }
@@ -757,14 +762,17 @@ mod tests {
 
         // Verify route_registered event carries both name and address
         let events = env.events().all();
-        let reg_event = events.iter().find(|e| {
-            e.1.get(0)
-                .map(|v| {
-                    let s: Symbol = v.into_val(&env);
-                    s == Symbol::new(&env, "route_registered")
-                })
-                .unwrap_or(false)
-        }).unwrap();
+        let reg_event = events
+            .iter()
+            .find(|e| {
+                e.1.get(0)
+                    .map(|v| {
+                        let s: Symbol = v.into_val(&env);
+                        s == Symbol::new(&env, "route_registered")
+                    })
+                    .unwrap_or(false)
+            })
+            .unwrap();
         let (emitted_name, emitted_addr): (String, Address) = reg_event.2.into_val(&env);
         assert_eq!(emitted_name, name);
         assert_eq!(emitted_addr, addr);
@@ -894,6 +902,38 @@ mod tests {
         let new_admin = Address::generate(&env);
         client.transfer_admin(&admin, &new_admin);
         assert_eq!(client.admin(), new_admin);
+    }
+
+    #[test]
+    fn test_register_empty_name_fails() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+        let result = client.try_register_route(&admin, &String::from_str(&env, ""), &addr);
+        assert_eq!(result, Err(Ok(RouterError::InvalidRouteName)));
+    }
+
+    #[test]
+    fn test_register_space_only_name_fails() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+        let result = client.try_register_route(&admin, &String::from_str(&env, "   "), &addr);
+        assert_eq!(result, Err(Ok(RouterError::InvalidRouteName)));
+    }
+
+    #[test]
+    fn test_register_tab_only_name_fails() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+        let result = client.try_register_route(&admin, &String::from_str(&env, "\t"), &addr);
+        assert_eq!(result, Err(Ok(RouterError::InvalidRouteName)));
+    }
+
+    #[test]
+    fn test_register_newline_only_name_fails() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+        let result = client.try_register_route(&admin, &String::from_str(&env, "\n"), &addr);
+        assert_eq!(result, Err(Ok(RouterError::InvalidRouteName)));
     }
 
     #[test]
@@ -1050,14 +1090,32 @@ mod tests {
     }
 
     #[test]
+    fn test_register_carriage_return_only_name_fails() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+        let result = client.try_register_route(&admin, &String::from_str(&env, "\r"), &addr);
+        assert_eq!(result, Err(Ok(RouterError::InvalidRouteName)));
+    }
+
+    #[test]
     fn test_register_whitespace_route_name_succeeds() {
         // Soroban strings don't support byte iteration so whitespace-only names
         // are treated as valid non-empty names.
         let (env, admin, client) = setup();
         let whitespace_name = String::from_str(&env, "   ");
         let addr = Address::generate(&env);
-        assert!(client.try_register_route(&admin, &whitespace_name, &addr).is_ok());
+        assert!(client
+            .try_register_route(&admin, &whitespace_name, &addr)
+            .is_ok());
         let result = client.try_register_route(&admin, &whitespace_name, &addr);
+        assert_eq!(result, Err(Ok(RouterError::InvalidRouteName)));
+    }
+
+    #[test]
+    fn test_register_mixed_whitespace_name_fails() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+        let result = client.try_register_route(&admin, &String::from_str(&env, " \t\n\r"), &addr);
         assert_eq!(result, Err(Ok(RouterError::InvalidRouteName)));
     }
 
@@ -1117,7 +1175,6 @@ mod tests {
         assert_eq!(result, Err(Ok(RouterError::RouterPaused)));
     }
 
-    #[test]
     #[test]
     fn test_pause_all_checked_before_route_lookup() {
         let (env, admin, client) = setup();
@@ -1214,6 +1271,9 @@ mod tests {
             client.try_add_alias(&admin, &name, &alias),
             Err(Ok(RouterError::RouteNotFound))
         );
+    }
+
+    #[test]
     fn test_register_route_with_metadata() {
         let (env, admin, client) = setup();
         let name = String::from_str(&env, "oracle");
@@ -1283,14 +1343,17 @@ mod tests {
         client.update_metadata(&admin, &name, &metadata);
 
         let events = env.events().all();
-        let meta_event = events.iter().find(|e| {
-            e.1.get(0)
-                .map(|v| {
-                    let s: Symbol = v.into_val(&env);
-                    s == Symbol::new(&env, "metadata_updated")
-                })
-                .unwrap_or(false)
-        }).unwrap();
+        let meta_event = events
+            .iter()
+            .find(|e| {
+                e.1.get(0)
+                    .map(|v| {
+                        let s: Symbol = v.into_val(&env);
+                        s == Symbol::new(&env, "metadata_updated")
+                    })
+                    .unwrap_or(false)
+            })
+            .unwrap();
 
         let (emitted_name, has_metadata): (String, bool) = meta_event.2.into_val(&env);
         assert_eq!(emitted_name, name);
@@ -1316,14 +1379,17 @@ mod tests {
         client.update_metadata(&admin, &name, &None);
 
         let events = env.events().all();
-        let meta_event = events.iter().find(|e| {
-            e.1.get(0)
-                .map(|v| {
-                    let s: Symbol = v.into_val(&env);
-                    s == Symbol::new(&env, "metadata_updated")
-                })
-                .unwrap_or(false)
-        }).unwrap();
+        let meta_event = events
+            .iter()
+            .find(|e| {
+                e.1.get(0)
+                    .map(|v| {
+                        let s: Symbol = v.into_val(&env);
+                        s == Symbol::new(&env, "metadata_updated")
+                    })
+                    .unwrap_or(false)
+            })
+            .unwrap();
 
         let (_emitted_name, has_metadata): (String, bool) = meta_event.2.into_val(&env);
         assert!(!has_metadata);
@@ -1361,5 +1427,212 @@ mod tests {
         // Verify updated_by is now B
         let entry = client.get_route(&name).unwrap();
         assert_eq!(entry.updated_by, new_admin);
+    }
+
+    #[test]
+    fn test_resolve_alias_to_paused_route_fails() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let alias = String::from_str(&env, "oracle_v1");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+        client.add_alias(&admin, &name, &alias);
+        client.set_route_paused(&admin, &name, &true);
+        // Resolving alias should fail with RoutePaused
+        assert_eq!(
+            client.try_resolve(&alias),
+            Err(Ok(RouterError::RoutePaused))
+    // ── RouteMetadata validation tests (issues #180 & #191) ──────────────────
+
+    #[test]
+    fn test_update_metadata_description_too_long_returns_invalid_metadata() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        // 257-char description — must fail
+        let long_desc = String::from_str(&env, &"a".repeat(257));
+        let metadata = Some(RouteMetadata {
+            description: long_desc,
+            tags: Vec::new(&env),
+            owner: None,
+        });
+        assert_eq!(
+            client.try_update_metadata(&admin, &name, &metadata),
+            Err(Ok(RouterError::InvalidMetadata))
+        );
+    }
+
+    #[test]
+    fn test_update_metadata_too_many_tags_returns_invalid_metadata() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        // 6 tags — must fail
+        let mut tags = Vec::new(&env);
+        for i in 0..6u32 {
+            tags.push_back(String::from_str(&env, &i.to_string()));
+        }
+        let metadata = Some(RouteMetadata {
+            description: String::from_str(&env, "valid"),
+            tags,
+            owner: None,
+        });
+        assert_eq!(
+            client.try_update_metadata(&admin, &name, &metadata),
+            Err(Ok(RouterError::InvalidMetadata))
+        );
+    }
+
+    #[test]
+    fn test_resolve_alias_to_paused_route_emits_canonical_name() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let alias = String::from_str(&env, "oracle_v1");
+        let addr = Address::generate(&env);
+
+        client.register_route(&admin, &name, &addr, &None);
+        client.add_alias(&admin, &name, &alias);
+        client.set_route_paused(&admin, &name, &true);
+
+        // Attempt to resolve the paused alias
+        let _ = client.try_resolve(&alias);
+
+        // Verify the route_resolve_paused event was emitted with canonical name
+        let event = env.events().all().last().unwrap().clone();
+        assert_eq!(event.0, client.address);
+        assert_eq!(
+            event.1,
+            vec![
+                &env,
+                Symbol::new(&env, "route_resolve_paused").into_val(&env)
+            ]
+        );
+        let emitted_name: String = event.2.into_val(&env);
+        assert_eq!(emitted_name, name); // Should be canonical name, not alias
+        assert_ne!(emitted_name, alias); // Explicitly verify it's not the alias
+    fn test_update_metadata_valid_succeeds() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        let mut tags = Vec::new(&env);
+        tags.push_back(String::from_str(&env, "defi"));
+        let metadata = Some(RouteMetadata {
+            description: String::from_str(&env, "valid description"),
+            tags,
+            owner: None,
+        });
+        assert!(client.try_update_metadata(&admin, &name, &metadata).is_ok());
+        assert_eq!(client.get_metadata(&name), metadata);
+    }
+
+    #[test]
+    fn test_update_metadata_clears_when_none() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+
+        let metadata = Some(RouteMetadata {
+            description: String::from_str(&env, "initial"),
+            tags: Vec::new(&env),
+            owner: None,
+        });
+        client.register_route(&admin, &name, &addr, &metadata);
+        assert!(client.get_metadata(&name).is_some());
+
+        client.update_metadata(&admin, &name, &None);
+        assert_eq!(client.get_metadata(&name), None);
+    }
+
+    #[test]
+    fn test_update_metadata_description_at_limit() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        // Exactly 256 chars — must succeed
+        let desc = String::from_str(&env, &"a".repeat(256));
+        let metadata = Some(RouteMetadata {
+            description: desc,
+            tags: Vec::new(&env),
+            owner: None,
+        });
+        assert!(client.try_update_metadata(&admin, &name, &metadata).is_ok());
+    }
+
+    #[test]
+    fn test_update_metadata_description_over_limit() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        // 257 chars — must fail
+        let desc = String::from_str(&env, &"a".repeat(257));
+        let metadata = Some(RouteMetadata {
+            description: desc,
+            tags: Vec::new(&env),
+            owner: None,
+        });
+        assert_eq!(
+            client.try_update_metadata(&admin, &name, &metadata),
+            Err(Ok(RouterError::InvalidMetadata))
+        );
+    }
+
+    #[test]
+    fn test_update_metadata_tags_at_limit() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        // Exactly 5 tags — must succeed
+        let mut tags = Vec::new(&env);
+        for i in 0..5u32 {
+            tags.push_back(String::from_str(&env, &i.to_string()));
+        }
+        let metadata = Some(RouteMetadata {
+            description: String::from_str(&env, "valid"),
+            tags,
+            owner: None,
+        });
+        assert!(client.try_update_metadata(&admin, &name, &metadata).is_ok());
+    }
+
+    #[test]
+    fn test_update_metadata_tags_over_limit() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        // 6 tags — must fail
+        let mut tags = Vec::new(&env);
+        for i in 0..6u32 {
+            tags.push_back(String::from_str(&env, &i.to_string()));
+        }
+        let metadata = Some(RouteMetadata {
+            description: String::from_str(&env, "valid"),
+            tags,
+            owner: None,
+        });
+        assert_eq!(
+            client.try_update_metadata(&admin, &name, &metadata),
+            Err(Ok(RouterError::InvalidMetadata))
+        );
+    }
+
+    #[test]
+    fn test_get_metadata_nonexistent_route_returns_none() {
+        let (env, _admin, client) = setup();
+        let name = String::from_str(&env, "nonexistent");
+        assert_eq!(client.get_metadata(&name), None);
     }
 }
