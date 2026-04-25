@@ -335,6 +335,10 @@ impl RouterMulticall {
         current.require_auth();
         Self::require_admin(&env, &current)?;
         env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "admin_transferred"),),
+            (current, new_admin),
+        );
         Ok(())
     }
 
@@ -575,6 +579,14 @@ mod tests {
         let new_admin = Address::generate(&env);
         client.transfer_admin(&admin, &new_admin);
         assert_eq!(client.admin(), new_admin);
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        let topic: Symbol = last.1.get(0).unwrap().into_val(&env);
+        assert_eq!(topic, Symbol::new(&env, "admin_transferred"));
+        let (event_old, event_new): (Address, Address) = last.2.into_val(&env);
+        assert_eq!(event_old, admin);
+        assert_eq!(event_new, new_admin);
     }
 
     #[test]
