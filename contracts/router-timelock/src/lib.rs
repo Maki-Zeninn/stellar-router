@@ -12,7 +12,10 @@
 //! - Executed operations cannot be re-executed
 //! - Emergency fast-track execution via M-of-N emergency council approval
 
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, InvokeError, String, Symbol, Val, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, Address, Env, InvokeError, String, Symbol,
+    Val, Vec,
+};
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -20,13 +23,12 @@ use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, 
 pub enum DataKey {
     Admin,
     MinDelay,
-    Operation(u64),       // op_id -> TimelockOp
+    Operation(u64), // op_id -> TimelockOp
     NextOpId,
-    OperationDeps(u64),   // op_id -> Vec<u64>
-    EmergencyCouncil,     // Vec<Address>
-    RequiredApprovals,    // u32 (M in M-of-N)
+    OperationDeps(u64),      // op_id -> Vec<u64>
+    EmergencyCouncil,        // Vec<Address>
+    RequiredApprovals,       // u32 (M in M-of-N)
     FastTrackApprovals(u64), // op_id -> Vec<Address> (who has approved)
-    FastTrackEnabled,     // bool
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -106,7 +108,9 @@ impl RouterTimelock {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::MinDelay, &min_delay);
         env.storage().instance().set(&DataKey::NextOpId, &0u64);
-        env.storage().instance().set(&DataKey::FastTrackEnabled, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::FastTrackEnabled, &false);
         Ok(())
     }
 
@@ -171,13 +175,20 @@ impl RouterTimelock {
             is_critical: false,
         };
 
-        env.storage().instance().set(&DataKey::Operation(op_id), &op);
+        env.storage()
+            .instance()
+            .set(&DataKey::Operation(op_id), &op);
         if !depends_on.is_empty() {
-            env.storage().instance().set(&DataKey::OperationDeps(op_id), &depends_on);
+            env.storage()
+                .instance()
+                .set(&DataKey::OperationDeps(op_id), &depends_on);
         }
-        env.storage().instance().set(&DataKey::NextOpId, &(op_id + 1));
+        env.storage()
+            .instance()
+            .set(&DataKey::NextOpId, &(op_id + 1));
 
-        env.events().publish((Symbol::new(&env, "op_queued"),), (op_id, op.target, eta));
+        env.events()
+            .publish((Symbol::new(&env, "op_queued"),), (op_id, op.target, eta));
 
         Ok(op_id)
     }
@@ -228,6 +239,11 @@ impl RouterTimelock {
             return Err(TimelockError::FastTrackDisabled);
         }
 
+        // Validate the description once before delay checks.
+        if description.len() == 0 {
+            return Err(TimelockError::InvalidDescription);
+        }
+
         let min_delay: u64 = env
             .storage()
             .instance()
@@ -252,12 +268,17 @@ impl RouterTimelock {
             is_critical: true,
         };
 
-        env.storage().instance().set(&DataKey::Operation(op_id), &op);
-        env.storage().instance().set(&DataKey::NextOpId, &(op_id + 1));
-        // Initialise empty approvals list
         env.storage()
             .instance()
-            .set(&DataKey::FastTrackApprovals(op_id), &Vec::<Address>::new(&env));
+            .set(&DataKey::Operation(op_id), &op);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextOpId, &(op_id + 1));
+        // Initialise empty approvals list
+        env.storage().instance().set(
+            &DataKey::FastTrackApprovals(op_id),
+            &Vec::<Address>::new(&env),
+        );
 
         env.events().publish(
             (Symbol::new(&env, "critical_op_queued"),),
@@ -290,13 +311,18 @@ impl RouterTimelock {
     /// * [`TimelockError::AlreadyExecuted`] — if the operation has already been executed.
     /// * [`TimelockError::AlreadyCancelled`] — if the operation has been cancelled.
     /// * [`TimelockError::AlreadyApproved`] — if `approver` has already approved this operation.
-    pub fn approve_critical(
-        env: Env,
-        approver: Address,
-        op_id: u64,
-    ) -> Result<(), TimelockError> {
+    pub fn approve_critical(env: Env, approver: Address, op_id: u64) -> Result<(), TimelockError> {
         approver.require_auth();
         Self::require_council_member(&env, &approver)?;
+
+        let enabled: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::FastTrackEnabled)
+            .unwrap_or(false);
+        if !enabled {
+            return Err(TimelockError::FastTrackDisabled);
+        }
 
         let op: TimelockOp = env
             .storage()
@@ -332,10 +358,8 @@ impl RouterTimelock {
             .instance()
             .set(&DataKey::FastTrackApprovals(op_id), &approvals);
 
-        env.events().publish(
-            (Symbol::new(&env, "critical_approved"),),
-            (op_id, approver),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "critical_approved"),), (op_id, approver));
 
         Ok(())
     }
@@ -362,13 +386,18 @@ impl RouterTimelock {
     /// * [`TimelockError::AlreadyExecuted`] — if the operation has already been executed.
     /// * [`TimelockError::AlreadyCancelled`] — if the operation has been cancelled.
     /// * [`TimelockError::InsufficientApprovals`] — if the required approval threshold has not been met.
-    pub fn execute_critical(
-        env: Env,
-        caller: Address,
-        op_id: u64,
-    ) -> Result<(), TimelockError> {
+    pub fn execute_critical(env: Env, caller: Address, op_id: u64) -> Result<(), TimelockError> {
         caller.require_auth();
         Self::require_admin(&env, &caller)?;
+
+        let enabled: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::FastTrackEnabled)
+            .unwrap_or(false);
+        if !enabled {
+            return Err(TimelockError::FastTrackDisabled);
+        }
 
         let mut op: TimelockOp = env
             .storage()
@@ -403,7 +432,9 @@ impl RouterTimelock {
         }
 
         op.executed = true;
-        env.storage().instance().set(&DataKey::Operation(op_id), &op);
+        env.storage()
+            .instance()
+            .set(&DataKey::Operation(op_id), &op);
 
         env.events().publish(
             (Symbol::new(&env, "critical_fast_tracked"),),
@@ -489,9 +520,12 @@ impl RouterTimelock {
         }
 
         op.executed = true;
-        env.storage().instance().set(&DataKey::Operation(op_id), &op);
+        env.storage()
+            .instance()
+            .set(&DataKey::Operation(op_id), &op);
 
-        env.events().publish((Symbol::new(&env, "op_executed"),), op_id);
+        env.events()
+            .publish((Symbol::new(&env, "op_executed"),), op_id);
 
         Ok(())
     }
@@ -532,10 +566,15 @@ impl RouterTimelock {
         }
 
         op.cancelled = true;
-        env.storage().instance().set(&DataKey::Operation(op_id), &op);
-        env.storage().instance().remove(&DataKey::OperationDeps(op_id));
+        env.storage()
+            .instance()
+            .set(&DataKey::Operation(op_id), &op);
+        env.storage()
+            .instance()
+            .remove(&DataKey::OperationDeps(op_id));
 
-        env.events().publish((Symbol::new(&env, "op_cancelled"),), op_id);
+        env.events()
+            .publish((Symbol::new(&env, "op_cancelled"),), op_id);
 
         Ok(())
     }
@@ -545,25 +584,31 @@ impl RouterTimelock {
         caller.require_auth();
         Self::require_admin(&env, &caller)?;
 
-        let next_id: u64 = env.storage().instance()
+        let next_id: u64 = env
+            .storage()
+            .instance()
             .get(&DataKey::NextOpId)
             .unwrap_or(0);
         let mut count: u64 = 0;
         for id in 0..next_id {
-            if let Some(mut op) = env.storage().instance()
+            if let Some(mut op) = env
+                .storage()
+                .instance()
                 .get::<DataKey, TimelockOp>(&DataKey::Operation(id))
             {
                 if !op.executed && !op.cancelled {
                     op.cancelled = true;
                     env.storage().instance().set(&DataKey::Operation(id), &op);
                     env.storage().instance().remove(&DataKey::OperationDeps(id));
-                    env.events().publish((Symbol::new(&env, "op_cancelled"),), id);
+                    env.events()
+                        .publish((Symbol::new(&env, "op_cancelled"),), id);
                     count += 1;
                 }
             }
         }
         if count > 0 {
-            env.events().publish((Symbol::new(&env, "all_cancelled"),), count);
+            env.events()
+                .publish((Symbol::new(&env, "all_cancelled"),), count);
         }
         Ok(count)
     }
@@ -603,14 +648,18 @@ impl RouterTimelock {
             return Err(TimelockError::InvalidConfig);
         }
 
-        env.storage().instance().set(&DataKey::EmergencyCouncil, &council);
-        env.storage().instance().set(&DataKey::RequiredApprovals, &required);
-        env.storage().instance().set(&DataKey::FastTrackEnabled, &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::EmergencyCouncil, &council);
+        env.storage()
+            .instance()
+            .set(&DataKey::RequiredApprovals, &required);
+        env.storage()
+            .instance()
+            .set(&DataKey::FastTrackEnabled, &true);
 
-        env.events().publish(
-            (Symbol::new(&env, "council_updated"),),
-            (required, council),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "council_updated"),), (required, council));
 
         Ok(())
     }
@@ -638,7 +687,11 @@ impl RouterTimelock {
     ) -> Result<(), TimelockError> {
         caller.require_auth();
         Self::require_admin(&env, &caller)?;
-        env.storage().instance().set(&DataKey::FastTrackEnabled, &enabled);
+        env.storage()
+            .instance()
+            .set(&DataKey::FastTrackEnabled, &enabled);
+        env.events()
+            .publish((Symbol::new(&env, "fast_track_toggled"),), enabled);
         Ok(())
     }
 
@@ -683,7 +736,11 @@ impl RouterTimelock {
         let next_id = Self::next_op_id(&env);
         let mut pending = Vec::new(&env);
         for id in 0..next_id {
-            if let Some(op) = env.storage().instance().get::<DataKey, TimelockOp>(&DataKey::Operation(id)) {
+            if let Some(op) = env
+                .storage()
+                .instance()
+                .get::<DataKey, TimelockOp>(&DataKey::Operation(id))
+            {
                 if !op.executed && !op.cancelled {
                     pending.push_back(op);
                 }
@@ -700,7 +757,8 @@ impl RouterTimelock {
     /// # Returns
     /// The total operation count as `u64`.
     pub fn get_op_count(env: Env) -> u64 {
-        env.storage().instance()
+        env.storage()
+            .instance()
             .get::<DataKey, u64>(&DataKey::NextOpId)
             .unwrap_or(0)
     }
@@ -715,12 +773,16 @@ impl RouterTimelock {
     /// # Returns
     /// A [`Vec<TimelockOp>`] of matching operations in ID order (ascending).
     pub fn get_ops_by_state(env: Env, only_pending: bool) -> Vec<TimelockOp> {
-        let count: u64 = env.storage().instance()
+        let count: u64 = env
+            .storage()
+            .instance()
             .get::<DataKey, u64>(&DataKey::NextOpId)
             .unwrap_or(0);
         let mut result = Vec::new(&env);
         for id in 0..count {
-            if let Some(op) = env.storage().instance()
+            if let Some(op) = env
+                .storage()
+                .instance()
                 .get::<DataKey, TimelockOp>(&DataKey::Operation(id))
             {
                 if !only_pending || (!op.executed && !op.cancelled) {
@@ -748,7 +810,75 @@ impl RouterTimelock {
             .ok_or(TimelockError::NotInitialized)
     }
 
+    /// Returns the current emergency council member list.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// A [`Vec<Address>`] of emergency council members.
+    pub fn get_council(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::EmergencyCouncil)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Returns the number of approvals required for fast-track execution.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// The required number of approvals as `u32`.
+    pub fn get_required_approvals(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::RequiredApprovals)
+            .unwrap_or(0)
+    }
+
+    /// Returns true if the given address is a member of the emergency council.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `addr` - The address to check.
+    ///
+    /// # Returns
+    /// `true` if `addr` is in the emergency council list, `false` otherwise.
+    pub fn is_council_member(env: Env, addr: Address) -> bool {
+        let council: Vec<Address> = env.storage().instance()
+            .get(&DataKey::EmergencyCouncil)
+            .unwrap_or_else(|| Vec::new(&env));
+        council.iter().any(|m| m == addr)
+    }
+
+    /// Returns true if a critical operation has collected enough approvals to be fast-tracked.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `op_id` - The operation ID to check.
+    ///
+    /// # Returns
+    /// `true` if approvals >= required_approvals, `false` otherwise or if op not found.
+    pub fn has_sufficient_approvals(env: Env, op_id: u64) -> bool {
+        let approvals: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::FastTrackApprovals(op_id))
+            .unwrap_or_else(|| Vec::new(&env));
+        let required: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RequiredApprovals)
+            .unwrap_or(0);
+        required > 0 && approvals.len() >= required
+    }
+
     /// Update the minimum delay.
+    ///
+    /// Changes the minimum delay required for newly queued operations. This does not affect
+    /// already-queued operations, which retain their original ETA and delay requirements.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -768,9 +898,16 @@ impl RouterTimelock {
         if new_delay == 0 {
             return Err(TimelockError::InvalidDelay);
         }
-        let old_delay: u64 = env.storage().instance().get(&DataKey::MinDelay).ok_or(TimelockError::NotInitialized)?;
+        let old_delay: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinDelay)
+            .ok_or(TimelockError::NotInitialized)?;
         env.storage().instance().set(&DataKey::MinDelay, &new_delay);
-        env.events().publish((Symbol::new(&env, "min_delay_updated"),), (old_delay, new_delay));
+        env.events().publish(
+            (Symbol::new(&env, "min_delay_updated"),),
+            (old_delay, new_delay),
+        );
         Ok(())
     }
 
@@ -804,26 +941,37 @@ impl RouterTimelock {
     /// # Errors
     /// * [`TimelockError::Unauthorized`] — if `current` is not the admin.
     /// * [`TimelockError::NotInitialized`] — if the contract has not been initialized.
-    pub fn transfer_admin(env: Env, current: Address, new_admin: Address) -> Result<(), MiddlewareError> {
-    current.require_auth();
+    pub fn transfer_admin(
+        env: Env,
+        current: Address,
+        new_admin: Address,
+    ) -> Result<(), TimelockError> {
+        current.require_auth();
+        Self::require_admin(&env, &current)?;
 
-    // One-liner using the shared macro
-    router_common::require_admin_simple!(
-        &env,
-        &current,
-        &DataKey::Admin,
-        MiddlewareError
-    )?;
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
 
-    env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "admin_transferred"),),
+            (current, new_admin),
+        );
 
-    env.events().publish(
-        (Symbol::new(&env, "admin_transferred"),),
-        (current, new_admin),
-    );
+        Ok(())
+    }
 
-    Ok(())
-}
+    /// Returns whether the fast-track execution path is currently enabled.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// `true` if fast-track is enabled, `false` otherwise.
+    pub fn get_fast_track_enabled(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::FastTrackEnabled)
+            .unwrap_or(false)
+    }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -867,7 +1015,10 @@ impl RouterTimelock {
 mod tests {
     extern crate std;
     use super::*;
-    use soroban_sdk::{testutils::{Address as _, Events, Ledger}, Env, IntoVal, String, Vec};
+    use soroban_sdk::{
+        testutils::{Address as _, Events, Ledger},
+        Env, IntoVal, String, Vec,
+    };
 
     fn setup() -> (Env, Address, RouterTimelockClient<'static>) {
         let env = Env::default();
@@ -881,7 +1032,14 @@ mod tests {
     }
 
     /// Returns a setup with a 3-member council requiring 2 approvals.
-    fn setup_with_council() -> (Env, Address, RouterTimelockClient<'static>, Address, Address, Address) {
+    fn setup_with_council() -> (
+        Env,
+        Address,
+        RouterTimelockClient<'static>,
+        Address,
+        Address,
+        Address,
+    ) {
         let (env, admin, client) = setup();
         let m1 = Address::generate(&env);
         let m2 = Address::generate(&env);
@@ -942,7 +1100,10 @@ mod tests {
         let desc = String::from_str(&env, "upgrade oracle");
         let deps = Vec::new(&env);
         let op_id = client.queue(&admin, &desc, &target, &3600, &deps);
-        assert_eq!(client.try_execute(&admin, &op_id), Err(Ok(TimelockError::TooEarly)));
+        assert_eq!(
+            client.try_execute(&admin, &op_id),
+            Err(Ok(TimelockError::TooEarly))
+        );
     }
 
     #[test]
@@ -965,7 +1126,10 @@ mod tests {
         let op_id = client.queue(&admin, &desc, &target, &3600, &deps);
         client.cancel(&admin, &op_id);
         env.ledger().with_mut(|l| l.timestamp += 3601);
-        assert_eq!(client.try_execute(&admin, &op_id), Err(Ok(TimelockError::AlreadyCancelled)));
+        assert_eq!(
+            client.try_execute(&admin, &op_id),
+            Err(Ok(TimelockError::AlreadyCancelled))
+        );
     }
 
     #[test]
@@ -977,7 +1141,10 @@ mod tests {
         let op_id = client.queue(&admin, &desc, &target, &3600, &deps);
         env.ledger().with_mut(|l| l.timestamp += 3601);
         client.execute(&admin, &op_id);
-        assert_eq!(client.try_execute(&admin, &op_id), Err(Ok(TimelockError::AlreadyExecuted)));
+        assert_eq!(
+            client.try_execute(&admin, &op_id),
+            Err(Ok(TimelockError::AlreadyExecuted))
+        );
     }
 
     #[test]
@@ -986,7 +1153,10 @@ mod tests {
         let target = Address::generate(&env);
         let desc = String::from_str(&env, "upgrade oracle");
         let deps = Vec::new(&env);
-        assert_eq!(client.try_queue(&admin, &desc, &target, &100, &deps), Err(Ok(TimelockError::InvalidDelay)));
+        assert_eq!(
+            client.try_queue(&admin, &desc, &target, &100, &deps),
+            Err(Ok(TimelockError::InvalidDelay))
+        );
     }
 
     #[test]
@@ -996,7 +1166,10 @@ mod tests {
         let target = Address::generate(&env);
         let desc = String::from_str(&env, "malicious");
         let deps = Vec::new(&env);
-        assert_eq!(client.try_queue(&attacker, &desc, &target, &3600, &deps), Err(Ok(TimelockError::Unauthorized)));
+        assert_eq!(
+            client.try_queue(&attacker, &desc, &target, &3600, &deps),
+            Err(Ok(TimelockError::Unauthorized))
+        );
     }
 
     #[test]
@@ -1005,6 +1178,32 @@ mod tests {
         let new_admin = Address::generate(&env);
         client.transfer_admin(&admin, &new_admin);
         assert_eq!(client.admin(), new_admin);
+    }
+
+    #[test]
+    fn test_transfer_admin_emits_event() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        client.transfer_admin(&admin, &new_admin);
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        let topic: Symbol = last.1.get(0).unwrap().into_val(&env);
+        assert_eq!(topic, Symbol::new(&env, "admin_transferred"));
+        let (old, new): (Address, Address) = last.2.into_val(&env);
+        assert_eq!(old, admin);
+        assert_eq!(new, new_admin);
+    }
+
+    #[test]
+    fn test_transfer_admin_old_admin_locked_out() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        client.transfer_admin(&admin, &new_admin);
+        // old admin can no longer call privileged functions
+        assert_eq!(
+            client.try_set_min_delay(&admin, &7200),
+            Err(Ok(TimelockError::Unauthorized))
+        );
     }
 
     #[test]
@@ -1017,7 +1216,10 @@ mod tests {
     #[test]
     fn test_set_min_delay_zero_fails() {
         let (env, admin, client) = setup();
-        assert_eq!(client.try_set_min_delay(&admin, &0), Err(Ok(TimelockError::InvalidDelay)));
+        assert_eq!(
+            client.try_set_min_delay(&admin, &0),
+            Err(Ok(TimelockError::InvalidDelay))
+        );
     }
 
     #[test]
@@ -1031,7 +1233,10 @@ mod tests {
         deps1.push_back(op0);
         let op1 = client.queue(&admin, &desc, &target, &3600, &deps1);
         env.ledger().with_mut(|l| l.timestamp += 3601);
-        assert_eq!(client.try_execute(&admin, &op1), Err(Ok(TimelockError::DependencyNotMet)));
+        assert_eq!(
+            client.try_execute(&admin, &op1),
+            Err(Ok(TimelockError::DependencyNotMet))
+        );
         assert!(client.try_execute(&admin, &op0).is_ok());
         assert!(client.try_execute(&admin, &op1).is_ok());
     }
@@ -1046,7 +1251,9 @@ mod tests {
         let mut council = Vec::new(&env);
         council.push_back(m1.clone());
         council.push_back(m2.clone());
-        assert!(client.try_set_emergency_council(&admin, &council, &1).is_ok());
+        assert!(client
+            .try_set_emergency_council(&admin, &council, &1)
+            .is_ok());
     }
 
     #[test]
@@ -1119,6 +1326,28 @@ mod tests {
             client.try_queue_critical(&admin, &desc, &target, &100),
             Err(Ok(TimelockError::InvalidDelay))
         );
+    }
+
+    #[test]
+    fn test_queue_critical_empty_description_fails() {
+        let (env, admin, client, _, _, _) = setup_with_council();
+        let target = Address::generate(&env);
+        let empty = String::from_str(&env, "");
+        assert_eq!(
+            client.try_queue_critical(&admin, &empty, &target, &3600),
+            Err(Ok(TimelockError::InvalidDescription))
+        );
+    }
+
+    #[test]
+    fn test_queue_critical_valid_description_succeeds() {
+        let (env, admin, client, _, _, _) = setup_with_council();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "fast-track hotfix");
+        let op_id = client.queue_critical(&admin, &desc, &target, &3600);
+        let op = client.get_op(&op_id).unwrap();
+        assert_eq!(op.description, desc);
+        assert!(op.is_critical);
     }
 
     // ── approve_critical ──────────────────────────────────────────────────────
@@ -1263,6 +1492,46 @@ mod tests {
     }
 
     #[test]
+    fn test_execute_critical_fails_when_fast_track_disabled() {
+        let (env, admin, client, m1, m2, _) = setup_with_council();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "critical fix");
+        let op_id = client.queue_critical(&admin, &desc, &target, &3600);
+        client.approve_critical(&m1, &op_id);
+        client.approve_critical(&m2, &op_id);
+        // Disable fast-track after approvals are collected
+        client.set_fast_track_enabled(&admin, &false);
+        // Queue and fully approve while fast-track is still enabled
+        let op_id = client.queue_critical(&admin, &desc, &target, &3600);
+        client.approve_critical(&m1, &op_id);
+        client.approve_critical(&m2, &op_id);
+
+        // Admin disables fast-track (e.g. council member compromised)
+        client.set_fast_track_enabled(&admin, &false);
+
+        // execute_critical must now be blocked
+        assert_eq!(
+            client.try_execute_critical(&admin, &op_id),
+            Err(Ok(TimelockError::FastTrackDisabled))
+        );
+    }
+
+    #[test]
+    fn test_execute_critical_succeeds_when_enabled() {
+        let (env, admin, client, m1, m2, _) = setup_with_council();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "critical fix");
+        let op_id = client.queue_critical(&admin, &desc, &target, &3600);
+        client.approve_critical(&m1, &op_id);
+        client.approve_critical(&m2, &op_id);
+        // Fast-track is enabled by default after set_emergency_council
+
+        // Fast-track is enabled by default — execution should succeed
+        assert!(client.try_execute_critical(&admin, &op_id).is_ok());
+        assert!(client.get_op(&op_id).unwrap().executed);
+    }
+
+    #[test]
     fn test_set_fast_track_enabled_unauthorized_fails() {
         let (env, _admin, client) = setup();
         let attacker = Address::generate(&env);
@@ -1284,10 +1553,22 @@ mod tests {
         let target = Address::generate(&env);
         let deps = Vec::new(&env);
 
-        client.queue(&admin, &String::from_str(&env, "fn1"), &target, &3600u64, &deps);
+        client.queue(
+            &admin,
+            &String::from_str(&env, "fn1"),
+            &target,
+            &3600u64,
+            &deps,
+        );
         assert_eq!(client.get_op_count(), 1);
 
-        client.queue(&admin, &String::from_str(&env, "fn2"), &target, &3600u64, &deps);
+        client.queue(
+            &admin,
+            &String::from_str(&env, "fn2"),
+            &target,
+            &3600u64,
+            &deps,
+        );
         assert_eq!(client.get_op_count(), 2);
     }
 
@@ -1298,9 +1579,27 @@ mod tests {
         let deps = Vec::new(&env);
 
         // Queue 3 ops
-        let id0 = client.queue(&admin, &String::from_str(&env, "fn0"), &target, &3600u64, &deps);
-        let id1 = client.queue(&admin, &String::from_str(&env, "fn1"), &target, &3600u64, &deps);
-        let id2 = client.queue(&admin, &String::from_str(&env, "fn2"), &target, &3600u64, &deps);
+        let id0 = client.queue(
+            &admin,
+            &String::from_str(&env, "fn0"),
+            &target,
+            &3600u64,
+            &deps,
+        );
+        let id1 = client.queue(
+            &admin,
+            &String::from_str(&env, "fn1"),
+            &target,
+            &3600u64,
+            &deps,
+        );
+        let id2 = client.queue(
+            &admin,
+            &String::from_str(&env, "fn2"),
+            &target,
+            &3600u64,
+            &deps,
+        );
 
         // Execute id0 (advance time past delay)
         env.ledger().with_mut(|l| l.timestamp += 3601);
@@ -1322,9 +1621,27 @@ mod tests {
         let deps = Vec::new(&env);
 
         // Queue 3 ops
-        let id0 = client.queue(&admin, &String::from_str(&env, "fn0"), &target, &3600u64, &deps);
-        let id1 = client.queue(&admin, &String::from_str(&env, "fn1"), &target, &3600u64, &deps);
-        client.queue(&admin, &String::from_str(&env, "fn2"), &target, &3600u64, &deps);
+        let id0 = client.queue(
+            &admin,
+            &String::from_str(&env, "fn0"),
+            &target,
+            &3600u64,
+            &deps,
+        );
+        let id1 = client.queue(
+            &admin,
+            &String::from_str(&env, "fn1"),
+            &target,
+            &3600u64,
+            &deps,
+        );
+        client.queue(
+            &admin,
+            &String::from_str(&env, "fn2"),
+            &target,
+            &3600u64,
+            &deps,
+        );
 
         // Execute id0, cancel id1
         env.ledger().with_mut(|l| l.timestamp += 3601);
@@ -1351,12 +1668,99 @@ mod tests {
     }
 
     #[test]
+    fn test_set_min_delay_does_not_affect_queued_op() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "upgrade oracle");
+        let deps = Vec::new(&env);
+        // Queue with delay = 3600 (current min)
+        let op_id = client.queue(&admin, &desc, &target, &3600, &deps);
+        // Increase min_delay to 7200 — op was valid when queued, should stay valid
+        client.set_min_delay(&admin, &7200);
+        // Advance time past original ETA
+        env.ledger().with_mut(|l| l.timestamp += 3601);
+        // Execute should succeed — not affected by the new min_delay
+        assert!(client.try_execute(&admin, &op_id).is_ok());
+    }
+
+    #[test]
+    fn test_set_min_delay_applies_to_new_ops_only() {
+        let (env, admin, client) = setup(); // min_delay = 3600
+    fn test_set_min_delay_applies_to_new_ops() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "upgrade oracle");
+        let deps = Vec::new(&env);
+
+        client.set_min_delay(&admin, &7200);
+
+        // Old delay should now fail
+        assert_eq!(
+            client.try_queue(&admin, &desc, &target, &3600, &deps),
+            Err(Ok(TimelockError::InvalidDelay))
+        );
+
+        // New delay should succeed
+        assert!(client.try_queue(&admin, &desc, &target, &7200, &deps).is_ok());
+    }
+
+    // ── Issue #186: get_council and get_required_approvals getters ───────────────
+
+    #[test]
+    fn test_get_council_empty_before_setup() {
+        let (_env, _admin, client) = setup();
+        let council = client.get_council();
+        assert!(council.is_empty());
+    }
+
+    #[test]
+    fn test_get_council_after_set_emergency_council() {
+        let (env, admin, client) = setup();
+        let m1 = Address::generate(&env);
+        let m2 = Address::generate(&env);
+        let mut council = Vec::new(&env);
+        council.push_back(m1.clone());
+        council.push_back(m2.clone());
+        client.set_emergency_council(&admin, &council, &2);
+
+        let retrieved = client.get_council();
+        assert_eq!(retrieved.len(), 2);
+        assert!(retrieved.contains(&m1));
+        assert!(retrieved.contains(&m2));
+    }
+
+    #[test]
+    fn test_get_required_approvals_after_set_emergency_council() {
+        let (env, admin, client) = setup();
+        let m1 = Address::generate(&env);
+        let m2 = Address::generate(&env);
+        let mut council = Vec::new(&env);
+        council.push_back(m1.clone());
+        council.push_back(m2.clone());
+        client.set_emergency_council(&admin, &council, &2);
+
+        assert_eq!(client.get_required_approvals(), 2);
+    }
+
+    #[test]
     fn test_cancel_all_emits_summary_event() {
         let (env, admin, client) = setup();
         let target = Address::generate(&env);
         let deps = Vec::new(&env);
-        client.queue(&admin, &String::from_str(&env, "op0"), &target, &3600u64, &deps);
-        client.queue(&admin, &String::from_str(&env, "op1"), &target, &3600u64, &deps);
+        client.queue(
+            &admin,
+            &String::from_str(&env, "op0"),
+            &target,
+            &3600u64,
+            &deps,
+        );
+        client.queue(
+            &admin,
+            &String::from_str(&env, "op1"),
+            &target,
+            &3600u64,
+            &deps,
+        );
 
         let count = client.cancel_all(&admin);
         assert_eq!(count, 2);
@@ -1367,5 +1771,84 @@ mod tests {
         assert_eq!(topic, Symbol::new(&env, "all_cancelled"));
         let emitted_count: u64 = last.2.into_val(&env);
         assert_eq!(emitted_count, 2);
+    }
+
+    // ── has_sufficient_approvals ──────────────────────────────────────────────
+
+    #[test]
+    fn test_has_sufficient_approvals_false_initially() {
+        let (env, admin, client, _, _, _) = setup_with_council();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "critical fix");
+        let op_id = client.queue_critical(&admin, &desc, &target, &3600);
+        // No approvals yet
+        assert!(!client.has_sufficient_approvals(&op_id));
+    }
+
+    #[test]
+    fn test_has_sufficient_approvals_true_after_threshold_met() {
+        let (env, admin, client, m1, m2, _) = setup_with_council();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "critical fix");
+        let op_id = client.queue_critical(&admin, &desc, &target, &3600);
+        client.approve_critical(&m1, &op_id);
+        assert!(!client.has_sufficient_approvals(&op_id)); // only 1 of 2
+        client.approve_critical(&m2, &op_id);
+        assert!(client.has_sufficient_approvals(&op_id)); // 2 of 2 — threshold met
+    }
+
+    #[test]
+    fn test_has_sufficient_approvals_false_when_no_council_configured() {
+        let (env, _admin, client) = setup();
+        // No council set — required_approvals defaults to 0, must return false
+        assert!(!client.has_sufficient_approvals(&0));
+    }
+
+    #[test]
+    fn test_fast_track_disabled_by_default() {
+        let (_env, _admin, client) = setup();
+        assert!(!client.get_fast_track_enabled());
+    }
+
+    #[test]
+    fn test_fast_track_toggled_by_set_fast_track_enabled() {
+        let (_env, admin, client) = setup();
+        assert!(!client.get_fast_track_enabled());
+        client.set_fast_track_enabled(&admin, &true);
+        assert!(client.get_fast_track_enabled());
+        client.set_fast_track_enabled(&admin, &false);
+        assert!(!client.get_fast_track_enabled());
+    }
+
+    #[test]
+    fn test_set_fast_track_enabled_unauthorized_fails() {
+        let (env, _admin, client) = setup();
+        let attacker = Address::generate(&env);
+        assert_eq!(
+            client.try_set_fast_track_enabled(&attacker, &true),
+            Err(Ok(TimelockError::Unauthorized))
+        );
+    }
+
+    // ── is_council_member (issue #188) ────────────────────────────────────────
+
+    #[test]
+    fn test_is_council_member_false_before_setup() {
+        let (env, _admin, client) = setup();
+        let addr = Address::generate(&env);
+        assert!(!client.is_council_member(&addr));
+    }
+
+    #[test]
+    fn test_is_council_member_true_after_setup() {
+        let (env, admin, client, m1, _, _) = setup_with_council();
+        assert!(client.is_council_member(&m1));
+    }
+
+    #[test]
+    fn test_is_council_member_false_for_non_member() {
+        let (env, admin, client, _, _, _) = setup_with_council();
+        let outsider = Address::generate(&env);
+        assert!(!client.is_council_member(&outsider));
     }
 }
