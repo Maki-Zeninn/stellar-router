@@ -700,7 +700,8 @@ mod tests {
         let new_admin = Address::generate(&env);
         client.transfer_super_admin(&admin, &new_admin);
 
-        // Old admin should no longer be able to call super-admin functions
+        // Old admin should no longer be able to call super-admin functions.
+        // Use the correct grant_role argument order: (admin, account, role, expires_in).
         let role = String::from_str(&env, "operator");
         let user = Address::generate(&env);
         assert_eq!(
@@ -708,7 +709,7 @@ mod tests {
             Err(Ok(AccessError::Unauthorized))
         );
 
-        // New admin should be able to grant roles
+        // New admin should be able to grant roles.
         assert!(client
             .try_grant_role(&new_admin, &user, &role, &None)
             .is_ok());
