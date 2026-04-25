@@ -552,6 +552,10 @@ impl RouterMiddleware {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// Get the number of call log entries for a route.
+    ///
+    /// More efficient than loading the full call log when callers only need
+    /// the current retained length.
     /// Returns the number of call log entries stored for a route.
     ///
     /// More efficient than get_call_log(route).len() as it avoids loading all entries.
@@ -922,6 +926,43 @@ mod tests {
         // post_call should succeed with both true and false outcomes
         client.post_call(&caller, &route, &true);
         client.post_call(&caller, &route, &false);
+    }
+
+    #[test]
+    fn test_get_call_log_length_zero_before_calls() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &3);
+
+        assert_eq!(client.get_call_log_length(&route), 0);
+    }
+
+    #[test]
+    fn test_get_call_log_length_matches_get_call_log() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        let caller = Address::generate(&env);
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &5);
+
+        client.post_call(&caller, &route, &true);
+        client.post_call(&caller, &route, &false);
+
+        assert_eq!(client.get_call_log_length(&route), client.get_call_log(&route).len());
+    }
+
+    #[test]
+    fn test_get_call_log_length_respects_retention() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        let caller = Address::generate(&env);
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &2);
+
+        client.post_call(&caller, &route, &true);
+        client.post_call(&caller, &route, &false);
+        client.post_call(&caller, &route, &true);
+
+        assert_eq!(client.get_call_log_length(&route), 2);
+        assert_eq!(client.get_call_log(&route).len(), 2);
     }
 
     #[test]
