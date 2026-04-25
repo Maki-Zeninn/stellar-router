@@ -255,10 +255,20 @@ impl RouterAccess {
     }
 
     pub fn get_role_members(env: Env, role: String) -> Vec<Address> {
-        env.storage()
+        let all_members: Vec<Address> = env
+            .storage()
             .instance()
-            .get(&DataKey::RoleMembers(role))
-            .unwrap_or_else(|| Vec::new(&env))
+            .get(&DataKey::RoleMembers(role.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Filter out expired roles
+        let mut active_members = Vec::new(&env);
+        for member in all_members.iter() {
+            if Self::has_role_internal(&env, &member, &role) {
+                active_members.push_back(member.clone());
+            }
+        }
+        active_members
     }
 
     pub fn get_roles_for_address(env: Env, addr: Address) -> Vec<String> {
@@ -352,7 +362,6 @@ impl RouterAccess {
             return false;
         }
 
-    fn has_role_internal(env: &Env, role: &String, target: &Address) -> bool {
         let has_role = env
             .storage()
             .instance()
@@ -376,13 +385,6 @@ impl RouterAccess {
         }
 
         true
-    }
-
-    fn is_blacklisted_internal(env: &Env, target: &Address) -> bool {
-        env.storage()
-            .instance()
-            .get::<DataKey, bool>(&DataKey::Blacklisted(target.clone()))
-            .unwrap_or(false)
     }
 }
 
@@ -553,7 +555,8 @@ mod tests {
         let role = String::from_str(&env, "editor");
         let user = Address::generate(&env);
 
-        client.grant_role(&admin, &user, &role, &Some(100))
+        client
+            .grant_role(&admin, &user, &role, &Some(100))
             .expect("grant_role should succeed");
 
         client.revoke_role(&admin, &role, &user);
@@ -563,7 +566,9 @@ mod tests {
 
         // No RoleExpiry key exists in storage
         let has_expiry: bool = env.as_contract(&client.address, || {
-            env.storage().instance().has(&DataKey::RoleExpiry(role.clone(), user.clone()))
+            env.storage()
+                .instance()
+                .has(&DataKey::RoleExpiry(role.clone(), user.clone()))
         });
         assert!(!has_expiry);
     }
@@ -642,23 +647,24 @@ mod tests {
     }
     #[test]
     fn test_blacklisted_address_cannot_use_role() {
-        // Blacklisting an address should prevent it from using its roles
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let user = Address::generate(&env);
+
+        client.grant_role(&admin, &user, &role, &None);
+        assert!(client.has_role(&user, &role));
+
+        client.blacklist(&admin, &user);
+        assert!(!client.has_role(&user, &role));
+
+        client.unblacklist(&admin, &user);
+        assert!(client.has_role(&user, &role));
     }
 
     #[test]
     fn test_get_roles_for_address_populated_after_grant() {
         let (env, admin, client) = setup();
         let user = Address::generate(&env);
-
-        // Grant the role
-        client.grant_role(&admin, &role, &user, &None);
-        assert!(client.has_role(&role, &user));
-
-        // Blacklist the user
-        client.blacklist(&admin, &user);
-
-        // has_role should now return false even though the role is still stored
-        assert!(!client.has_role(&role, &user));
         let role1 = String::from_str(&env, "editor");
         let role2 = String::from_str(&env, "viewer");
 
@@ -698,13 +704,13 @@ mod tests {
         let role = String::from_str(&env, "operator");
         let user = Address::generate(&env);
         assert_eq!(
-            client.try_grant_role(&admin, &role, &user, &None),
+            client.try_grant_role(&admin, &user, &role, &None),
             Err(Ok(AccessError::Unauthorized))
         );
 
         // New admin should be able to grant roles
         assert!(client
-            .try_grant_role(&new_admin, &role, &user, &None)
+            .try_grant_role(&new_admin, &user, &role, &None)
             .is_ok());
     }
 
@@ -733,15 +739,15 @@ mod tests {
         let (env, admin, client) = setup();
         let role = String::from_str(&env, "operator");
         let user = Address::generate(&env);
-        client.grant_role(&admin, &role, &user);
-        assert!(client.has_role(&role, &user));
+        client.grant_role(&admin, &user, &role, &None);
+        assert!(client.has_role(&user, &role));
         client.revoke_role(&admin, &role, &user);
-        assert!(!client.has_role(&role, &user));
+        assert!(!client.has_role(&user, &role));
         // Re-granting must succeed — if the key was set to false instead of removed,
         // has_role_internal would return false but the key would still exist,
         // and a future implementation checking .has() would wrongly block the grant.
-        assert!(client.try_grant_role(&admin, &role, &user).is_ok());
-        assert!(client.has_role(&role, &user));
+        assert!(client.try_grant_role(&admin, &user, &role, &None).is_ok());
+        assert!(client.has_role(&user, &role));
     }
 
     #[test]
@@ -790,5 +796,31 @@ mod tests {
         client.grant_role(&admin, &user, &role, &Some(9999));
         let result = client.try_expire_role(&attacker, &role, &user);
         assert_eq!(result, Err(Ok(AccessError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_get_role_members_excludes_expired_roles() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let user = Address::generate(&env);
+
+        // Grant role with short expiry
+        client.grant_role(&admin, &user, &role, &Some(10));
+
+        // Verify user is initially in role members
+        let members_before = client.get_role_members(&role);
+        assert!(members_before.contains(&user));
+        assert_eq!(members_before.len(), 1);
+
+        // Advance time past expiry
+        env.ledger().set_timestamp(env.ledger().timestamp() + 20);
+
+        // has_role correctly returns false
+        assert!(!client.has_role(&user, &role));
+
+        // get_role_members should not contain the expired user
+        let members_after = client.get_role_members(&role);
+        assert!(!members_after.contains(&user));
+        assert!(members_after.is_empty());
     }
 }

@@ -1,2 +1,3 @@
 target/
 **/test_snapshots/
+benches/src/scrap-menu/

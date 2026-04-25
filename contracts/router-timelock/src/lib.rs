@@ -25,12 +25,10 @@ pub enum DataKey {
     MinDelay,
     Operation(u64), // op_id -> TimelockOp
     NextOpId,
-    FastTrackEnabled,
     OperationDeps(u64),      // op_id -> Vec<u64>
     EmergencyCouncil,        // Vec<Address>
     RequiredApprovals,       // u32 (M in M-of-N)
     FastTrackApprovals(u64), // op_id -> Vec<Address> (who has approved)
-    FastTrackEnabled,        // bool
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -253,10 +251,6 @@ impl RouterTimelock {
 
         if delay < min_delay {
             return Err(TimelockError::InvalidDelay);
-        }
-
-        if description.len() == 0 {
-            return Err(TimelockError::InvalidDescription);
         }
 
         let op_id = Self::next_op_id(&env);
@@ -722,6 +716,7 @@ impl RouterTimelock {
     /// A `Vec<Address>` of council members who have approved the operation.
     pub fn get_approvals(env: Env, op_id: u64) -> Vec<Address> {
         env.storage()
+            .instance()
             .get(&DataKey::FastTrackApprovals(op_id))
             .unwrap_or(Vec::new(&env))
     }
@@ -975,32 +970,6 @@ impl RouterTimelock {
             .instance()
             .get(&DataKey::FastTrackEnabled)
             .unwrap_or(false)
-    }
-
-    /// Enable or disable the fast-track execution path.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    /// * `caller` - The address initiating the call; must be the admin.
-    /// * `enabled` - `true` to enable fast-track, `false` to disable it.
-    ///
-    /// # Returns
-    /// `Ok(())` on success.
-    ///
-    /// # Errors
-    /// * [`TimelockError::Unauthorized`] — if `caller` is not the admin.
-    /// * [`TimelockError::NotInitialized`] — if the contract has not been initialized.
-    pub fn set_fast_track_enabled(
-        env: Env,
-        caller: Address,
-        enabled: bool,
-    ) -> Result<(), TimelockError> {
-        caller.require_auth();
-        Self::require_admin(&env, &caller)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::FastTrackEnabled, &enabled);
-        Ok(())
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -1716,6 +1685,8 @@ mod tests {
     #[test]
     fn test_set_min_delay_applies_to_new_ops_only() {
         let (env, admin, client) = setup(); // min_delay = 3600
+    fn test_set_min_delay_applies_to_new_ops() {
+        let (env, admin, client) = setup();
         let target = Address::generate(&env);
         let desc = String::from_str(&env, "upgrade oracle");
         let deps = Vec::new(&env);
