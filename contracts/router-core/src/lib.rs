@@ -853,6 +853,41 @@ mod tests {
     }
 
     #[test]
+    fn test_register_route_description_too_long_returns_invalid_metadata() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        let long_description = alloc::string::String::from("a").repeat(257);
+        let metadata = RouteMetadata {
+            description: String::from_str(&env, &long_description),
+            tags: Vec::new(&env),
+            owner: admin.clone(),
+        };
+
+        let result = client.try_register_route(&admin, &name, &addr, &Some(metadata));
+        assert_eq!(result, Err(Ok(RouterError::InvalidMetadata)));
+    }
+
+    #[test]
+    fn test_register_route_too_many_tags_returns_invalid_metadata() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        let mut tags = Vec::new(&env);
+        for i in 0..6 {
+            tags.push_back(String::from_str(&env, &alloc::string::String::from("tag").repeat(i + 1)));
+        }
+        let metadata = RouteMetadata {
+            description: String::from_str(&env, "valid description"),
+            tags,
+            owner: admin.clone(),
+        };
+
+        let result = client.try_register_route(&admin, &name, &addr, &Some(metadata));
+        assert_eq!(result, Err(Ok(RouterError::InvalidMetadata)));
+    }
+
+    #[test]
     fn test_pause_route() {
         let (env, admin, client) = setup();
         let name = String::from_str(&env, "oracle");
