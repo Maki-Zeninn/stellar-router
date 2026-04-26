@@ -1939,4 +1939,67 @@ mod tests {
         let emitted_id: u64 = last.2.into_val(&env);
         assert_eq!(emitted_id, op_id);
     }
+
+    // ── Issue #308: approve_critical emits event ──────────────────────────────
+
+    #[test]
+    fn test_approve_critical_emits_event() {
+        let (env, admin, client, m1, _, _) = setup_with_council();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "critical fix");
+        let op_id = client.queue_critical(&admin, &desc, &target, &3600);
+        client.approve_critical(&m1, &op_id);
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        let topic: Symbol = last.1.get(0).unwrap().into_val(&env);
+        assert_eq!(topic, Symbol::new(&env, "critical_approved"));
+        let (emitted_id, emitted_approver): (u64, Address) = last.2.into_val(&env);
+        assert_eq!(emitted_id, op_id);
+        assert_eq!(emitted_approver, m1);
+    }
+
+    // ── Issue #309: execute_critical emits fast-tracked event ─────────────────
+
+    #[test]
+    fn test_execute_critical_emits_fast_tracked_event() {
+        let (env, admin, client, m1, m2, _) = setup_with_council();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "critical fix");
+        let op_id = client.queue_critical(&admin, &desc, &target, &3600);
+        client.approve_critical(&m1, &op_id);
+        client.approve_critical(&m2, &op_id);
+        client.execute_critical(&admin, &op_id);
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        let topic: Symbol = last.1.get(0).unwrap().into_val(&env);
+        assert_eq!(topic, Symbol::new(&env, "critical_fast_tracked"));
+        let (emitted_id, emitted_approvals): (u64, Vec<Address>) = last.2.into_val(&env);
+        assert_eq!(emitted_id, op_id);
+        assert_eq!(emitted_approvals.len(), 2);
+        assert!(emitted_approvals.contains(&m1));
+        assert!(emitted_approvals.contains(&m2));
+    }
+
+    // ── Issue #310: set_emergency_council emits council_updated event ─────────
+
+    #[test]
+    fn test_set_emergency_council_emits_event() {
+        let (env, admin, client) = setup();
+        let m1 = Address::generate(&env);
+        let m2 = Address::generate(&env);
+        let mut council = Vec::new(&env);
+        council.push_back(m1.clone());
+        council.push_back(m2.clone());
+        client.set_emergency_council(&admin, &council, &1);
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        let topic: Symbol = last.1.get(0).unwrap().into_val(&env);
+        assert_eq!(topic, Symbol::new(&env, "council_updated"));
+        let (emitted_required, emitted_council): (u32, Vec<Address>) = last.2.into_val(&env);
+        assert_eq!(emitted_required, 1);
+        assert_eq!(emitted_council.len(), 2);
+    }
 }

@@ -515,6 +515,8 @@ impl RouterMiddleware {
         env.storage()
             .instance()
             .set(&DataKey::GlobalEnabled, &enabled);
+        env.events()
+            .publish((Symbol::new(&env, "middleware_enabled"),), enabled);
         Ok(())
     }
 
@@ -1475,5 +1477,19 @@ mod tests {
         assert!(!state_after_recovery.is_open);
         assert_eq!(state_after_recovery.failure_count, 0);
         assert_eq!(state_after_recovery.opened_at, 0);
+    }
+
+    // ── Issue #311: set_global_enabled emits event ────────────────────────────
+
+    #[test]
+    fn test_set_global_enabled_emits_event() {
+        let (env, admin, client) = setup();
+        client.set_global_enabled(&admin, &false);
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        let topic: Symbol = last.1.get(0).unwrap().into_val(&env);
+        assert_eq!(topic, Symbol::new(&env, "middleware_enabled"));
+        let emitted: bool = last.2.into_val(&env);
+        assert!(!emitted);
     }
 }
