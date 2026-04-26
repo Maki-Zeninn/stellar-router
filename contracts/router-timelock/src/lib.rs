@@ -747,7 +747,11 @@ impl RouterTimelock {
     /// # Returns
     /// A [`Vec<TimelockOp>`] of pending operations.
     pub fn get_pending_ops(env: Env) -> Vec<TimelockOp> {
-        let next_id = Self::next_op_id(&env);
+        let next_id: u64 = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::NextOpId)
+            .unwrap_or(0);
         let mut pending = Vec::new(&env);
         for id in 0..next_id {
             if let Some(op) = env
