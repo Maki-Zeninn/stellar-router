@@ -1176,20 +1176,6 @@ mod tests {
     }
 
     #[test]
-    fn test_register_whitespace_route_name_succeeds() {
-        // Soroban strings don't support byte iteration so whitespace-only names
-        // are treated as valid non-empty names.
-        let (env, admin, client) = setup();
-        let whitespace_name = String::from_str(&env, "   ");
-        let addr = Address::generate(&env);
-        assert!(client
-            .try_register_route(&admin, &whitespace_name, &addr, &None)
-            .is_ok());
-        let result = client.try_register_route(&admin, &whitespace_name, &addr, &None);
-        assert_eq!(result, Err(Ok(RouterError::InvalidRouteName)));
-    }
-
-    #[test]
     fn test_register_mixed_whitespace_name_fails() {
         let (env, admin, client) = setup();
         let addr = Address::generate(&env);

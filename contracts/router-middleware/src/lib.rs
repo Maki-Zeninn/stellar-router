@@ -1448,7 +1448,7 @@ mod tests {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
         // failure_threshold=1, recovery_window=60s
-        client.configure_route(&admin, &route, &0, &0, &true, &1, &60);
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &60, &0);
 
         let caller = Address::generate(&env);
 
