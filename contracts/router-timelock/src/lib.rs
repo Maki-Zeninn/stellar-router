@@ -746,21 +746,11 @@ impl RouterTimelock {
     ///
     /// # Returns
     /// A [`Vec<TimelockOp>`] of pending operations.
+    ///
+    /// # Deprecated
+    /// Use `get_ops_by_state(true)` instead.
     pub fn get_pending_ops(env: Env) -> Vec<TimelockOp> {
-        let next_id = Self::next_op_id(&env);
-        let mut pending = Vec::new(&env);
-        for id in 0..next_id {
-            if let Some(op) = env
-                .storage()
-                .instance()
-                .get::<DataKey, TimelockOp>(&DataKey::Operation(id))
-            {
-                if !op.executed && !op.cancelled {
-                    pending.push_back(op);
-                }
-            }
-        }
-        pending
+        Self::get_ops_by_state(env, true)
     }
 
     /// Returns the total number of operations ever queued (including executed and cancelled).
@@ -1887,5 +1877,23 @@ mod tests {
         let (env, admin, client, _, _, _) = setup_with_council();
         let outsider = Address::generate(&env);
         assert!(!client.is_council_member(&outsider));
+    }
+
+    #[test]
+    fn test_execute_emits_op_executed_event() {
+        let (env, admin, client) = setup();
+        let target = client.address.clone(); // live target passes probe
+        let desc = String::from_str(&env, "upgrade");
+        let deps = Vec::new(&env);
+        let op_id = client.queue(&admin, &desc, &target, &3600, &deps);
+        env.ledger().with_mut(|l| l.timestamp += 3601);
+        client.execute(&admin, &op_id);
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        let topic: Symbol = last.1.get(0).unwrap().into_val(&env);
+        assert_eq!(topic, Symbol::new(&env, "op_executed"));
+        let emitted_id: u64 = last.2.into_val(&env);
+        assert_eq!(emitted_id, op_id);
     }
 }
