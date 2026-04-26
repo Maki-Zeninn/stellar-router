@@ -574,6 +574,37 @@ impl RouterMiddleware {
             .unwrap_or(0)
     }
 
+    /// Clear all call log entries for a route.
+    ///
+    /// Caller must be the admin. This allows manual clearing of the call log
+    /// for a route, for example after a security incident, to start fresh
+    /// without changing the retention configuration.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `caller` - The address initiating the call; must be the admin.
+    /// * `route` - The route name to clear the call log for.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`MiddlewareError::Unauthorized`] — if the caller is not the admin.
+    pub fn reset_route_call_log(
+        env: Env,
+        caller: Address,
+        route: String,
+    ) -> Result<(), MiddlewareError> {
+        caller.require_auth();
+        Self::require_admin(&env, &caller)?;
+        env.storage().instance().remove(&DataKey::CallLog(route.clone()));
+        env.events().publish(
+            (Symbol::new(&env, "call_log_cleared"),),
+            route,
+        );
+        Ok(())
+    }
+
     /// Get rate limit state for a caller on a specific route.
     ///
     /// Returns the current [`RateLimitState`] for `caller` on `route`, which includes the
@@ -671,13 +702,17 @@ impl RouterMiddleware {
     /// # Returns
     /// The [`Address`] of the current admin.
     ///
-    /// # Errors
-    /// * [`MiddlewareError::NotInitialized`] — if the contract has not been initialized.
-    pub fn admin(env: Env) -> Result<Address, MiddlewareError> {
+    /// # Panics
+    /// * Panics if the contract has not been initialized.
+    /// 
+    /// Note: This is a breaking change from the previous Result-based API.
+    /// Calling admin() on an uninitialized contract is considered a programming error
+    /// rather than a runtime condition, consistent with how similar getters work.
+    pub fn admin(env: Env) -> Address {
         env.storage()
             .instance()
             .get(&DataKey::Admin)
-            .ok_or(MiddlewareError::NotInitialized)
+            .expect("not initialized")
     }
 
     /// Reset circuit breaker for a route.
@@ -754,11 +789,7 @@ impl RouterMiddleware {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn require_admin(env: &Env, caller: &Address) -> Result<(), MiddlewareError> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(MiddlewareError::NotInitialized)?;
+        let admin = Self::admin(env.clone());
         if &admin != caller {
             return Err(MiddlewareError::Unauthorized);
         }

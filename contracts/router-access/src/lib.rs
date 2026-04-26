@@ -314,6 +314,9 @@ impl RouterAccess {
         env.storage()
             .instance()
             .remove(&DataKey::RoleExpiry(role.clone(), target.clone()));
+        env.storage()
+            .instance()
+            .remove(&DataKey::HasRole(role.clone(), target.clone()));
         env.events()
             .publish((Symbol::new(&env, "role_expired"),), (role, target));
         Ok(())

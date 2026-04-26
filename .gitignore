@@ -1,3 +1,4 @@
 target/
 **/test_snapshots/
 benches/src/scrap-menu/
+.DS_Store

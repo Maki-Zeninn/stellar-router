@@ -378,13 +378,8 @@ impl RouterRegistry {
         entries: Vec<(String, u32)>,
     ) -> Vec<Result<(), RegistryError>> {
         caller.require_auth();
+        Self::require_admin(&env, &caller)?;
         let mut results = Vec::new(&env);
-        if Self::require_admin(&env, &caller).is_err() {
-            for _ in entries.iter() {
-                results.push_back(Err(RegistryError::Unauthorized));
-            }
-            return results;
-        }
         for (name, version) in entries.iter() {
             results.push_back(Self::deprecate_one(&env, name, version));
         }
@@ -430,13 +425,17 @@ impl RouterRegistry {
     /// # Returns
     /// The [`Address`] of the current admin.
     ///
-    /// # Errors
-    /// * [`RegistryError::NotInitialized`] — if the contract has not been initialized.
-    pub fn admin(env: Env) -> Result<Address, RegistryError> {
+    /// # Panics
+    /// * Panics if the contract has not been initialized.
+    /// 
+    /// Note: This is a breaking change from the previous Result-based API.
+    /// Calling admin() on an uninitialized contract is considered a programming error
+    /// rather than a runtime condition, consistent with how similar getters work.
+    pub fn admin(env: Env) -> Address {
         env.storage()
             .instance()
             .get(&DataKey::Admin)
-            .ok_or(RegistryError::NotInitialized)
+            .expect("not initialized")
     }
 
     /// Get all registered versions for a name.
@@ -498,14 +497,43 @@ impl RouterRegistry {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
+    /// Find the registry entry for a given contract address.
+    ///
+    /// Returns the first entry found (search order: all names in registration order,
+    /// all versions in ascending order). Returns None if the address is not registered.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `address` - The contract address to look up.
+    ///
+    /// # Returns
+    /// An [`Option<ContractEntry>`] containing the entry if found, None otherwise.
+    pub fn get_entry_by_address(env: Env, address: Address) -> Option<ContractEntry> {
+        let names: Vec<String> = env.storage()
+            .instance()
+            .get(&DataKey::ContractNames)
+            .unwrap_or_else(|| Vec::new(&env));
+        
+        for name in names.iter() {
+            let versions = Self::get_versions_list(&env, &name);
+            for v in versions.iter() {
+                if let Some(entry) = env.storage()
+                    .instance()
+                    .get::<ContractEntry>(&DataKey::Entry(name.clone(), *v))
+                {
+                    if entry.address == address {
+                        return Some(entry);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn require_admin(env: &Env, caller: &Address) -> Result<(), RegistryError> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(RegistryError::NotInitialized)?;
+        let admin = Self::admin(env.clone());
         if &admin != caller {
             return Err(RegistryError::Unauthorized);
         }

@@ -679,13 +679,17 @@ impl RouterCore {
     /// # Returns
     /// The [`Address`] of the current admin.
     ///
-    /// # Errors
-    /// * [`RouterError::NotInitialized`] — if the contract has not been initialized.
-    pub fn admin(env: Env) -> Result<Address, RouterError> {
+    /// # Panics
+    /// * Panics if the contract has not been initialized.
+    /// 
+    /// Note: This is a breaking change from the previous Result-based API.
+    /// Calling admin() on an uninitialized contract is considered a programming error
+    /// rather than a runtime condition, consistent with how total_routed() works.
+    pub fn admin(env: Env) -> Address {
         env.storage()
             .instance()
             .get(&DataKey::Admin)
-            .ok_or(RouterError::NotInitialized)
+            .expect("not initialized")
     }
 
     /// Transfer admin to a new address.
@@ -735,11 +739,7 @@ impl RouterCore {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn require_admin(env: &Env, caller: &Address) -> Result<(), RouterError> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(RouterError::NotInitialized)?;
+        let admin = Self::admin(env.clone());
         if &admin != caller {
             return Err(RouterError::Unauthorized);
         }
@@ -1876,5 +1876,22 @@ mod tests {
             client.try_resolve(&oracle),
             Err(Ok(RouterError::RouteNotFound))
         );
+    }
+
+    #[test]
+    fn test_total_routed_increments_on_alias_resolution() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let alias = String::from_str(&env, "oracle_v1");
+        let addr = Address::generate(&env);
+
+        client.register_route(&admin, &name, &addr, &None);
+        client.add_alias(&admin, &name, &alias);
+
+        assert_eq!(client.total_routed(), 0);
+        client.resolve(&alias);
+        assert_eq!(client.total_routed(), 1);  // alias resolution increments counter
+        client.resolve(&name);
+        assert_eq!(client.total_routed(), 2);
     }
 }
