@@ -1513,17 +1513,7 @@ mod tests {
         let op_id = client.queue_critical(&admin, &desc, &target, &3600);
         client.approve_critical(&m1, &op_id);
         client.approve_critical(&m2, &op_id);
-        // Disable fast-track after approvals are collected
         client.set_fast_track_enabled(&admin, &false);
-        // Queue and fully approve while fast-track is still enabled
-        let op_id = client.queue_critical(&admin, &desc, &target, &3600);
-        client.approve_critical(&m1, &op_id);
-        client.approve_critical(&m2, &op_id);
-
-        // Admin disables fast-track (e.g. council member compromised)
-        client.set_fast_track_enabled(&admin, &false);
-
-        // execute_critical must now be blocked
         assert_eq!(
             client.try_execute_critical(&admin, &op_id),
             Err(Ok(TimelockError::FastTrackDisabled))
