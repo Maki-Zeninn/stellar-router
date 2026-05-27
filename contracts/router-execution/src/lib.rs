@@ -29,6 +29,8 @@ pub enum DataKey {
     MaxRetries,
     TotalExecutions,
     TotalErrors,
+    BackoffBaseMs,    // base delay in milliseconds before first retry
+    BackoffMultiplier, // multiplier applied each retry (stored as fixed-point *100, e.g. 200 = 2x)
 }
 
 // ── Error Types ───────────────────────────────────────────────────────────────
@@ -143,22 +145,71 @@ impl RouterExecution {
     /// # Arguments
     /// * `admin` - Admin address.
     /// * `max_retries` - Global cap on per-request retry attempts (max 5).
+    /// * `backoff_base_ms` - Base delay in milliseconds before the first retry (0 = no delay).
+    /// * `backoff_multiplier` - Multiplier applied each retry, as fixed-point *100
+    ///   (e.g. 200 = 2x, 150 = 1.5x). Must be >= 100.
     ///
     /// # Errors
     /// * [`ExecutionError::AlreadyInitialized`] — called more than once.
-    /// * [`ExecutionError::InvalidConfig`] — `max_retries` exceeds 5.
-    pub fn initialize(env: Env, admin: Address, max_retries: u32) -> Result<(), ExecutionError> {
+    /// * [`ExecutionError::InvalidConfig`] — `max_retries` exceeds 5 or `backoff_multiplier` < 100.
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        max_retries: u32,
+        backoff_base_ms: u64,
+        backoff_multiplier: u32,
+    ) -> Result<(), ExecutionError> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(ExecutionError::AlreadyInitialized);
         }
         if max_retries > 5 {
             return Err(ExecutionError::InvalidConfig);
         }
+        if backoff_multiplier < 100 {
+            return Err(ExecutionError::InvalidConfig);
+        }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::MaxRetries, &max_retries);
+        env.storage().instance().set(&DataKey::BackoffBaseMs, &backoff_base_ms);
+        env.storage().instance().set(&DataKey::BackoffMultiplier, &backoff_multiplier);
         env.storage().instance().set(&DataKey::TotalExecutions, &0u64);
         env.storage().instance().set(&DataKey::TotalErrors, &0u64);
         Ok(())
+    }
+
+    /// Update the backoff configuration. Caller must be admin.
+    ///
+    /// # Arguments
+    /// * `backoff_base_ms` - Base delay in milliseconds before the first retry.
+    /// * `backoff_multiplier` - Multiplier per retry as fixed-point *100 (min 100).
+    ///
+    /// # Errors
+    /// * [`ExecutionError::Unauthorized`] — caller is not the admin.
+    /// * [`ExecutionError::InvalidConfig`] — `backoff_multiplier` < 100.
+    /// * [`ExecutionError::NotInitialized`] — contract not initialized.
+    pub fn set_backoff_config(
+        env: Env,
+        caller: Address,
+        backoff_base_ms: u64,
+        backoff_multiplier: u32,
+    ) -> Result<(), ExecutionError> {
+        caller.require_auth();
+        Self::require_admin(&env, &caller)?;
+        if backoff_multiplier < 100 {
+            return Err(ExecutionError::InvalidConfig);
+        }
+        env.storage().instance().set(&DataKey::BackoffBaseMs, &backoff_base_ms);
+        env.storage().instance().set(&DataKey::BackoffMultiplier, &backoff_multiplier);
+        Ok(())
+    }
+
+    /// Get the current backoff configuration.
+    ///
+    /// Returns `(backoff_base_ms, backoff_multiplier)`.
+    pub fn backoff_config(env: Env) -> (u64, u32) {
+        let base: u64 = env.storage().instance().get(&DataKey::BackoffBaseMs).unwrap_or(0);
+        let mult: u32 = env.storage().instance().get(&DataKey::BackoffMultiplier).unwrap_or(100);
+        (base, mult)
     }
 
     /// Execute a transaction with structured error handling and optional retry.
@@ -212,6 +263,17 @@ impl RouterExecution {
         }
 
         // ── Execution phase with retry ────────────────────────────────────
+        let backoff_base_ms: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::BackoffBaseMs)
+            .unwrap_or(0);
+        let backoff_multiplier: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::BackoffMultiplier)
+            .unwrap_or(100);
+
         let mut attempts = 0u32;
         loop {
             attempts += 1;
@@ -239,8 +301,19 @@ impl RouterExecution {
                     return Ok(exec_result);
                 }
                 Err(_) => {
-                    // Treat as a transient network error if retries remain
                     if attempts <= effective_retries {
+                        // Compute the delay the caller should wait before the next
+                        // retry: base_ms * multiplier^(attempt-1) / 100^(attempt-1).
+                        // Emitting this lets off-chain orchestrators honour the backoff.
+                        let delay_ms = Self::compute_backoff_ms(
+                            backoff_base_ms,
+                            backoff_multiplier,
+                            attempts - 1,
+                        );
+                        env.events().publish(
+                            (Symbol::new(&env, "execution_retry"),),
+                            (&request.target, &request.function, attempts, delay_ms),
+                        );
                         // Retry
                         continue;
                     }
@@ -390,6 +463,32 @@ impl RouterExecution {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    fn require_admin(env: &Env, caller: &Address) -> Result<(), ExecutionError> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ExecutionError::NotInitialized)?;
+        if &admin != caller {
+            return Err(ExecutionError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    /// Compute exponential backoff delay in milliseconds for a given attempt index.
+    ///
+    /// `delay = base_ms * (multiplier/100)^attempt_index`
+    ///
+    /// Uses integer arithmetic: multiply by `multiplier` and divide by 100 for
+    /// each step to avoid floating point.
+    pub(crate) fn compute_backoff_ms(base_ms: u64, multiplier: u32, attempt_index: u32) -> u64 {
+        let mut delay = base_ms;
+        for _ in 0..attempt_index {
+            delay = delay.saturating_mul(multiplier as u64) / 100;
+        }
+        delay
+    }
+
     fn log_error(env: &Env, target: &Address, function: &Symbol, error: ExecutionError, attempts: u32) {
         Self::increment_counter(env, &DataKey::TotalErrors);
         // Emit a structured error event; does not leak internal details beyond
@@ -419,14 +518,14 @@ mod tests {
         let contract_id = env.register_contract(None, RouterExecution);
         let client = RouterExecutionClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        client.initialize(&admin, &2);
+        client.initialize(&admin, &2, &500, &200); // base=500ms, multiplier=2x
         (env, admin, client)
     }
 
     #[test]
     fn test_initialize_twice_fails() {
         let (_, admin, client) = setup();
-        let result = client.try_initialize(&admin, &1);
+        let result = client.try_initialize(&admin, &1, &0, &100);
         assert_eq!(result, Err(Ok(ExecutionError::AlreadyInitialized)));
     }
 
@@ -437,7 +536,19 @@ mod tests {
         let contract_id = env.register_contract(None, RouterExecution);
         let client = RouterExecutionClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        let result = client.try_initialize(&admin, &6);
+        let result = client.try_initialize(&admin, &6, &0, &100);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_initialize_invalid_multiplier_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        // multiplier < 100 is invalid
+        let result = client.try_initialize(&admin, &2, &500, &99);
         assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
     }
 
@@ -511,5 +622,62 @@ mod tests {
             result.message,
             soroban_sdk::String::from_str(&env, "simulation failed: transaction would be rejected")
         );
+    }
+
+    // ── Backoff config tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_backoff_config_stored_on_initialize() {
+        let (_, _, client) = setup();
+        let (base, mult) = client.backoff_config();
+        assert_eq!(base, 500);
+        assert_eq!(mult, 200);
+    }
+
+    #[test]
+    fn test_set_backoff_config_updates_values() {
+        let (_, admin, client) = setup();
+        client.set_backoff_config(&admin, &1000, &150);
+        let (base, mult) = client.backoff_config();
+        assert_eq!(base, 1000);
+        assert_eq!(mult, 150);
+    }
+
+    #[test]
+    fn test_set_backoff_config_unauthorized_fails() {
+        let (env, _, client) = setup();
+        let attacker = Address::generate(&env);
+        let result = client.try_set_backoff_config(&attacker, &1000, &200);
+        assert_eq!(result, Err(Ok(ExecutionError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_set_backoff_config_invalid_multiplier_fails() {
+        let (_, admin, client) = setup();
+        let result = client.try_set_backoff_config(&admin, &500, &99);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_compute_backoff_ms_no_delay() {
+        // base=0 → always 0 regardless of multiplier
+        assert_eq!(RouterExecution::compute_backoff_ms(0, 200, 0), 0);
+        assert_eq!(RouterExecution::compute_backoff_ms(0, 200, 3), 0);
+    }
+
+    #[test]
+    fn test_compute_backoff_ms_doubles_each_attempt() {
+        // base=100ms, multiplier=200 (2x): 100, 200, 400, 800
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 0), 100);
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 1), 200);
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 2), 400);
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 3), 800);
+    }
+
+    #[test]
+    fn test_compute_backoff_ms_1x_multiplier_stays_constant() {
+        // multiplier=100 (1x): delay stays at base
+        assert_eq!(RouterExecution::compute_backoff_ms(250, 100, 0), 250);
+        assert_eq!(RouterExecution::compute_backoff_ms(250, 100, 5), 250);
     }
 }
