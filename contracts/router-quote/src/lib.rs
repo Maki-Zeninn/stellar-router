@@ -237,6 +237,7 @@ pub enum QuoteError {
     InvalidSlippage = 5,
     EmptyRoute = 6,
     RouteTooLong = 7,
+    TokenMismatch = 8,
 }
 
 // Maximum hops allowed in a multi-hop route. Keeps gas costs bounded.
@@ -402,6 +403,18 @@ impl RouterQuote {
         }
         if slippage_bps > 10_000 {
             return Err(QuoteError::InvalidSlippage);
+        }
+
+        // Validate token continuity: hop[N].token_out must equal hop[N+1].token_in
+        let hop_count = hops.len();
+        let mut i = 0u32;
+        while i + 1 < hop_count {
+            let current = hops.get(i).unwrap();
+            let next = hops.get(i + 1).unwrap();
+            if current.token_out != next.token_in {
+                return Err(QuoteError::TokenMismatch);
+            }
+            i += 1;
         }
 
         Self::execute_hops(&env, hops, amount_in, slippage_bps, precision)
@@ -965,6 +978,21 @@ mod tests {
     }
 
     #[test]
+    fn test_multihop_token_mismatch_fails() {
+        let (env, client, double, triple) = setup();
+        let ta = Address::generate(&env);
+        let tb = Address::generate(&env);
+        let tc = Address::generate(&env);
+        let td = Address::generate(&env); // unrelated token — breaks chain
+
+        // Hop 1: A → B, Hop 2: C → D (B != C → TokenMismatch)
+        let mut hops = soroban_sdk::Vec::new(&env);
+        hops.push_back(HopDescriptor { plugin: double, token_in: ta, token_out: tb, fee_bps: 0 });
+        hops.push_back(HopDescriptor { plugin: triple, token_in: tc, token_out: td, fee_bps: 0 });
+
+        let r = client.try_get_multihop_quote(&hops, &1000, &0, &6);
+        assert_eq!(r, Err(Ok(QuoteError::TokenMismatch)));
+    }    #[test]
     fn test_multihop_too_many_hops_fails() {
         let (env, client, double, _) = setup();
         let ta = Address::generate(&env);
