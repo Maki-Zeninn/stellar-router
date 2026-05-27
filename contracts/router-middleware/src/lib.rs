@@ -782,17 +782,8 @@ impl RouterMiddleware {
         new_admin: Address,
     ) -> Result<(), MiddlewareError> {
         current.require_auth();
-
-        // One-liner using the shared macro
-        router_common::require_admin_simple!(&env, &current, &DataKey::Admin, MiddlewareError)?;
-
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
-
-        env.events().publish(
-            (Symbol::new(&env, "admin_transferred"),),
-            (current, new_admin),
-        );
-
+        Self::require_admin(&env, &current)?;
+        router_common::admin_transfer_complete!(&env, &current, &new_admin, &DataKey::Admin);
         Ok(())
     }
 

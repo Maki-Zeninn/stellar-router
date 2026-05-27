@@ -747,11 +747,7 @@ impl RouterCore {
     ) -> Result<(), RouterError> {
         current.require_auth();
         Self::require_admin(&env, &current)?;
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
-        env.events().publish(
-            (Symbol::new(&env, "admin_transferred"),),
-            (current, new_admin),
-        );
+        router_common::admin_transfer_complete!(&env, &current, &new_admin, &DataKey::Admin);
         Ok(())
     }
 

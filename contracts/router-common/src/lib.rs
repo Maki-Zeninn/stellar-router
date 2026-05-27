@@ -4,6 +4,8 @@
 //!
 //! ## Macros
 //! - [`require_admin!`] — inline admin check used across router contracts
+//! - [`require_admin_simple!`] — convenience macro for standard DataKey::Admin and error variants
+//! - [`admin_transfer_complete!`] — shared admin transfer pattern (storage set + event emit)
 
 /// Checks that `caller` matches the admin address stored under `key`.
 ///
@@ -112,5 +114,47 @@ macro_rules! require_admin_simple {
             <$error_type>::NotInitialized,
             <$error_type>::Unauthorized
         )
+    };
+}
+
+/// Helper macro for completing the admin transfer after validation.
+///
+/// Use this in your transfer_admin function after you've already:
+/// - Called current.require_auth()
+/// - Called your own require_admin check
+///
+/// This macro:
+/// - Sets the new admin in storage
+/// - Publishes the admin_transferred event
+///
+/// # Arguments
+/// * `$env` - The Soroban environment reference
+/// * `$current` - The current admin address (Address)
+/// * `$new_admin` - The new admin address (Address)
+/// * `$data_key_expr` - Expression for the storage key containing admin (e.g., &DataKey::Admin)
+///
+/// # Example
+/// ```ignore
+/// pub fn transfer_admin(
+///     env: Env,
+///     current: Address,
+///     new_admin: Address,
+/// ) -> Result<(), MyError> {
+///     current.require_auth();
+///     Self::require_admin(&env, &current)?;
+///     router_common::admin_transfer_complete!(&env, &current, &new_admin, &DataKey::Admin);
+///     Ok(())
+/// }
+/// ```
+#[macro_export]
+macro_rules! admin_transfer_complete {
+    ($env:expr, $current:expr, $new_admin:expr, $data_key_expr:expr) => {
+        {
+            $env.storage().instance().set($data_key_expr, $new_admin);
+            $env.events().publish(
+                (soroban_sdk::Symbol::new($env, "admin_transferred"),),
+                ($current, $new_admin),
+            );
+        }
     };
 }
