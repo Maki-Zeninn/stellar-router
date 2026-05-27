@@ -983,6 +983,70 @@ mod tests {
         assert_eq!(r, Err(Ok(QuoteError::RouteTooLong)));
     }
 
+    // ── Issue #456: multi-hop fee compounding and exchange rate ──────────────
+
+    #[test]
+    fn test_multihop_fees_applied_independently_per_hop() {
+        // Each hop's fee is computed from that hop's input, not the original amount_in.
+        let (env, client, double, triple) = setup();
+        let ta = Address::generate(&env);
+        let tb = Address::generate(&env);
+        let tc = Address::generate(&env);
+
+        // Hop 1: fee_bps=100 (1%), amount_in=1000 → fee=10
+        // Hop 2: fee_bps=100 (1%), amount_in=2000 (output of hop1) → fee=20
+        let mut hops = soroban_sdk::Vec::new(&env);
+        hops.push_back(HopDescriptor { plugin: double.clone(), token_in: ta, token_out: tb.clone(), fee_bps: 100 });
+        hops.push_back(HopDescriptor { plugin: triple.clone(), token_in: tb, token_out: tc, fee_bps: 100 });
+
+        let resp = client.get_multihop_quote(&hops, &1000, &0, &6);
+
+        // Hop 1 fee: 1000 * 100 / 10_000 = 10
+        assert_eq!(resp.hops.get(0).unwrap().fee_amount, 10);
+        // Hop 2 fee: 2000 * 100 / 10_000 = 20
+        assert_eq!(resp.hops.get(1).unwrap().fee_amount, 20);
+    }
+
+    #[test]
+    fn test_multihop_total_fee_is_sum_of_hop_fees() {
+        // total_fee_amount must equal the sum of all per-hop fee_amounts.
+        let (env, client, double, triple) = setup();
+        let ta = Address::generate(&env);
+        let tb = Address::generate(&env);
+        let tc = Address::generate(&env);
+
+        let mut hops = soroban_sdk::Vec::new(&env);
+        hops.push_back(HopDescriptor { plugin: double.clone(), token_in: ta, token_out: tb.clone(), fee_bps: 50 });
+        hops.push_back(HopDescriptor { plugin: triple.clone(), token_in: tb, token_out: tc, fee_bps: 200 });
+
+        let resp = client.get_multihop_quote(&hops, &1000, &0, &6);
+
+        let sum: i128 = resp.hops.iter().map(|h| h.fee_amount).sum();
+        assert_eq!(resp.total_fee_amount, sum);
+    }
+
+    #[test]
+    fn test_multihop_exchange_rate_reflects_full_chain() {
+        // exchange_rate = (final_out * 10^precision) / initial_in, not just the last hop.
+        let (env, client, double, triple) = setup();
+        let ta = Address::generate(&env);
+        let tb = Address::generate(&env);
+        let tc = Address::generate(&env);
+
+        // amount_in=100 → hop1(×2)=200 → hop2(×3)=600
+        // rate = (600 * 10^6) / 100 = 6_000_000
+        let mut hops = soroban_sdk::Vec::new(&env);
+        hops.push_back(HopDescriptor { plugin: double.clone(), token_in: ta, token_out: tb.clone(), fee_bps: 0 });
+        hops.push_back(HopDescriptor { plugin: triple.clone(), token_in: tb, token_out: tc, fee_bps: 0 });
+
+        let resp = client.get_multihop_quote(&hops, &100, &0, &6);
+
+        assert_eq!(resp.amount_out, 600);
+        assert_eq!(resp.exchange_rate, 6_000_000); // 6.000000 with precision 6
+        // Verify it's NOT just the last hop rate (last hop alone: 600/200 = 3.0 → 3_000_000)
+        assert_ne!(resp.exchange_rate, 3_000_000);
+    }
+
     // ── Fee estimate tests ────────────────────────────────────────────────────
 
     #[test]

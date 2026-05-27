@@ -1158,6 +1158,65 @@ mod tests {
         assert_eq!(result, Err(Ok(AccessError::Unauthorized)));
     }
 
+    // ── Issue #454: role hierarchy cycle detection at depth ───────────────────
+
+    #[test]
+    fn test_cycle_depth_2_a_b_a() {
+        // A→B then B→A must be rejected.
+        let (env, admin, client) = setup();
+        let a = String::from_str(&env, "role_a");
+        let b = String::from_str(&env, "role_b");
+
+        client.set_role_parent(&admin, &b, &a); // b's parent = a
+        let result = client.try_set_role_parent(&admin, &a, &b); // a's parent = b → cycle
+        assert_eq!(result, Err(Ok(AccessError::HierarchyCycle)));
+    }
+
+    #[test]
+    fn test_cycle_depth_3_a_b_c_a() {
+        // A→B→C then C→A must be rejected.
+        let (env, admin, client) = setup();
+        let a = String::from_str(&env, "role_a");
+        let b = String::from_str(&env, "role_b");
+        let c = String::from_str(&env, "role_c");
+
+        client.set_role_parent(&admin, &b, &a); // b's parent = a
+        client.set_role_parent(&admin, &c, &b); // c's parent = b  → chain: c→b→a
+        let result = client.try_set_role_parent(&admin, &a, &c); // a's parent = c → cycle
+        assert_eq!(result, Err(Ok(AccessError::HierarchyCycle)));
+    }
+
+    #[test]
+    fn test_self_cycle_a_a() {
+        // A→A must be rejected.
+        let (env, admin, client) = setup();
+        let a = String::from_str(&env, "role_a");
+        let result = client.try_set_role_parent(&admin, &a, &a);
+        assert_eq!(result, Err(Ok(AccessError::HierarchyCycle)));
+    }
+
+    #[test]
+    fn test_valid_deep_chain_a_b_c_d_accepted() {
+        // A→B→C→D is a valid chain with no cycle.
+        let (env, admin, client) = setup();
+        let a = String::from_str(&env, "role_a");
+        let b = String::from_str(&env, "role_b");
+        let c = String::from_str(&env, "role_c");
+        let d = String::from_str(&env, "role_d");
+
+        assert!(client.try_set_role_parent(&admin, &b, &a).is_ok()); // b's parent = a
+        assert!(client.try_set_role_parent(&admin, &c, &b).is_ok()); // c's parent = b
+        assert!(client.try_set_role_parent(&admin, &d, &c).is_ok()); // d's parent = c
+
+        // Verify the chain: a user with role_a should inherit b, c, d
+        let user = Address::generate(&env);
+        client.grant_role(&admin, &user, &a, &None);
+        assert!(client.has_role(&user, &a));
+        assert!(client.has_role(&user, &b));
+        assert!(client.has_role(&user, &c));
+        assert!(client.has_role(&user, &d));
+    }
+
     // ── Role hierarchy tests ──────────────────────────────────────────────────
 
     #[test]

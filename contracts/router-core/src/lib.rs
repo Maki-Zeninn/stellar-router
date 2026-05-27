@@ -1969,6 +1969,66 @@ mod tests {
         assert_eq!(client.get_alias_target(&name), None);
     }
 
+    // ── Issue #453: alias edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn test_alias_chain_resolves_to_original_address() {
+        // alias_b → oracle (alias pointing to another alias is not supported;
+        // add_alias only accepts existing *routes*, not aliases, as the target).
+        // This test verifies that an alias of an alias is rejected with RouteNotFound
+        // because the intermediate alias is not a registered route.
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let alias_a = String::from_str(&env, "oracle_a");
+        let alias_b = String::from_str(&env, "oracle_b");
+        let addr = Address::generate(&env);
+
+        client.register_route(&admin, &oracle, &addr, &None);
+        client.add_alias(&admin, &oracle, &alias_a);
+
+        // alias_a is not a route, so aliasing it should fail
+        let result = client.try_add_alias(&admin, &alias_a, &alias_b);
+        assert_eq!(result, Err(Ok(RouterError::RouteNotFound)));
+    }
+
+    #[test]
+    fn test_dangling_alias_after_parent_route_removed() {
+        // After remove_route, the alias is cleaned up and resolving it returns RouteNotFound.
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let alias = String::from_str(&env, "oracle_v1");
+        let addr = Address::generate(&env);
+
+        client.register_route(&admin, &oracle, &addr, &None);
+        client.add_alias(&admin, &oracle, &alias);
+        assert_eq!(client.resolve(&alias), addr);
+
+        client.remove_route(&admin, &oracle);
+
+        assert_eq!(
+            client.try_resolve(&alias),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        // The alias target lookup should also return None after cleanup
+        assert_eq!(client.get_alias_target(&alias), None);
+    }
+
+    #[test]
+    fn test_duplicate_alias_name_fails() {
+        // Creating an alias with the same name as an existing alias returns RouteAlreadyExists.
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let alias = String::from_str(&env, "oracle_v1");
+        let addr = Address::generate(&env);
+
+        client.register_route(&admin, &oracle, &addr, &None);
+        client.add_alias(&admin, &oracle, &alias);
+
+        // Second add_alias with the same alias name must fail
+        let result = client.try_add_alias(&admin, &oracle, &alias);
+        assert_eq!(result, Err(Ok(RouterError::RouteAlreadyExists)));
+    }
+
     // ── Route scoring / path selection tests (#330) ───────────────────────────
 
     #[test]
