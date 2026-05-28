@@ -1588,7 +1588,7 @@ mod tests {
         let metadata = Some(RouteMetadata {
             description,
             tags,
-            owner: Some(admin.clone()),
+            owner: Address::generate(&env),
         });
 
         client.register_route(&admin, &name, &addr, &None);
@@ -2116,6 +2116,95 @@ mod tests {
         assert_eq!(best, None);
     }
 
+    // ── Issue #506: get_all_routes after remove and re-register ──────────────
+
+    #[test]
+    fn test_get_all_routes_count_decrements_after_remove() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let vault = String::from_str(&env, "vault");
+        let swap = String::from_str(&env, "swap");
+        let addr = Address::generate(&env);
+
+        // Register 3 routes
+        client.register_route(&admin, &oracle, &addr, &None);
+        client.register_route(&admin, &vault, &addr, &None);
+        client.register_route(&admin, &swap, &addr, &None);
+        assert_eq!(client.get_all_routes().len(), 3);
+
+        // Remove one route
+        client.remove_route(&admin, &vault);
+        
+        // Count should decrement by one
+        let routes = client.get_all_routes();
+        assert_eq!(routes.len(), 2);
+        assert!(routes.contains(&oracle));
+        assert!(!routes.contains(&vault));
+        assert!(routes.contains(&swap));
+    }
+
+    #[test]
+    fn test_get_all_routes_includes_re_registered_route() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let addr1 = Address::generate(&env);
+        let addr2 = Address::generate(&env);
+
+        // Register, remove, then re-register
+        client.register_route(&admin, &oracle, &addr1, &None);
+        assert_eq!(client.get_all_routes().len(), 1);
+
+        client.remove_route(&admin, &oracle);
+        assert_eq!(client.get_all_routes().len(), 0);
+
+        client.register_route(&admin, &oracle, &addr2, &None);
+        
+        // Route should be back in the list
+        let routes = client.get_all_routes();
+        assert_eq!(routes.len(), 1);
+        assert!(routes.contains(&oracle));
+    }
+
+    #[test]
+    fn test_get_all_routes_no_duplicates_after_multiple_operations() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let vault = String::from_str(&env, "vault");
+        let swap = String::from_str(&env, "swap");
+        let addr = Address::generate(&env);
+
+        // Register multiple routes
+        client.register_route(&admin, &oracle, &addr, &None);
+        client.register_route(&admin, &vault, &addr, &None);
+        client.register_route(&admin, &swap, &addr, &None);
+
+        // Remove and re-register some routes
+        client.remove_route(&admin, &vault);
+        client.register_route(&admin, &vault, &addr, &None);
+        client.remove_route(&admin, &oracle);
+        client.register_route(&admin, &oracle, &addr, &None);
+
+        // Verify no duplicates
+        let routes = client.get_all_routes();
+        assert_eq!(routes.len(), 3);
+        
+        // Count occurrences of each route name
+        let mut oracle_count = 0;
+        let mut vault_count = 0;
+        let mut swap_count = 0;
+        for route in routes.iter() {
+            if route == oracle {
+                oracle_count += 1;
+            } else if route == vault {
+                vault_count += 1;
+            } else if route == swap {
+                swap_count += 1;
+            }
+        }
+        
+        assert_eq!(oracle_count, 1, "oracle should appear exactly once");
+        assert_eq!(vault_count, 1, "vault should appear exactly once");
+        assert_eq!(swap_count, 1, "swap should appear exactly once");
     // ── Issue #511: Route validation tests ───────────────────────────────────
 
     #[test]

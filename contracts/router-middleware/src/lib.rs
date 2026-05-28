@@ -1660,3 +1660,171 @@ mod tests {
         assert_eq!(summary.total_calls, 5); // all 5 counted
         assert_eq!(client.get_call_log(&route).len(), 2); // only 2 retained
     }
+
+    // ── Issue #507: circuit breaker auto-recovery after window ───────────────
+
+    #[test]
+    fn test_circuit_opens_after_failure_threshold() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        let caller = Address::generate(&env);
+        
+        // Configure with failure_threshold=3
+        client.configure_route(&admin, &route, &0, &0, &true, &3, &60, &0);
+
+        // Trigger 3 failures to reach threshold
+        client.post_call(&caller, &route, &false);
+        client.post_call(&caller, &route, &false);
+        client.post_call(&caller, &route, &false);
+
+        // Circuit should now be open
+        let result = client.try_pre_call(&caller, &route);
+        assert_eq!(result, Err(Ok(MiddlewareError::CircuitOpen)));
+    }
+
+    #[test]
+    fn test_pre_call_blocked_while_circuit_open() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        let caller = Address::generate(&env);
+        
+        // Configure with failure_threshold=1, recovery_window=60s
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &60, &0);
+
+        // Trip the circuit
+        client.post_call(&caller, &route, &false);
+
+        // Verify circuit is open
+        assert_eq!(
+            client.try_pre_call(&caller, &route),
+            Err(Ok(MiddlewareError::CircuitOpen))
+        );
+
+        // Multiple attempts should all be blocked
+        assert_eq!(
+            client.try_pre_call(&caller, &route),
+            Err(Ok(MiddlewareError::CircuitOpen))
+        );
+        assert_eq!(
+            client.try_pre_call(&caller, &route),
+            Err(Ok(MiddlewareError::CircuitOpen))
+        );
+    }
+
+    #[test]
+    fn test_pre_call_succeeds_after_recovery_window() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        let caller = Address::generate(&env);
+        
+        // Configure with failure_threshold=2, recovery_window=100s
+        client.configure_route(&admin, &route, &0, &0, &true, &2, &100, &0);
+
+        // Trip the circuit
+        client.post_call(&caller, &route, &false);
+        client.post_call(&caller, &route, &false);
+
+        // Verify circuit is open
+        assert_eq!(
+            client.try_pre_call(&caller, &route),
+            Err(Ok(MiddlewareError::CircuitOpen))
+        );
+
+        // Advance ledger timestamp past recovery window
+        env.ledger().with_mut(|l| l.timestamp += 101);
+
+        // pre_call should now succeed (auto-recovery)
+        let result = client.try_pre_call(&caller, &route);
+        assert!(result.is_ok(), "pre_call should succeed after recovery window");
+    }
+
+    #[test]
+    fn test_success_after_recovery_resets_failure_count() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        let caller = Address::generate(&env);
+        
+        // Configure with failure_threshold=2, recovery_window=60s
+        client.configure_route(&admin, &route, &0, &0, &true, &2, &60, &0);
+
+        // Trip the circuit
+        client.post_call(&caller, &route, &false);
+        client.post_call(&caller, &route, &false);
+
+        // Verify circuit is open
+        let state_before_recovery = client.circuit_breaker_state(&route).unwrap();
+        assert!(state_before_recovery.is_open);
+        assert_eq!(state_before_recovery.failure_count, 2);
+
+        // Advance past recovery window
+        env.ledger().with_mut(|l| l.timestamp += 61);
+
+        // Make a successful call (triggers auto-recovery)
+        assert!(client.try_pre_call(&caller, &route).is_ok());
+
+        // Verify failure_count is reset to zero
+        let state_after_recovery = client.circuit_breaker_state(&route).unwrap();
+        assert!(!state_after_recovery.is_open);
+        assert_eq!(state_after_recovery.failure_count, 0);
+        assert_eq!(state_after_recovery.opened_at, 0);
+    }
+
+    #[test]
+    fn test_circuit_breaker_state_updated_after_recovery() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        let caller = Address::generate(&env);
+        
+        // Configure with failure_threshold=1, recovery_window=50s
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &50, &0);
+
+        // Trip the circuit
+        client.post_call(&caller, &route, &false);
+
+        // Verify initial state
+        let state_open = client.circuit_breaker_state(&route).unwrap();
+        assert!(state_open.is_open);
+        assert_eq!(state_open.failure_count, 1);
+        assert!(state_open.opened_at > 0);
+
+        // Advance past recovery window
+        env.ledger().with_mut(|l| l.timestamp += 51);
+
+        // Trigger auto-recovery by calling pre_call
+        assert!(client.try_pre_call(&caller, &route).is_ok());
+
+        // Verify state is fully reset
+        let state_recovered = client.circuit_breaker_state(&route).unwrap();
+        assert!(!state_recovered.is_open, "is_open should be false");
+        assert_eq!(state_recovered.failure_count, 0, "failure_count should be 0");
+        assert_eq!(state_recovered.opened_at, 0, "opened_at should be 0");
+    }
+
+    #[test]
+    fn test_circuit_not_recovered_before_window_expires() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        let caller = Address::generate(&env);
+        
+        // Configure with failure_threshold=1, recovery_window=100s
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &100, &0);
+
+        // Trip the circuit
+        client.post_call(&caller, &route, &false);
+
+        // Advance time but not enough (only 50 seconds, need 100)
+        env.ledger().with_mut(|l| l.timestamp += 50);
+
+        // Circuit should still be open
+        assert_eq!(
+            client.try_pre_call(&caller, &route),
+            Err(Ok(MiddlewareError::CircuitOpen))
+        );
+
+        // Advance to exactly the recovery time (not past it)
+        env.ledger().with_mut(|l| l.timestamp += 50);
+
+        // Should now succeed (at exactly recovery_window_seconds)
+        assert!(client.try_pre_call(&caller, &route).is_ok());
+    }
+}
