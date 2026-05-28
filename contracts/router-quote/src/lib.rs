@@ -284,6 +284,59 @@ impl RouterQuote {
             if current.token_out != next.token_in {
                 return Err(QuoteError::TokenMismatch);
             }
+        };
+
+        // Try to invoke the get_quote function on the target contract
+        // The plugin interface expects: get_quote(token_in, token_out, amount_in) -> i128
+        let function = Symbol::new(&env, "get_quote");
+        
+        // Build args: (token_in, token_out, amount_in)
+        let mut args = Vec::new(&env);
+        args.push_back(token_in.into());
+        args.push_back(token_out.into());
+        args.push_back(amount_in.into());
+
+        let amount_out: i128 = env
+            .try_invoke_contract::<i128, i128>(&target, &function, args)
+            .map_err(|_| QuoteError::QuoteFailed)?
+            .map_err(|_| QuoteError::QuoteFailed)?;
+
+        // Protocol fee: amount_in * fee_bps / 10_000
+        let fee_amount = amount_in * fee_bps as i128 / 10_000;
+
+        // Slippage: min_amount_out = amount_out * (10_000 - slippage_bps) / 10_000
+        let min_amount_out = amount_out * (10_000 - slippage_bps as i128) / 10_000;
+
+        // Exchange rate as fixed-point: (amount_out * 10^precision) / amount_in
+        // Uses i128 arithmetic — safe for precision ≤ 18 and typical token amounts.
+        let scale = Self::pow10(precision);
+        let exchange_rate = (amount_out * scale) / amount_in;
+
+        // Price impact: simplified as (amount_out - amount_in) * 10_000 / amount_in
+        // Negative means the user receives less than they put in (adverse).
+        let price_impact_bps = ((amount_out - amount_in) * 10_000 / amount_in) as i32;
+
+        env.events().publish(
+            (Symbol::new(&env, "quote_generated"),),
+            (&target, amount_in, amount_out, exchange_rate),
+        );
+        // Attempt the cross-contract call
+        let amount_out: i128 = env
+            .invoke_contract(&target, &function, args);
+
+        // Calculate fee (assuming 1% fee for now - in production this comes from the plugin)
+        let fee_amount = amount_in * 1 / 100;
+        
+        // Calculate min_amount_out using caller-specified slippage_bps
+        // Formula: amount_out * (10000 - slippage_bps) / 10000
+        let min_amount_out = amount_out * (10_000 - slippage_bps as i128) / 10_000;
+        
+        // Exchange rate placeholder
+        let exchange_rate = String::from_str(&env, "0");
+
+        // Price impact: (amount_out - amount_in) * 10_000 / amount_in
+        // Negative means the user receives less than they put in (adverse).
+        let price_impact_bps = ((amount_out - amount_in) * 10_000 / amount_in) as i32;
             i += 1;
         }
 

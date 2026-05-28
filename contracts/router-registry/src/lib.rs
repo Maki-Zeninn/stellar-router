@@ -192,7 +192,7 @@ impl RouterRegistry {
             .set(&DataKey::AddressIndex(entry.address.clone()), &(name.clone(), version));
 
         env.events()
-            .publish((Symbol::new(&env, "contract_registered"),), (name, version));
+            .publish((Symbol::new(&env, "contract_registered"),), (name, version, None::<String>));
 
         Ok(())
     }
@@ -814,9 +814,10 @@ mod tests {
                 Symbol::new(&env, "contract_deprecated").into_val(&env)
             ]
         );
-        let (n, v): (String, u32) = event.2.into_val(&env);
+        let (n, v, r): (String, u32, Option<String>) = event.2.into_val(&env);
         assert_eq!(n, name);
         assert_eq!(v, 1u32);
+        assert_eq!(r, None);
     }
 
     #[test]
@@ -1117,8 +1118,8 @@ mod tests {
         client.deprecate(&admin, &name, &2, &None);
         client.deprecate(&admin, &name, &3, &None);
         client.deprecate(&admin, &name, &1, &None::<String>);
-        client.deprecate(&admin, &name, &2);
-        client.deprecate(&admin, &name, &3);
+        client.deprecate(&admin, &name, &2, &None::<String>);
+        client.deprecate(&admin, &name, &3, &None::<String>);
 
         let constraint = String::from_str(&env, ">=1");
         let result = client.try_get_latest_with_constraint(&name, &Some(constraint));
@@ -1185,6 +1186,7 @@ mod tests {
         let a2 = Address::generate(&env);
         client.register(&admin, &name, &a1, &1);
         client.register(&admin, &name, &a2, &2);
+        client.deprecate(&admin, &name, &1, &None::<String>);
         client.deprecate(&admin, &name, &1, &None);
 
         let entries = client.get_all_versions(&name);
@@ -1203,6 +1205,25 @@ mod tests {
     }
 
     #[test]
+    fn test_deprecate_with_reason_stored_and_emitted() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        let reason = String::from_str(&env, "security vulnerability in v1");
+        client.register(&admin, &name, &addr, &1);
+        client.deprecate(&admin, &name, &1, &Some(reason.clone()));
+
+        // Verify reason is stored in the entry
+        let entry = client.get(&name, &1);
+        assert!(entry.deprecated);
+        assert_eq!(entry.deprecation_reason, Some(reason.clone()));
+
+        // Verify reason is emitted in the event
+        let event = env.events().all().last().unwrap().clone();
+        let (n, v, r): (String, u32, Option<String>) = event.2.into_val(&env);
+        assert_eq!(n, name);
+        assert_eq!(v, 1u32);
+        assert_eq!(r, Some(reason));
     fn test_get_entry_by_address_found() {
     fn test_get_latest_with_constraint_version_zero_matching() {
         // version 0 is not allowed to be registered, but constraint >=0 should match version 1
