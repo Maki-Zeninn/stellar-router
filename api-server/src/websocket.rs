@@ -5,14 +5,13 @@ use axum::{
     },
     response::IntoResponse,
 };
-use chrono::Utc;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde_json::json;
-use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
 use crate::{
     state::AppState,
-    types::{SubscribeMessage, TransactionStatus, TransactionStatusEvent},
+    types::{SubscribeMessage, TransactionStatusEvent},
 };
 
 /// WebSocket upgrade handler
@@ -98,23 +97,31 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             }
 
-            // Handle broadcast messages
+            // Handle broadcast messages — poll all receivers concurrently
+            // without busy-looping by using FuturesUnordered.
             result = async {
-                // Wait for any of the broadcast receivers to get a message
-                for (tx_id, rx) in &mut rx_handles {
-                    if let Ok(event) = rx.try_recv() {
-                        return Some((tx_id.clone(), event));
-                    }
-                }
-                // If no immediate message, wait on the first receiver
-                if let Some((tx_id, rx)) = rx_handles.first_mut() {
-                    match rx.recv().await {
-                        Ok(event) => Some((tx_id.clone(), event)),
-                        Err(_) => None,
-                    }
+                if rx_handles.is_empty() {
+                    std::future::pending::<Option<(String, TransactionStatusEvent)>>().await
                 } else {
-                    // No subscriptions, just wait
-                    std::future::pending().await
+                    let mut futs: FuturesUnordered<_> = rx_handles
+                        .iter_mut()
+                        .map(|(tx_id, rx)| {
+                            let id = tx_id.clone();
+                            async move {
+                                match rx.recv().await {
+                                    Ok(event) => Some((id, event)),
+                                    Err(_) => None,
+                                }
+                            }
+                        })
+                        .collect();
+                    loop {
+                        match futs.next().await {
+                            Some(Some(pair)) => return Some(pair),
+                            Some(None) => continue,
+                            None => return None,
+                        }
+                    }
                 }
             } => {
                 if let Some((tx_id, event)) = result {
