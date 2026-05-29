@@ -1,0 +1,102 @@
+name: Metrics Exporter CI
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'metrics/**'
+      - '.github/workflows/metrics-exporter.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'metrics/**'
+      - '.github/workflows/metrics-exporter.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Run tests
+        run: cargo test -p router-metrics-exporter --verbose
+      
+      - name: Check formatting
+        run: cargo fmt -p router-metrics-exporter -- --check
+      
+      - name: Run clippy
+        run: cargo clippy -p router-metrics-exporter -- -D warnings
+
+  build:
+    name: Build Binary
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      
+      - name: Build release binary
+        run: cargo build --release -p router-metrics-exporter --target ${{ matrix.target }}
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: router-metrics-exporter-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/router-metrics-exporter*
+
+  docker:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, build]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: metrics/Dockerfile
+          push: false
+          tags: stellar-router/metrics-exporter:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

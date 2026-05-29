@@ -10,6 +10,12 @@
 //! - Per-call success/failure tracking (non-atomic mode)
 //! - Atomic mode: revert all if any call fails
 //! - Call result storage for async inspection
+//!
+//! ## Events (following naming convention: past tense verbs in snake_case)
+//! - `call_result` — Individual call result logged (caller, target, function, success)
+//! - `batch_executed` — Batch execution completed (summary_data)
+//! - `max_batch_size_updated` — Max batch size updated (old_size, new_size)
+//! - `admin_transferred` — Admin transferred (old_admin, new_admin)
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, contracterror,
@@ -23,6 +29,8 @@ pub enum DataKey {
     Admin,
     MaxBatchSize,
     TotalBatches,
+    Executing, // reentrancy guard
+    BatchResult(u64, u32), // (batch_id, call_index) -> CallResult
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -85,6 +93,7 @@ pub enum MulticallError {
     EmptyBatch = 5,
     RequiredCallFailed = 6,
     InvalidConfig = 7,
+    Reentrancy = 8,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -138,6 +147,9 @@ impl RouterMulticall {
     /// [`MulticallError::RequiredCallFailed`] is returned. On completion,
     /// increments the total batch counter (unless `simulate` is `true`).
     ///
+    /// When `store_results` is `true`, each [`CallResult`] is persisted under
+    /// `DataKey::BatchResult(batch_id, call_index)` for later inspection.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `caller` - The address initiating the batch; must authenticate.
@@ -146,6 +158,8 @@ impl RouterMulticall {
     ///   Must be non-empty and no larger than the configured `max_batch_size`.
     /// * `simulate` - If `true`, executes in dry-run mode: all calls are attempted
     ///   but the batch counter is not incremented.
+    /// * `store_results` - If `true`, each [`CallResult`] is persisted under
+    ///   `DataKey::BatchResult(batch_id, call_index)` for later inspection.
     ///
     /// # Returns
     /// A [`BatchSummary`] with the total, succeeded, failed, and budget_exceeded_count.
@@ -160,30 +174,47 @@ impl RouterMulticall {
         caller: Address,
         calls: Vec<CallDescriptor>,
         simulate: bool,
+        store_results: bool,
     ) -> Result<BatchSummary, MulticallError> {
         caller.require_auth();
 
+        // Reentrancy guard
+        if env.storage().instance().get::<DataKey, bool>(&DataKey::Executing).unwrap_or(false) {
+            return Err(MulticallError::Reentrancy);
+        }
+        env.storage().instance().set(&DataKey::Executing, &true);
+
         if calls.is_empty() {
+            env.storage().instance().remove(&DataKey::Executing);
             return Err(MulticallError::EmptyBatch);
         }
 
-        let max: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MaxBatchSize)
-            .ok_or(MulticallError::NotInitialized)?;
+        let max: u32 = match env.storage().instance().get(&DataKey::MaxBatchSize) {
+            Some(v) => v,
+            None => {
+                env.storage().instance().remove(&DataKey::Executing);
+                return Err(MulticallError::NotInitialized);
+            }
+        };
 
         if calls.len() > max {
+            env.storage().instance().remove(&DataKey::Executing);
             return Err(MulticallError::BatchTooLarge);
         }
+
+        let batch_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalBatches)
+            .unwrap_or(0);
 
         let mut succeeded = 0u32;
         let mut failed = 0u32;
         let mut budget_exceeded_count = 0u32;
         let total = calls.len();
 
+        let mut call_index = 0u32;
         for call in calls.iter() {
-            // Attempt the cross-contract call with empty args
             let args: Vec<Val> = Vec::new(&env);
             let result = env.try_invoke_contract::<Val, Val>(&call.target, &call.function, args);
 
@@ -193,33 +224,40 @@ impl RouterMulticall {
                 succeeded += 1;
             } else {
                 failed += 1;
-                // The host does not expose a per-call CPU counter to guest contracts.
-                // We conservatively count any failed call that had a budget set as a
-                // potential budget overrun. This will be tightened once the host
-                // surfaces budget metering to contracts.
                 if call.instruction_budget.is_some() {
                     budget_exceeded_count += 1;
                 }
-                if call.required {
-                    return Err(MulticallError::RequiredCallFailed);
-                }
+            }
+
+            if store_results {
+                env.storage().instance().set(
+                    &DataKey::BatchResult(batch_id, call_index),
+                    &CallResult {
+                        target: call.target.clone(),
+                        function: call.function.clone(),
+                        success,
+                    },
+                );
             }
 
             env.events().publish(
                 (Symbol::new(&env, "call_result"),),
                 (&caller, &call.target, &call.function, success),
             );
+
+            if !success && call.required {
+                env.storage().instance().remove(&DataKey::Executing);
+                return Err(MulticallError::RequiredCallFailed);
+            }
+
+            call_index += 1;
         }
 
-        // Only increment batch counter if not simulating
         if !simulate {
-            let batches: u64 = env
-                .storage()
-                .instance()
-                .get(&DataKey::TotalBatches)
-                .unwrap_or(0);
-            env.storage().instance().set(&DataKey::TotalBatches, &(batches + 1));
+            env.storage().instance().set(&DataKey::TotalBatches, &(batch_id + 1));
         }
+
+        env.storage().instance().remove(&DataKey::Executing);
 
         Ok(BatchSummary {
             total,
@@ -252,7 +290,7 @@ impl RouterMulticall {
         max_batch_size: u32,
     ) -> Result<(), MulticallError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, MulticallError)?;
         if max_batch_size == 0 {
             return Err(MulticallError::InvalidConfig);
         }
@@ -337,24 +375,11 @@ impl RouterMulticall {
     /// * [`MulticallError::NotInitialized`] — if the contract has not been initialized.
     pub fn transfer_admin(env: Env, current: Address, new_admin: Address) -> Result<(), MulticallError> {
         current.require_auth();
-        Self::require_admin(&env, &current)?;
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
-        env.events().publish(
-            (Symbol::new(&env, "admin_transferred"),),
-            (current, new_admin),
-        );
+        router_common::require_admin_simple!(&env, &current, &DataKey::Admin, MulticallError)?;
+        router_common::admin_transfer_complete!(&env, &current, &new_admin, &DataKey::Admin);
         Ok(())
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    fn require_admin(env: &Env, caller: &Address) -> Result<(), MulticallError> {
-        let admin = Self::admin(env.clone());
-        if &admin != caller {
-            return Err(MulticallError::Unauthorized);
-        }
-        Ok(())
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -394,7 +419,7 @@ mod tests {
         let (env, _admin, client) = setup();
         let caller = Address::generate(&env);
         let calls: Vec<CallDescriptor> = Vec::new(&env);
-        let result = client.try_execute_batch(&caller, &calls, &false);
+        let result = client.try_execute_batch(&caller, &calls, &false, &false);
         assert_eq!(result, Err(Ok(MulticallError::EmptyBatch)));
     }
 
@@ -412,7 +437,7 @@ mod tests {
                 instruction_budget: None,
             });
         }
-        let result = client.try_execute_batch(&caller, &calls, &false);
+        let result = client.try_execute_batch(&caller, &calls, &false, &false);
         assert_eq!(result, Err(Ok(MulticallError::BatchTooLarge)));
     }
 
@@ -487,7 +512,7 @@ mod tests {
             instruction_budget: None,
         });
 
-        let summary = client.execute_batch(&caller, &calls, &false);
+        let summary = client.execute_batch(&caller, &calls, &false, &false);
         assert_eq!(summary.total, 2);
         assert_eq!(summary.succeeded, 2);
         assert_eq!(summary.failed, 0);
@@ -524,7 +549,7 @@ mod tests {
             instruction_budget: None,
         });
 
-        let summary = client.execute_batch(&caller, &calls, &false);
+        let summary = client.execute_batch(&caller, &calls, &false, &false);
         assert_eq!(summary.total, 3);
         assert_eq!(summary.succeeded, 2);
         assert_eq!(summary.failed, 1);
@@ -560,7 +585,7 @@ mod tests {
             instruction_budget: None,
         });
 
-        let result = client.try_execute_batch(&caller, &calls, &false);
+        let result = client.try_execute_batch(&caller, &calls, &false, &false);
         assert_eq!(result, Err(Ok(MulticallError::RequiredCallFailed)));
         // Total batches should NOT increment if it failed
         assert_eq!(client.total_batches(), 0);
@@ -642,7 +667,7 @@ mod tests {
             instruction_budget: Some(500_000),
         });
 
-        let summary = client.execute_batch(&caller, &calls, &false);
+        let summary = client.execute_batch(&caller, &calls, &false, &false);
         assert_eq!(summary.total, 3);
         assert_eq!(summary.succeeded, 1);
         assert_eq!(summary.failed, 2);
@@ -663,7 +688,7 @@ mod tests {
             instruction_budget: None,
         });
 
-        let summary = client.execute_batch(&caller, &calls, &true);
+        let summary = client.execute_batch(&caller, &calls, &true, &false);
         assert_eq!(summary.total, 1);
         assert_eq!(summary.succeeded, 1);
         assert_eq!(summary.failed, 0);
@@ -691,7 +716,7 @@ mod tests {
             instruction_budget: None,
         });
 
-        let summary = client.execute_batch(&caller, &calls, &true);
+        let summary = client.execute_batch(&caller, &calls, &true, &false);
         assert_eq!(summary.total, 2);
         assert_eq!(summary.succeeded, 1);
         assert_eq!(summary.failed, 1);
@@ -717,7 +742,7 @@ mod tests {
             instruction_budget: None,
         });
 
-        let summary = client.execute_batch(&caller, &calls, &false);
+        let summary = client.execute_batch(&caller, &calls, &false, &false);
         assert_eq!(summary.total, 2);
         assert_eq!(summary.succeeded, 1);
         assert_eq!(summary.failed, 1);
@@ -737,7 +762,7 @@ mod tests {
                 instruction_budget: None,
             });
 
-            client.execute_batch(&caller, &calls, &false);
+            client.execute_batch(&caller, &calls, &false, &false);
 
             // Find the call_result event — tuple is (contract_id, topics: Vec<Val>, data: Val)
             let all_events = env.events().all();
@@ -757,4 +782,73 @@ mod tests {
 
             assert_eq!(event_caller, caller);
         }
+
+    #[test]
+    fn test_total_batches_not_incremented_when_required_call_fails() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "fail"),
+            required: true,
+            instruction_budget: None,
+        });
+
+        let result = client.try_execute_batch(&caller, &calls, &false, &false);
+        assert_eq!(result, Err(Ok(MulticallError::RequiredCallFailed)));
+        assert_eq!(client.total_batches(), 0);
+    }
+
+    #[test]
+    fn test_executing_flag_cleared_after_success() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: true,
+            instruction_budget: None,
+        });
+
+        client.execute_batch(&caller, &calls, &false, &false);
+
+        // Flag must be cleared — a second call must succeed (not return Reentrancy)
+        let result = client.try_execute_batch(&caller, &calls, &false, &false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_executing_flag_cleared_after_required_failure() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut fail_calls = Vec::new(&env);
+        fail_calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "fail"),
+            required: true,
+            instruction_budget: None,
+        });
+
+        // First call fails
+        let _ = client.try_execute_batch(&caller, &fail_calls, &false, &false);
+
+        // Flag must be cleared — a subsequent call must not return Reentrancy
+        let mut ok_calls = Vec::new(&env);
+        ok_calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: true,
+            instruction_budget: None,
+        });
+        let result = client.try_execute_batch(&caller, &ok_calls, &false, &false);
+        assert!(result.is_ok());
+    }
 }

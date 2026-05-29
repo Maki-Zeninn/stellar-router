@@ -1,0 +1,81 @@
+version: "3.9"
+
+# ── stellar-router local development stack ────────────────────────────────────
+#
+# Usage:
+#   docker compose up            # start everything
+#   docker compose run tests     # run unit tests only
+#   docker compose run wasm      # build WASM contract artifacts
+#
+# The metrics stack (exporter + Prometheus + Grafana) mirrors the setup in
+# metrics/docker-compose.yml but wires the exporter to the local build.
+
+services:
+  # ── Unit tests ──────────────────────────────────────────────────────────────
+  tests:
+    build:
+      context: .
+      target: test
+    volumes:
+      - cargo-cache:/usr/local/cargo/registry
+      - target-cache:/app/target
+    profiles: ["tests"]
+
+  # ── WASM contract build ─────────────────────────────────────────────────────
+  wasm:
+    build:
+      context: .
+      target: wasm
+    volumes:
+      - cargo-cache:/usr/local/cargo/registry
+      - target-cache:/app/target
+      - ./artifacts:/app/target/wasm32-unknown-unknown/release
+    profiles: ["wasm"]
+
+  # ── Metrics exporter ────────────────────────────────────────────────────────
+  metrics-exporter:
+    build:
+      context: .
+      target: metrics
+    environment:
+      ROUTER_RPC_URL: ${ROUTER_RPC_URL:-https://soroban-testnet.stellar.org}
+      ROUTER_CORE_CONTRACT_ID: ${ROUTER_CORE_CONTRACT_ID:-}
+      ROUTER_MIDDLEWARE_CONTRACT_ID: ${ROUTER_MIDDLEWARE_CONTRACT_ID:-}
+      ROUTER_REGISTRY_CONTRACT_ID: ${ROUTER_REGISTRY_CONTRACT_ID:-}
+      ROUTER_SCRAPE_INTERVAL_SECS: ${ROUTER_SCRAPE_INTERVAL_SECS:-15}
+    ports:
+      - "9090:9090"
+    depends_on:
+      - prometheus
+
+  # ── Prometheus ───────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    volumes:
+      - ./metrics/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9091:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+
+  # ── Grafana ──────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  cargo-cache:
+  target-cache:
+  prometheus-data:
+  grafana-data:
+  artifacts:

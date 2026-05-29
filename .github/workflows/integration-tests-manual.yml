@@ -1,0 +1,83 @@
+name: Manual Integration Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_filter:
+        description: 'Test filter (e.g., "full_flow" or leave empty for all)'
+        required: false
+        default: ''
+      verbose:
+        description: 'Verbose output'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  integration-test:
+    name: Run Integration Tests on Testnet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build WASM contracts
+        run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Install Stellar CLI
+        run: |
+          cargo install --locked stellar-cli
+          stellar --version
+
+      - name: Run integration tests
+        run: |
+          if [ -z "${{ github.event.inputs.test_filter }}" ]; then
+            echo "Running all integration tests..."
+            if [ "${{ github.event.inputs.verbose }}" == "true" ]; then
+              cargo test --test integration_tests -- --ignored --test-threads=1 --nocapture
+            else
+              cargo test --test integration_tests -- --ignored --test-threads=1
+            fi
+          else
+            echo "Running filtered tests: ${{ github.event.inputs.test_filter }}"
+            if [ "${{ github.event.inputs.verbose }}" == "true" ]; then
+              cargo test --test integration_tests ${{ github.event.inputs.test_filter }} -- --ignored --nocapture
+            else
+              cargo test --test integration_tests ${{ github.event.inputs.test_filter }} -- --ignored
+            fi
+          fi
+        env:
+          STELLAR_RPC_URL: https://soroban-testnet.stellar.org
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results-${{ github.run_number }}
+          path: |
+            target/debug/
+          retention-days: 7
+
+      - name: Test Summary
+        if: always()
+        run: |
+          echo "## Integration Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Test Filter**: ${{ github.event.inputs.test_filter || 'All tests' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Verbose**: ${{ github.event.inputs.verbose }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Network**: Stellar Testnet" >> $GITHUB_STEP_SUMMARY
+          echo "- **Run Number**: ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY

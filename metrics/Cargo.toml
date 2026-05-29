@@ -1,0 +1,53 @@
+[package]
+name = "router-metrics-exporter"
+version = "0.1.0"
+edition = "2021"
+description = "Prometheus/OpenTelemetry metrics exporter for the stellar-router suite"
+
+[[bin]]
+name = "router-metrics-exporter"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP server
+axum = { version = "0.7.9", features = ["tokio"] }
+tokio = { version = "1.44.2", features = ["full"] }
+
+# Prometheus metrics
+prometheus = { version = "0.13.4", features = ["process"] }
+
+# Serialization
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = { version = "1.0.140" }
+
+# HTTP client (for RPC calls)
+reqwest = { version = "0.12.15", features = ["json", "rustls-tls"], default-features = false }
+
+# Logging
+tracing = { version = "0.1.41" }
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
+uuid = { version = "1.11.0", features = ["v4"] }
+
+# Config / CLI
+clap = { version = "4.5.37", features = ["derive", "env"] }
+
+# Error handling
+anyhow = { version = "1.0.98" }
+
+# Async trait support
+async-trait = { version = "0.1.88" }
+
+# Validation
+validator = { version = "0.19.0", features = ["derive"] }
+# Rate limiting
+dashmap = { version = "6.1.0" }
+
+# Time
+tokio-util = { version = "0.7.15" }
+
+# OpenAPI/Swagger
+utoipa = { version = "4.2.3", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "7.1.0", features = ["axum"] }
+
+[dev-dependencies]
+tower = { version = "0.5.3" }

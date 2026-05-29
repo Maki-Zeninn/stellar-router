@@ -1,0 +1,335 @@
+{
+    "dashboard": {
+        "title": "Stellar Router Metrics",
+        "tags": [
+            "stellar",
+            "soroban",
+            "router"
+        ],
+        "timezone": "browser",
+        "schemaVersion": 16,
+        "version": 1,
+        "refresh": "30s",
+        "panels": [
+            {
+                "id": 1,
+                "title": "Route Resolution Throughput",
+                "type": "graph",
+                "gridPos": {
+                    "x": 0,
+                    "y": 0,
+                    "w": 12,
+                    "h": 8
+                },
+                "targets": [
+                    {
+                        "expr": "rate(router_core_total_routed[5m]) * 60",
+                        "legendFormat": "{{contract}} - resolutions/min",
+                        "refId": "A"
+                    }
+                ],
+                "yaxes": [
+                    {
+                        "format": "short",
+                        "label": "Resolutions per minute"
+                    },
+                    {
+                        "format": "short"
+                    }
+                ]
+            },
+            {
+                "id": 2,
+                "title": "Middleware Call Rate",
+                "type": "graph",
+                "gridPos": {
+                    "x": 12,
+                    "y": 0,
+                    "w": 12,
+                    "h": 8
+                },
+                "targets": [
+                    {
+                        "expr": "rate(router_middleware_total_calls[5m]) * 60",
+                        "legendFormat": "{{contract}} - calls/min",
+                        "refId": "A"
+                    }
+                ],
+                "yaxes": [
+                    {
+                        "format": "short",
+                        "label": "Calls per minute"
+                    },
+                    {
+                        "format": "short"
+                    }
+                ]
+            },
+            {
+                "id": 3,
+                "title": "Circuit Breaker Status",
+                "type": "stat",
+                "gridPos": {
+                    "x": 0,
+                    "y": 8,
+                    "w": 8,
+                    "h": 4
+                },
+                "targets": [
+                    {
+                        "expr": "router_middleware_circuit_open",
+                        "legendFormat": "{{route}}",
+                        "refId": "A"
+                    }
+                ],
+                "options": {
+                    "colorMode": "background",
+                    "graphMode": "none",
+                    "textMode": "value_and_name"
+                },
+                "fieldConfig": {
+                    "defaults": {
+                        "thresholds": {
+                            "mode": "absolute",
+                            "steps": [
+                                {
+                                    "value": 0,
+                                    "color": "green"
+                                },
+                                {
+                                    "value": 1,
+                                    "color": "red"
+                                }
+                            ]
+                        },
+                        "mappings": [
+                            {
+                                "type": "value",
+                                "value": "0",
+                                "text": "Closed"
+                            },
+                            {
+                                "type": "value",
+                                "value": "1",
+                                "text": "OPEN"
+                            }
+                        ]
+                    }
+                }
+            },
+            {
+                "id": 4,
+                "title": "Router Paused Status",
+                "type": "stat",
+                "gridPos": {
+                    "x": 8,
+                    "y": 8,
+                    "w": 8,
+                    "h": 4
+                },
+                "targets": [
+                    {
+                        "expr": "router_core_paused",
+                        "legendFormat": "{{contract}}",
+                        "refId": "A"
+                    }
+                ],
+                "options": {
+                    "colorMode": "background",
+                    "graphMode": "none",
+                    "textMode": "value_and_name"
+                },
+                "fieldConfig": {
+                    "defaults": {
+                        "thresholds": {
+                            "mode": "absolute",
+                            "steps": [
+                                {
+                                    "value": 0,
+                                    "color": "green"
+                                },
+                                {
+                                    "value": 1,
+                                    "color": "orange"
+                                }
+                            ]
+                        },
+                        "mappings": [
+                            {
+                                "type": "value",
+                                "value": "0",
+                                "text": "Active"
+                            },
+                            {
+                                "type": "value",
+                                "value": "1",
+                                "text": "PAUSED"
+                            }
+                        ]
+                    }
+                }
+            },
+            {
+                "id": 5,
+                "title": "Exporter Health",
+                "type": "stat",
+                "gridPos": {
+                    "x": 16,
+                    "y": 8,
+                    "w": 8,
+                    "h": 4
+                },
+                "targets": [
+                    {
+                        "expr": "router_up",
+                        "legendFormat": "Exporter Status",
+                        "refId": "A"
+                    }
+                ],
+                "options": {
+                    "colorMode": "background",
+                    "graphMode": "none",
+                    "textMode": "value_and_name"
+                },
+                "fieldConfig": {
+                    "defaults": {
+                        "thresholds": {
+                            "mode": "absolute",
+                            "steps": [
+                                {
+                                    "value": 0,
+                                    "color": "red"
+                                },
+                                {
+                                    "value": 1,
+                                    "color": "green"
+                                }
+                            ]
+                        },
+                        "mappings": [
+                            {
+                                "type": "value",
+                                "value": "0",
+                                "text": "DOWN"
+                            },
+                            {
+                                "type": "value",
+                                "value": "1",
+                                "text": "UP"
+                            }
+                        ]
+                    }
+                }
+            },
+            {
+                "id": 6,
+                "title": "Scrape Duration (P95)",
+                "type": "graph",
+                "gridPos": {
+                    "x": 0,
+                    "y": 12,
+                    "w": 12,
+                    "h": 8
+                },
+                "targets": [
+                    {
+                        "expr": "histogram_quantile(0.95, rate(router_scrape_duration_seconds_bucket[5m]))",
+                        "legendFormat": "{{contract}} - p95",
+                        "refId": "A"
+                    },
+                    {
+                        "expr": "histogram_quantile(0.50, rate(router_scrape_duration_seconds_bucket[5m]))",
+                        "legendFormat": "{{contract}} - p50",
+                        "refId": "B"
+                    }
+                ],
+                "yaxes": [
+                    {
+                        "format": "s",
+                        "label": "Duration"
+                    },
+                    {
+                        "format": "short"
+                    }
+                ]
+            },
+            {
+                "id": 7,
+                "title": "Scrape Error Rate",
+                "type": "graph",
+                "gridPos": {
+                    "x": 12,
+                    "y": 12,
+                    "w": 12,
+                    "h": 8
+                },
+                "targets": [
+                    {
+                        "expr": "rate(router_scrape_errors_total[5m]) * 60",
+                        "legendFormat": "{{contract}} - errors/min",
+                        "refId": "A"
+                    }
+                ],
+                "yaxes": [
+                    {
+                        "format": "short",
+                        "label": "Errors per minute"
+                    },
+                    {
+                        "format": "short"
+                    }
+                ]
+            },
+            {
+                "id": 8,
+                "title": "Consecutive Failures (Circuit Breaker)",
+                "type": "graph",
+                "gridPos": {
+                    "x": 0,
+                    "y": 20,
+                    "w": 12,
+                    "h": 8
+                },
+                "targets": [
+                    {
+                        "expr": "router_middleware_failure_count",
+                        "legendFormat": "{{route}}",
+                        "refId": "A"
+                    }
+                ],
+                "yaxes": [
+                    {
+                        "format": "short",
+                        "label": "Failure count"
+                    },
+                    {
+                        "format": "short"
+                    }
+                ]
+            },
+            {
+                "id": 9,
+                "title": "Total Registered Names (Registry)",
+                "type": "stat",
+                "gridPos": {
+                    "x": 12,
+                    "y": 20,
+                    "w": 12,
+                    "h": 8
+                },
+                "targets": [
+                    {
+                        "expr": "router_registry_total_names",
+                        "legendFormat": "{{contract}}",
+                        "refId": "A"
+                    }
+                ],
+                "options": {
+                    "colorMode": "value",
+                    "graphMode": "area",
+                    "textMode": "value_and_name"
+                }
+            }
+        ]
+    }
+}
