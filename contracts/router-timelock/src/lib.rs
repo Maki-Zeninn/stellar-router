@@ -102,7 +102,7 @@ impl RouterTimelock {
         _deps: Vec<Bytes>,
     ) -> Result<Bytes, TimelockError> {
         proposer.require_auth();
-        Self::require_admin(&env, &proposer)?;
+        router_common::require_admin_simple!(&env, &proposer, &DataKey::Admin, TimelockError)?;
 
         let min_delay: u64 = env
             .storage()
@@ -148,7 +148,7 @@ impl RouterTimelock {
     /// Cancel a queued operation before it is executed.
     pub fn cancel(env: Env, caller: Address, op_id: Bytes) -> Result<(), TimelockError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, TimelockError)?;
 
         let mut op: Op = env
             .storage()
@@ -172,7 +172,7 @@ impl RouterTimelock {
     /// Execute a queued operation after its ETA has passed.
     pub fn execute(env: Env, caller: Address, op_id: Bytes) -> Result<(), TimelockError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, TimelockError)?;
 
         let mut op: Op = env
             .storage()

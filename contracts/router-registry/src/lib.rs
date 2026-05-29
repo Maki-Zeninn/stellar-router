@@ -129,7 +129,7 @@ impl RouterRegistry {
         version: u32,
     ) -> Result<(), RegistryError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RegistryError)?;
 
         if version == 0 {
             return Err(RegistryError::InvalidVersion);
@@ -433,7 +433,7 @@ impl RouterRegistry {
         reason: Option<String>,
     ) -> Result<(), RegistryError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RegistryError)?;
         Self::deprecate_one(&env, name, version, reason)
     }
 
@@ -506,7 +506,7 @@ impl RouterRegistry {
         entries: Vec<(String, u32)>,
     ) -> Result<Vec<Result<(), RegistryError>>, RegistryError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RegistryError)?;
         let mut results = Vec::new(&env);
         for (name, version) in entries.iter() {
             results.push_back(Self::deprecate_one(&env, name, version, None));
@@ -530,7 +530,7 @@ impl RouterRegistry {
         reason: Option<String>,
     ) -> Result<(), RegistryError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RegistryError)?;
         let versions = Self::get_versions_list(&env, &name);
         for v in versions.iter() {
             // Skip already-deprecated entries rather than aborting
@@ -561,7 +561,7 @@ impl RouterRegistry {
         new_admin: Address,
     ) -> Result<(), RegistryError> {
         current.require_auth();
-        Self::require_admin(&env, &current)?;
+        router_common::require_admin_simple!(&env, &current, &DataKey::Admin, RegistryError)?;
         router_common::admin_transfer_complete!(&env, &current, &new_admin, &DataKey::Admin);
         Ok(())
     }
@@ -674,14 +674,6 @@ impl RouterRegistry {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    fn require_admin(env: &Env, caller: &Address) -> Result<(), RegistryError> {
-        let admin = Self::admin(env.clone());
-        if &admin != caller {
-            return Err(RegistryError::Unauthorized);
-        }
-        Ok(())
-    }
 
     fn get_versions_list(env: &Env, name: &String) -> Vec<u32> {
         env.storage()

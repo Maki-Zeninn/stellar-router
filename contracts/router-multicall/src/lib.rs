@@ -290,7 +290,7 @@ impl RouterMulticall {
         max_batch_size: u32,
     ) -> Result<(), MulticallError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, MulticallError)?;
         if max_batch_size == 0 {
             return Err(MulticallError::InvalidConfig);
         }
@@ -375,20 +375,11 @@ impl RouterMulticall {
     /// * [`MulticallError::NotInitialized`] — if the contract has not been initialized.
     pub fn transfer_admin(env: Env, current: Address, new_admin: Address) -> Result<(), MulticallError> {
         current.require_auth();
-        Self::require_admin(&env, &current)?;
+        router_common::require_admin_simple!(&env, &current, &DataKey::Admin, MulticallError)?;
         router_common::admin_transfer_complete!(&env, &current, &new_admin, &DataKey::Admin);
         Ok(())
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    fn require_admin(env: &Env, caller: &Address) -> Result<(), MulticallError> {
-        let admin = Self::admin(env.clone());
-        if &admin != caller {
-            return Err(MulticallError::Unauthorized);
-        }
-        Ok(())
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
