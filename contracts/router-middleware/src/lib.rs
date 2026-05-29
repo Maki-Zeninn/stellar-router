@@ -198,7 +198,7 @@ impl RouterMiddleware {
         log_retention: u32,
     ) -> Result<(), MiddlewareError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, MiddlewareError)?;
 
         if window_seconds == 0 && max_calls_per_window > 0 {
             return Err(MiddlewareError::InvalidConfig);
@@ -577,7 +577,7 @@ impl RouterMiddleware {
         enabled: bool,
     ) -> Result<(), MiddlewareError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, MiddlewareError)?;
         env.storage()
             .instance()
             .set(&DataKey::GlobalEnabled, &enabled);
@@ -699,7 +699,7 @@ impl RouterMiddleware {
         route: String,
     ) -> Result<(), MiddlewareError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, MiddlewareError)?;
         env.storage().instance().remove(&DataKey::CallLog(route.clone()));
         env.events().publish(
             (Symbol::new(&env, "call_log_cleared"),),
@@ -843,7 +843,7 @@ impl RouterMiddleware {
         route: String,
     ) -> Result<(), MiddlewareError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, MiddlewareError)?;
 
         let reset_state = CircuitBreakerState {
             failure_count: 0,
@@ -891,20 +891,11 @@ impl RouterMiddleware {
         new_admin: Address,
     ) -> Result<(), MiddlewareError> {
         current.require_auth();
-        Self::require_admin(&env, &current)?;
+        router_common::require_admin_simple!(&env, &current, &DataKey::Admin, MiddlewareError)?;
         router_common::admin_transfer_complete!(&env, &current, &new_admin, &DataKey::Admin);
         Ok(())
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    fn require_admin(env: &Env, caller: &Address) -> Result<(), MiddlewareError> {
-        let admin = Self::admin(env.clone());
-        if &admin != caller {
-            return Err(MiddlewareError::Unauthorized);
-        }
-        Ok(())
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

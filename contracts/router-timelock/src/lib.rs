@@ -102,7 +102,7 @@ impl RouterTimelock {
         _deps: Vec<Bytes>,
     ) -> Result<Bytes, TimelockError> {
         proposer.require_auth();
-        Self::require_admin(&env, &proposer)?;
+        router_common::require_admin_simple!(&env, &proposer, &DataKey::Admin, TimelockError)?;
 
         let min_delay: u64 = env
             .storage()
@@ -148,7 +148,7 @@ impl RouterTimelock {
     /// Cancel a queued operation before it is executed.
     pub fn cancel(env: Env, caller: Address, op_id: Bytes) -> Result<(), TimelockError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, TimelockError)?;
 
         let mut op: Op = env
             .storage()
@@ -156,12 +156,7 @@ impl RouterTimelock {
             .get(&DataKey::Op(op_id.clone()))
             .ok_or(TimelockError::NotFound)?;
 
-        if op.executed {
-            return Err(TimelockError::AlreadyExecuted);
-        }
-        if op.cancelled {
-            return Err(TimelockError::Cancelled);
-        }
+        Self::require_op_pending(&op)?;
 
         op.cancelled = true;
         env.storage()
@@ -177,7 +172,7 @@ impl RouterTimelock {
     /// Execute a queued operation after its ETA has passed.
     pub fn execute(env: Env, caller: Address, op_id: Bytes) -> Result<(), TimelockError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, TimelockError)?;
 
         let mut op: Op = env
             .storage()
@@ -185,12 +180,7 @@ impl RouterTimelock {
             .get(&DataKey::Op(op_id.clone()))
             .ok_or(TimelockError::NotFound)?;
 
-        if op.cancelled {
-            return Err(TimelockError::Cancelled);
-        }
-        if op.executed {
-            return Err(TimelockError::AlreadyExecuted);
-        }
+        Self::require_op_pending(&op)?;
         if env.ledger().timestamp() < op.eta {
             return Err(TimelockError::NotReady);
         }
@@ -260,6 +250,16 @@ impl RouterTimelock {
             .ok_or(TimelockError::NotInitialized)?;
         if &admin != caller {
             return Err(TimelockError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    fn require_op_pending(op: &Op) -> Result<(), TimelockError> {
+        if op.cancelled {
+            return Err(TimelockError::Cancelled);
+        }
+        if op.executed {
+            return Err(TimelockError::AlreadyExecuted);
         }
         Ok(())
     }

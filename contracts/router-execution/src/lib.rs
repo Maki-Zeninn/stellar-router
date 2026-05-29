@@ -206,7 +206,7 @@ impl RouterExecution {
         backoff_multiplier: u32,
     ) -> Result<(), ExecutionError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, ExecutionError)?;
         if backoff_multiplier < 100 {
             return Err(ExecutionError::InvalidConfig);
         }
@@ -556,18 +556,6 @@ impl RouterExecution {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    fn require_admin(env: &Env, caller: &Address) -> Result<(), ExecutionError> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(ExecutionError::NotInitialized)?;
-        if &admin != caller {
-            return Err(ExecutionError::Unauthorized);
-        }
-        Ok(())
-    }
 
     /// Compute exponential backoff delay in milliseconds for a given attempt index.
     ///

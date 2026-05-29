@@ -141,7 +141,7 @@ macro_rules! require_admin_simple {
 ///     new_admin: Address,
 /// ) -> Result<(), MyError> {
 ///     current.require_auth();
-///     Self::require_admin(&env, &current)?;
+///     router_common::require_admin_simple!(&env, &current, &DataKey::Admin, MyError)?;
 ///     router_common::admin_transfer_complete!(&env, &current, &new_admin, &DataKey::Admin);
 ///     Ok(())
 /// }
