@@ -121,6 +121,16 @@ impl RouterQuote {
         );
 
         Ok(())
+    /// Return the current admin address.
+    /// Get the current admin address.
+    ///
+    /// # Errors
+    /// Returns `QuoteError::NotInitialized` if the contract has not been initialized.
+    pub fn admin(env: Env) -> Result<Address, QuoteError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(QuoteError::NotInitialized)
     }
 
     /// Set fee in basis points for a specific route.
