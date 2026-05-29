@@ -156,12 +156,7 @@ impl RouterTimelock {
             .get(&DataKey::Op(op_id.clone()))
             .ok_or(TimelockError::NotFound)?;
 
-        if op.executed {
-            return Err(TimelockError::AlreadyExecuted);
-        }
-        if op.cancelled {
-            return Err(TimelockError::Cancelled);
-        }
+        Self::require_op_pending(&op)?;
 
         op.cancelled = true;
         env.storage()
@@ -185,12 +180,7 @@ impl RouterTimelock {
             .get(&DataKey::Op(op_id.clone()))
             .ok_or(TimelockError::NotFound)?;
 
-        if op.cancelled {
-            return Err(TimelockError::Cancelled);
-        }
-        if op.executed {
-            return Err(TimelockError::AlreadyExecuted);
-        }
+        Self::require_op_pending(&op)?;
         if env.ledger().timestamp() < op.eta {
             return Err(TimelockError::NotReady);
         }
@@ -260,6 +250,16 @@ impl RouterTimelock {
             .ok_or(TimelockError::NotInitialized)?;
         if &admin != caller {
             return Err(TimelockError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    fn require_op_pending(op: &Op) -> Result<(), TimelockError> {
+        if op.cancelled {
+            return Err(TimelockError::Cancelled);
+        }
+        if op.executed {
+            return Err(TimelockError::AlreadyExecuted);
         }
         Ok(())
     }
