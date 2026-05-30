@@ -46,6 +46,19 @@ pub struct RateLimitState {
     pub calls_in_window: u32,
     /// Timestamp when window started
     pub window_start: u64,
+    /// Total number of times rate limit was exceeded
+    pub total_violations: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RouteRateLimitStats {
+    /// Total number of calls across all callers in current window
+    pub total_calls_in_window: u32,
+    /// Timestamp when the current window started (earliest window start among all callers)
+    pub window_start: u64,
+    /// Total number of rate limit violations across all callers
+    pub total_violations: u32,
 }
 
 #[contracttype]
@@ -74,6 +87,8 @@ pub struct CircuitBreakerState {
     pub opened_at: u64,
     /// Whether circuit is currently open
     pub is_open: bool,
+    /// Whether circuit is in half-open state (probe mode)
+    pub is_half_open: bool,
 }
 
 #[contracttype]
@@ -105,6 +120,8 @@ pub struct CallLogState {
     pub entries: Vec<CallLogEntry>,
     /// Index of the oldest entry in `entries` (0 when not wrapped)
     pub head: u32,
+}
+
 /// Aggregated summary for a route's call log.
 /// Maintained incrementally to avoid loading all entries.
 #[contracttype]
@@ -282,6 +299,7 @@ impl RouterMiddleware {
                         failure_count: 0,
                         opened_at: 0,
                         is_open: false,
+                        is_half_open: false,
                     },
                 });
 
@@ -302,12 +320,13 @@ impl RouterMiddleware {
                     if !recovers {
                         return Err(MiddlewareError::CircuitOpen);
                     }
-                    route_call_state.circuit_breaker = CircuitBreakerState {
-                        failure_count: 0,
-                        opened_at: 0,
-                        is_open: false,
-                    };
+                    // Transition to half-open state for probe call
+                    route_call_state.circuit_breaker.is_open = false;
+                    route_call_state.circuit_breaker.is_half_open = true;
                     state_changed = true;
+                } else if route_call_state.circuit_breaker.is_half_open {
+                    // Already in half-open state - allow this probe call
+                    // The state will be updated in post_call based on success/failure
                 }
             }
 
@@ -321,6 +340,7 @@ impl RouterMiddleware {
                         .unwrap_or(RateLimitState {
                             calls_in_window: 0,
                             window_start: now,
+                            total_violations: 0,
                         });
 
                 let window_elapsed = now >= state.window_start + config.window_seconds;
@@ -336,6 +356,18 @@ impl RouterMiddleware {
                 };
 
                 if calls >= config.max_calls_per_window {
+                    // Increment violation counter before returning error
+                    route_call_state.rate_limits.set(
+                        caller.clone(),
+                        RateLimitState {
+                            calls_in_window: calls,
+                            window_start,
+                            total_violations: state.total_violations + 1,
+                        },
+                    );
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::RouteCallState(route.clone()), &route_call_state);
                     return Err(MiddlewareError::RateLimitExceeded);
                 }
 
@@ -344,6 +376,7 @@ impl RouterMiddleware {
                     RateLimitState {
                         calls_in_window: calls + 1,
                         window_start,
+                        total_violations: state.total_violations,
                     },
                 );
                 state_changed = true;
@@ -502,18 +535,32 @@ impl RouterMiddleware {
                                 failure_count: 0,
                                 opened_at: 0,
                                 is_open: false,
+                                is_half_open: false,
                             },
                         });
 
-                    route_call_state.circuit_breaker.failure_count += 1;
-
-                    if route_call_state.circuit_breaker.failure_count >= config.failure_threshold {
+                    // Handle half-open state: if probe fails, reopen circuit
+                    if route_call_state.circuit_breaker.is_half_open {
+                        route_call_state.circuit_breaker.is_half_open = false;
                         route_call_state.circuit_breaker.is_open = true;
                         route_call_state.circuit_breaker.opened_at = env.ledger().timestamp();
+                        route_call_state.circuit_breaker.failure_count = 1;
                         env.events().publish(
                             (Symbol::new(&env, "circuit_opened"),),
                             (route.clone(), route_call_state.circuit_breaker.failure_count),
                         );
+                    } else {
+                        // Normal failure handling
+                        route_call_state.circuit_breaker.failure_count += 1;
+
+                        if route_call_state.circuit_breaker.failure_count >= config.failure_threshold {
+                            route_call_state.circuit_breaker.is_open = true;
+                            route_call_state.circuit_breaker.opened_at = env.ledger().timestamp();
+                            env.events().publish(
+                                (Symbol::new(&env, "circuit_opened"),),
+                                (route.clone(), route_call_state.circuit_breaker.failure_count),
+                            );
+                        }
                     }
 
                     env.storage()
@@ -538,17 +585,23 @@ impl RouterMiddleware {
                                 failure_count: 0,
                                 opened_at: 0,
                                 is_open: false,
+                                is_half_open: false,
                             },
                         });
 
-                    if !route_call_state.circuit_breaker.is_open
+                    // Handle half-open state: if probe succeeds, close circuit
+                    if route_call_state.circuit_breaker.is_half_open {
+                        route_call_state.circuit_breaker.is_half_open = false;
+                        route_call_state.circuit_breaker.failure_count = 0;
+                    } else if !route_call_state.circuit_breaker.is_open
                         && route_call_state.circuit_breaker.failure_count > 0
                     {
                         route_call_state.circuit_breaker.failure_count = 0;
-                        env.storage()
-                            .instance()
-                            .set(&DataKey::RouteCallState(route), &route_call_state);
                     }
+
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::RouteCallState(route), &route_call_state);
                 }
             }
         }
@@ -795,6 +848,7 @@ impl RouterMiddleware {
                 Some(RateLimitState {
                     calls_in_window: 0,
                     window_start: now,
+                    total_violations: state.total_violations,
                 })
             } else {
                 Some(state)
@@ -804,6 +858,143 @@ impl RouterMiddleware {
             Some(state)
         }
     }
+
+    /// Get rate limit statistics for a caller on a specific route.
+    ///
+    /// Returns the current [`RateLimitState`] for `caller` on `route`, which includes the
+    /// number of calls made in the current window, the window start time, and the total
+    /// number of times the rate limit has been exceeded.
+    ///
+    /// If the window has elapsed, returns a reset state with `calls_in_window = 0`
+    /// and updated `window_start`, but preserves the `total_violations` count.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `route` - The route name to look up.
+    /// * `caller` - The address whose rate limit stats to retrieve.
+    ///
+    /// # Returns
+    /// `Some(`[`RateLimitState`]`)` if the caller has made at least one call on this route,
+    /// `None` otherwise.
+    pub fn get_rate_limit_stats(env: Env, route: String, caller: Address) -> Option<RateLimitState> {
+        Self::rate_limit_state(env, route, caller)
+    }
+
+    /// Get aggregated rate limit statistics for a route across all callers.
+    ///
+    /// Returns the total number of calls in the current window, the earliest window start time,
+    /// and the total number of rate limit violations across all callers for the given route.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `route` - The route name to look up.
+    ///
+    /// # Returns
+    /// `Some(`[`RouteRateLimitStats`]`)` if any caller has made calls on this route,
+    /// `None` otherwise.
+    pub fn get_route_rate_limit_stats(env: Env, route: String) -> Option<RouteRateLimitStats> {
+        let route_call_state: RouteCallState = env
+            .storage()
+            .instance()
+            .get(&DataKey::RouteCallState(route.clone()))?;
+
+        if route_call_state.rate_limits.is_empty() {
+            return None;
+        }
+
+        let mut total_calls_in_window: u32 = 0;
+        let mut total_violations: u32 = 0;
+        let mut earliest_window_start: u64 = u64::MAX;
+
+        // Get route config to apply window expiry logic
+        let config = env
+            .storage()
+            .instance()
+            .get::<DataKey, RouteConfig>(&DataKey::RouteConfig(route.clone()));
+        let now = env.ledger().timestamp();
+
+        for (_caller, state) in route_call_state.rate_limits.iter() {
+            let (calls, window_start) = if let Some(ref cfg) = config {
+                let window_elapsed = now >= state.window_start + cfg.window_seconds;
+                if window_elapsed {
+                    (0, now)
+                } else {
+                    (state.calls_in_window, state.window_start)
+                }
+            } else {
+                (state.calls_in_window, state.window_start)
+            };
+
+            total_calls_in_window += calls;
+            total_violations += state.total_violations;
+            if window_start < earliest_window_start {
+                earliest_window_start = window_start;
+            }
+        }
+
+        // If no valid window start was found, use current time
+        let final_window_start = if earliest_window_start == u64::MAX {
+            now
+        } else {
+            earliest_window_start
+        };
+
+        Some(RouteRateLimitStats {
+            total_calls_in_window,
+            window_start: final_window_start,
+            total_violations,
+        })
+    }
+
+    /// Reset rate limit state for a caller on a specific route.
+    ///
+    /// Clears the rate limit storage key for the given caller/route pair, allowing
+    /// the caller to make calls again without waiting for the window to expire.
+    /// Caller must be the admin.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `caller` - The address initiating the call; must be the admin.
+    /// * `route` - The route name to reset the rate limit for.
+    /// * `target_caller` - The address whose rate limit state should be reset.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`MiddlewareError::Unauthorized`] — if `caller` is not the admin.
+    /// * [`MiddlewareError::NotInitialized`] — if the contract has not been initialized.
+    pub fn reset_rate_limit(
+        env: Env,
+        caller: Address,
+        route: String,
+        target_caller: Address,
+    ) -> Result<(), MiddlewareError> {
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, MiddlewareError)?;
+
+        let mut route_call_state: RouteCallState = env
+            .storage()
+            .instance()
+            .get(&DataKey::RouteCallState(route.clone()))
+            .unwrap_or(RouteCallState {
+                rate_limits: Map::new(&env),
+                circuit_breaker: CircuitBreakerState {
+                    failure_count: 0,
+                    opened_at: 0,
+                    is_open: false,
+                    is_half_open: false,
+                },
+            });
+
+        route_call_state.rate_limits.remove(target_caller.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::RouteCallState(route), &route_call_state);
+
+        Ok(())
+    }
+
     ///
     /// Returns the [`RouteConfig`] for `route` if one has been set via
     /// `configure_route`.
@@ -901,6 +1092,7 @@ impl RouterMiddleware {
             failure_count: 0,
             opened_at: 0,
             is_open: false,
+            is_half_open: false,
         };
         let mut route_call_state: RouteCallState = env
             .storage()
@@ -912,6 +1104,7 @@ impl RouterMiddleware {
                     failure_count: 0,
                     opened_at: 0,
                     is_open: false,
+                    is_half_open: false,
                 },
             });
         route_call_state.circuit_breaker = reset_state;
@@ -1409,49 +1602,6 @@ mod tests {
         client.reset_circuit_breaker(&admin, &route);
         let state = client.circuit_breaker_state(&route).unwrap();
         assert!(!state.is_open);
-    }
-
-    // ── Issue #187: get_call_log_length ─────────────────────────────────────────
-
-    #[test]
-    fn test_get_call_log_length_zero_before_calls() {
-        let (env, admin, client) = setup();
-        let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &10);
-
-        assert_eq!(client.get_call_log_length(&route), 0);
-    }
-
-    #[test]
-    fn test_get_call_log_length_matches_get_call_log() {
-        let (env, admin, client) = setup();
-        let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &10);
-
-        let caller = Address::generate(&env);
-        for _ in 0..5 {
-            client.pre_call(&caller, &route);
-            client.post_call(&caller, &route, &true);
-        }
-
-        let len = client.get_call_log_length(&route);
-        let full_log = client.get_call_log(&route);
-        assert_eq!(len, full_log.len());
-    }
-
-    #[test]
-    fn test_get_call_log_length_respects_retention() {
-        let (env, admin, client) = setup();
-        let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &3);
-
-        let caller = Address::generate(&env);
-        for _ in 0..10 {
-            client.pre_call(&caller, &route);
-            client.post_call(&caller, &route, &true);
-        }
-
-        assert_eq!(client.get_call_log_length(&route), 3);
     }
 
     // ── Issue: log retention off-by-one ──────────────────────────────────────

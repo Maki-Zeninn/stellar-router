@@ -51,7 +51,7 @@ pub enum DataKey {
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RouteMetadata {
     /// Human-readable description (max 256 chars)
     pub description: String,
@@ -75,6 +75,15 @@ pub struct RouteEntry {
     /// Optional metadata for the route
     pub metadata: Option<RouteMetadata>,
 }
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RouteRegisterInput {
+    pub name: String,
+    pub address: Address,
+    pub metadata: Option<RouteMetadata>,
+}
+
 
 /// Scoring attributes for a route used in path selection.
 ///
@@ -326,6 +335,158 @@ impl RouterCore {
 
         env.events()
             .publish((Symbol::new(&env, "route_removed"),), name.clone());
+
+        Ok(())
+    }
+
+    /// Register multiple routes in a single transaction.
+    ///
+    /// Associates multiple human-readable names with target contract addresses
+    /// in a single atomic operation. All routes start in an unpaused state.
+    /// Caller must be the admin. If any route fails validation, the entire
+    /// batch fails and no routes are registered.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `caller` - The address initiating the call; must be the admin.
+    /// * `routes` - A vector of tuples (name, address, metadata) for each route to register.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`RouterError::Unauthorized`] — if `caller` is not the admin.
+    /// * [`RouterError::RouteAlreadyExists`] — if any route name already exists.
+    /// * [`RouterError::InvalidRouteName`] — if any route name is empty or whitespace-only.
+    /// * [`RouterError::InvalidMetadata`] — if any metadata is invalid.
+    /// * [`RouterError::NotInitialized`] — if the contract has not been initialized.
+    pub fn register_routes_batch(
+        env: Env,
+        caller: Address,
+        routes: Vec<RouteRegisterInput>,
+    ) -> Result<(), RouterError> {
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
+
+        // Validation phase: check all routes before writing any
+        let mut seen = Vec::new(&env);
+        for route in routes.iter() {
+            if seen.contains(&route.name) {
+                return Err(RouterError::RouteAlreadyExists);
+            }
+            Self::validate_route_name(&env, &route.name)?;
+
+            // Validate metadata if provided
+            if let Some(ref meta) = route.metadata {
+                if meta.description.len() > 256 {
+                    return Err(RouterError::InvalidMetadata);
+                }
+                if meta.tags.len() > 5 {
+                    return Err(RouterError::InvalidMetadata);
+                }
+            }
+            seen.push_back(route.name.clone());
+        }
+
+        // Commit phase: write all routes
+        let mut route_names = Self::get_route_names(&env);
+        for route in routes.iter() {
+            let entry = RouteEntry {
+                address: route.address.clone(),
+                name: route.name.clone(),
+                paused: false,
+                updated_by: caller.clone(),
+                metadata: route.metadata.clone(),
+            };
+            env.storage()
+                .instance()
+                .set(&DataKey::Route(route.name.clone()), &entry);
+
+            route_names.push_back(route.name.clone());
+
+            env.events().publish(
+                (Symbol::new(&env, "route_registered"),),
+                (route.name.clone(), entry.address.clone()),
+            );
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::RouteNames, &route_names);
+
+        Ok(())
+    }
+
+    /// Remove multiple routes in a single transaction.
+    ///
+    /// Deletes route entries for all specified names from storage and removes
+    /// any aliases that point to these routes. Caller must be the admin.
+    /// If any route is not found, the entire batch fails and no routes are removed.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `caller` - The address initiating the call; must be the admin.
+    /// * `names` - A vector of route names to remove.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`RouterError::Unauthorized`] — if `caller` is not the admin.
+    /// * [`RouterError::RouteNotFound`] — if any route name does not exist.
+    /// * [`RouterError::NotInitialized`] — if the contract has not been initialized.
+    pub fn remove_routes_batch(
+        env: Env,
+        caller: Address,
+        names: Vec<String>,
+    ) -> Result<(), RouterError> {
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
+
+        // Validation phase: check all routes exist
+        for name in names.iter() {
+            if !env.storage().instance().has(&DataKey::Route(name.clone())) {
+                return Err(RouterError::RouteNotFound);
+            }
+        }
+
+        // Commit phase: remove all routes
+        let route_names = Self::get_route_names(&env);
+        let mut updated_route_names = Vec::new(&env);
+        for route_name in route_names.iter() {
+            if !names.contains(&route_name) {
+                updated_route_names.push_back(route_name);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RouteNames, &updated_route_names);
+
+        // Clean up aliases pointing to removed routes
+        let aliases = Self::get_aliases(&env);
+        let mut updated_aliases = Vec::new(&env);
+        for alias in aliases.iter() {
+            if let Some(original_name) = env.storage().instance().get::<DataKey, String>(&DataKey::Alias(alias.clone())) {
+                if names.contains(&original_name) {
+                    // Remove this dangling alias
+                    env.storage().instance().remove(&DataKey::Alias(alias.clone()));
+                } else {
+                    // Keep this alias
+                    updated_aliases.push_back(alias);
+                }
+            }
+        }
+        env.storage().instance().set(&DataKey::Aliases, &updated_aliases);
+
+        // Remove route entries and emit events
+        for name in names.iter() {
+            env.storage()
+                .instance()
+                .remove(&DataKey::Route(name.clone()));
+
+            env.events()
+                .publish((Symbol::new(&env, "route_removed"),), name.clone());
+        }
 
         Ok(())
     }
@@ -709,7 +870,7 @@ impl RouterCore {
             .remove(&DataKey::Alias(alias_name.clone()));
 
         // Remove from aliases list
-        let mut aliases = Self::get_aliases(&env);
+        let aliases = Self::get_aliases(&env);
         let mut updated_aliases = Vec::new(&env);
         for alias in aliases.iter() {
             if alias != alias_name {
@@ -2273,6 +2434,8 @@ mod tests {
         assert_eq!(oracle_count, 1, "oracle should appear exactly once");
         assert_eq!(vault_count, 1, "vault should appear exactly once");
         assert_eq!(swap_count, 1, "swap should appear exactly once");
+    }
+
     // ── Issue #511: Route validation tests ───────────────────────────────────
 
     #[test]
