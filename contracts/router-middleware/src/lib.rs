@@ -35,6 +35,7 @@ pub enum DataKey {
     CallLog(String),        // route_name -> CallLogState
     ConfiguredRoutes,       // Vec<String>
     CallLogSummary(String), // route_name -> CallLogSummary
+    RateLimitStrategy(String), // route_name -> RateLimitStrategy
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -149,6 +150,18 @@ pub enum MiddlewareError {
     MiddlewareDisabled = 6,
     InvalidConfig = 7,
     CircuitOpen = 8,
+}
+
+/// Configurable strategy for handling rate limit exceeded events.
+#[contracttype]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum RateLimitStrategy {
+    /// Return an error immediately (default).
+    Reject,
+    /// Allow the call but emit a warning event and increment a throttle counter.
+    Throttle,
+    /// Allow the call and log that the limit was exceeded (soft enforcement).
+    LogOnly,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -391,7 +404,7 @@ impl RouterMiddleware {
                 };
 
                 if calls >= config.max_calls_per_window {
-                    // Increment violation counter before returning error
+                    // Increment violation counter
                     route_call_state.rate_limits.set(
                         caller.clone(),
                         RateLimitState {
@@ -400,13 +413,42 @@ impl RouterMiddleware {
                             total_violations: state.total_violations + 1,
                         },
                     );
-                    env.storage()
-                        .instance()
-                        .set(&DataKey::RouteCallState(route.clone()), &route_call_state);
-                    return Err(MiddlewareError::RateLimitExceeded);
-                }
 
-                route_call_state.rate_limits.set(
+                    // Check the rate limit strategy for this route
+                    let strategy: RateLimitStrategy = env
+                        .storage()
+                        .instance()
+                        .get(&DataKey::RateLimitStrategy(route.clone()))
+                        .unwrap_or(RateLimitStrategy::Reject);
+
+                    match strategy {
+                        RateLimitStrategy::Reject => {
+                            env.storage()
+                                .instance()
+                                .set(
+                                    &DataKey::RouteCallState(route.clone()),
+                                    &route_call_state,
+                                );
+                            return Err(MiddlewareError::RateLimitExceeded);
+                        }
+                        RateLimitStrategy::Throttle => {
+                            env.events().publish(
+                                (Symbol::new(&env, "rate_limit_throttled"),),
+                                (caller.clone(), route.clone()),
+                            );
+                            state_changed = true;
+                            // Fall through to commit phase — call is allowed
+                        }
+                        RateLimitStrategy::LogOnly => {
+                            env.events().publish(
+                                (Symbol::new(&env, "rate_limit_exceeded"),),
+                                (caller.clone(), route.clone()),
+                            );
+                            state_changed = true;
+                            // Fall through to commit phase — call is allowed
+                        }
+                    }
+                } else {
                     caller.clone(),
                     RateLimitState {
                         calls_in_window: calls + 1,
@@ -1153,6 +1195,69 @@ impl RouterMiddleware {
             .instance()
             .get(&DataKey::Admin)
             .ok_or(MiddlewareError::NotInitialized)
+    }
+
+    /// Set the rate limit exceeded response strategy for a route.
+    ///
+    /// Controls what happens when `check_rate_limit()` would normally fail.
+    /// The default strategy for all routes is [`RateLimitStrategy::Reject`].
+    ///
+    /// - **Reject**: Return `MiddlewareError::RateLimitExceeded` (legacy behavior).
+    /// - **Throttle**: Allow the call through, emit a `rate_limit_throttled` warning
+    ///   event, and increment the throttle counter.
+    /// - **LogOnly**: Allow the call through, emit a `rate_limit_exceeded` event,
+    ///   but do not block (soft enforcement). Useful for monitoring traffic
+    ///   patterns during initial rollout without enforcing hard limits.
+    ///
+    /// Caller must be the admin.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `caller` - The address initiating the call; must be the admin.
+    /// * `route` - The route name to configure.
+    /// * `strategy` - The [`RateLimitStrategy`] to apply.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`MiddlewareError::Unauthorized`] — if `caller` is not the admin.
+    /// * [`MiddlewareError::NotInitialized`] — if the contract has not been initialized.
+    pub fn set_rate_limit_strategy(
+        env: Env,
+        caller: Address,
+        route: String,
+        strategy: RateLimitStrategy,
+    ) -> Result<(), MiddlewareError> {
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, MiddlewareError)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::RateLimitStrategy(route.clone()), &strategy);
+        env.events().publish(
+            (Symbol::new(&env, "rate_limit_strategy_set"),),
+            (route, strategy),
+        );
+        Ok(())
+    }
+
+    /// Get the rate limit strategy for a route.
+    ///
+    /// Returns the configured [`RateLimitStrategy`] for `route`, or
+    /// [`RateLimitStrategy::Reject`] if no strategy has been explicitly set
+    /// (maintaining backward compatibility).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `route` - The route name to query.
+    ///
+    /// # Returns
+    /// The [`RateLimitStrategy`] for the route.
+    pub fn get_rate_limit_strategy(env: Env, route: String) -> RateLimitStrategy {
+        env.storage()
+            .instance()
+            .get(&DataKey::RateLimitStrategy(route))
+            .unwrap_or(RateLimitStrategy::Reject)
     }
 
     /// Reset circuit breaker for a route.
@@ -2257,6 +2362,175 @@ mod tests {
         assert!(client.try_pre_call(&caller, &route).is_ok());
     }
 
+    // ── Issue #577: RateLimitStrategy (Reject/Throttle/LogOnly) ───────────────
+
+    #[test]
+    fn test_rate_limit_strategy_default_is_reject() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
+
+        // Without setting a strategy, default should be Reject
+        let caller = Address::generate(&env);
+        client.pre_call(&caller, &route);
+        let result = client.try_pre_call(&caller, &route);
+        assert_eq!(result, Err(Ok(MiddlewareError::RateLimitExceeded)));
+    }
+
+    #[test]
+    fn test_set_and_get_rate_limit_strategy() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+
+        // Default is Reject
+        assert_eq!(client.get_rate_limit_strategy(&route), RateLimitStrategy::Reject);
+
+        // Set to Throttle
+        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::Throttle);
+        assert_eq!(client.get_rate_limit_strategy(&route), RateLimitStrategy::Throttle);
+
+        // Set to LogOnly
+        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::LogOnly);
+        assert_eq!(client.get_rate_limit_strategy(&route), RateLimitStrategy::LogOnly);
+
+        // Set back to Reject
+        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::Reject);
+        assert_eq!(client.get_rate_limit_strategy(&route), RateLimitStrategy::Reject);
+    }
+
+    #[test]
+    fn test_throttle_strategy_allows_call_after_rate_limit_exceeded() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        // max 1 call per 60s window
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
+        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::Throttle);
+
+        let caller = Address::generate(&env);
+        // First call succeeds
+        assert!(client.try_pre_call(&caller, &route).is_ok());
+        // Second call exceeds limit but Throttle allows it
+        assert!(client.try_pre_call(&caller, &route).is_ok());
+        // Total calls should increment for both
+        assert_eq!(client.total_calls(), 2);
+    }
+
+    #[test]
+    fn test_throttle_strategy_emits_event() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
+        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::Throttle);
+
+        let caller = Address::generate(&env);
+        client.pre_call(&caller, &route); // within limit
+        client.pre_call(&caller, &route); // exceeds limit, throttled
+
+        // Find the rate_limit_throttled event
+        let events = env.events().all();
+        let throttled_event = events.iter().find(|(_, topics, _)| {
+            topics
+                .get(0)
+                .map(|v| {
+                    Symbol::from_val(&env, &v) == Symbol::new(&env, "rate_limit_throttled")
+                })
+                .unwrap_or(false)
+        });
+        assert!(throttled_event.is_some(), "rate_limit_throttled event should be emitted");
+    }
+
+    #[test]
+    fn test_log_only_strategy_allows_call_after_rate_limit_exceeded() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        // max 1 call per 60s window
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
+        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::LogOnly);
+
+        let caller = Address::generate(&env);
+        // First call succeeds
+        assert!(client.try_pre_call(&caller, &route).is_ok());
+        // Second call exceeds limit but LogOnly allows it
+        assert!(client.try_pre_call(&caller, &route).is_ok());
+        // Third call also allowed
+        assert!(client.try_pre_call(&caller, &route).is_ok());
+        assert_eq!(client.total_calls(), 3);
+    }
+
+    #[test]
+    fn test_log_only_strategy_emits_event() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
+        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::LogOnly);
+
+        let caller = Address::generate(&env);
+        client.pre_call(&caller, &route); // within limit
+        client.pre_call(&caller, &route); // exceeds limit, logged
+
+        // Find the rate_limit_exceeded event
+        let events = env.events().all();
+        let log_event = events.iter().find(|(_, topics, _)| {
+            topics
+                .get(0)
+                .map(|v| {
+                    Symbol::from_val(&env, &v) == Symbol::new(&env, "rate_limit_exceeded")
+                })
+                .unwrap_or(false)
+        });
+        assert!(log_event.is_some(), "rate_limit_exceeded event should be emitted");
+    }
+
+    #[test]
+    fn test_rate_limit_strategy_is_per_route() {
+        let (env, admin, client) = setup();
+        let route_a = String::from_str(&env, "oracle/price");
+        let route_b = String::from_str(&env, "vault/deposit");
+
+        // Both routes have max 1 call per window
+        client.configure_route(&admin, &route_a, &1, &60, &true, &0, &0, &0);
+        client.configure_route(&admin, &route_b, &1, &60, &true, &0, &0, &0);
+
+        // route_a: Throttle (allows), route_b: Reject (default, blocks)
+        client.set_rate_limit_strategy(&admin, &route_a, &RateLimitStrategy::Throttle);
+
+        let caller = Address::generate(&env);
+        client.pre_call(&caller, &route_a); // exhausts route_a
+        client.pre_call(&caller, &route_b); // exhausts route_b
+
+        // route_a should allow throttled call
+        assert!(client.try_pre_call(&caller, &route_a).is_ok());
+        // route_b should reject (default Reject)
+        assert_eq!(
+            client.try_pre_call(&caller, &route_b),
+            Err(Ok(MiddlewareError::RateLimitExceeded))
+        );
+    }
+
+    #[test]
+    fn test_set_rate_limit_strategy_unauthorized_fails() {
+        let (env, _admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        let attacker = Address::generate(&env);
+        let result = client.try_set_rate_limit_strategy(
+            &attacker,
+            &route,
+            &RateLimitStrategy::Throttle,
+        );
+        assert_eq!(result, Err(Ok(MiddlewareError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_set_rate_limit_strategy_emits_event() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+
+        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::Throttle);
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        let topic: Symbol = last.1.get(0).unwrap().into_val(&env);
+        assert_eq!(topic, Symbol::new(&env, "rate_limit_strategy_set"));
     // ── Issue #593: rate-limit window tests under ledger timestamp jumps ──────
 
     #[test]
