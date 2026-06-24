@@ -529,11 +529,10 @@ impl RouterCore {
             }
         }
 
-        Ok(result)
         // Removing routes may invalidate the cached best route; refresh it once.
         Self::recompute_best_route(&env);
 
-        Ok(())
+        Ok(result)
     }
 
     /// Resolve a route name to its contract address.
@@ -3113,6 +3112,8 @@ mod tests {
         );
         let resolve_result = client.try_resolve(&name);
         assert_eq!(resolve_result, Err(Ok(RouterError::RouteNotFound)));
+    }
+
     // ── Issue #582: cached best-route selection & pagination ──────────────────
 
     #[test]

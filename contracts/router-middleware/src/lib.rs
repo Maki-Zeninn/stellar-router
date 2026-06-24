@@ -2256,4 +2256,125 @@ mod tests {
         // Should now succeed (at exactly recovery_window_seconds)
         assert!(client.try_pre_call(&caller, &route).is_ok());
     }
+
+    // ── Issue #593: rate-limit window tests under ledger timestamp jumps ──────
+
+    #[test]
+    fn test_rate_limit_large_timestamp_gap_resets_window() {
+        // last_reset=100, current=10000 — large gap must trigger window reset
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        env.ledger().set_timestamp(100);
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
+
+        let caller = Address::generate(&env);
+        client.pre_call(&caller, &route);
+        assert_eq!(
+            client.try_pre_call(&caller, &route),
+            Err(Ok(MiddlewareError::RateLimitExceeded))
+        );
+
+        // Large ledger timestamp gap (e.g. network halt)
+        env.ledger().set_timestamp(10000);
+
+        assert!(client.try_pre_call(&caller, &route).is_ok());
+        let state = client.rate_limit_state(&route, &caller).unwrap();
+        assert_eq!(state.calls_in_window, 1);
+        assert_eq!(state.window_start, 10000);
+    }
+
+    #[test]
+    fn test_rate_limit_at_exact_window_boundary() {
+        // A call at exactly last_reset + window_seconds must start a new window
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        let t0 = env.ledger().timestamp();
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
+
+        let caller = Address::generate(&env);
+        client.pre_call(&caller, &route);
+        assert_eq!(
+            client.try_pre_call(&caller, &route),
+            Err(Ok(MiddlewareError::RateLimitExceeded))
+        );
+
+        env.ledger().with_mut(|l| l.timestamp = t0 + 60);
+
+        assert!(client.try_pre_call(&caller, &route).is_ok());
+        let state = client.rate_limit_state(&route, &caller).unwrap();
+        assert_eq!(state.calls_in_window, 1);
+        assert_eq!(state.window_start, t0 + 60);
+    }
+
+    #[test]
+    fn test_rate_limit_multiple_calls_same_ledger_timestamp() {
+        // Multiple calls at the same ledger timestamp must each be counted
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &3, &60, &true, &0, &0, &0);
+
+        let caller = Address::generate(&env);
+        let ts = env.ledger().timestamp();
+
+        client.pre_call(&caller, &route);
+        client.pre_call(&caller, &route);
+        client.pre_call(&caller, &route);
+
+        assert_eq!(
+            client.try_pre_call(&caller, &route),
+            Err(Ok(MiddlewareError::RateLimitExceeded))
+        );
+
+        let state = client.rate_limit_state(&route, &caller).unwrap();
+        assert_eq!(state.calls_in_window, 3);
+        assert_eq!(state.window_start, ts);
+    }
+
+    #[test]
+    fn test_rate_limit_window_reset_race_at_boundary() {
+        // Two callers arrive at exactly the window boundary — each gets a fresh window
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        let t0 = env.ledger().timestamp();
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
+
+        let caller_a = Address::generate(&env);
+        let caller_b = Address::generate(&env);
+
+        client.pre_call(&caller_a, &route);
+        client.pre_call(&caller_b, &route);
+
+        env.ledger().with_mut(|l| l.timestamp = t0 + 60);
+
+        assert!(client.try_pre_call(&caller_a, &route).is_ok());
+        assert!(client.try_pre_call(&caller_b, &route).is_ok());
+
+        let state_a = client.rate_limit_state(&route, &caller_a).unwrap();
+        let state_b = client.rate_limit_state(&route, &caller_b).unwrap();
+        assert_eq!(state_a.calls_in_window, 1);
+        assert_eq!(state_b.calls_in_window, 1);
+    }
+
+    #[test]
+    fn test_rate_limit_no_underflow_on_backward_timestamp() {
+        // Defensive: window_start > now must not cause underflow or panic.
+        // The contract uses `now >= window_start + window_secs` (no subtraction),
+        // so this verifies no panic and that the window is not falsely treated as elapsed.
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        env.ledger().set_timestamp(10000);
+        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0);
+
+        let caller = Address::generate(&env);
+        client.pre_call(&caller, &route); // window_start = 10000
+
+        // Simulate backward-looking timestamp (clock skew / unlikely on Stellar)
+        env.ledger().set_timestamp(9000);
+
+        // elapsed = 9000 >= 10000 + 60 → false → same window, no underflow
+        assert!(client.try_pre_call(&caller, &route).is_ok());
+        let state = client.rate_limit_state(&route, &caller).unwrap();
+        assert_eq!(state.calls_in_window, 2);
+        assert_eq!(state.window_start, 10000);
+    }
 }
