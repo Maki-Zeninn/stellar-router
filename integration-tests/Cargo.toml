@@ -1,0 +1,15 @@
+[package]
+name = "integration-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[test]]
+name = "integration_tests"
+path = "tests/integration_tests.rs"
+
+[dependencies]
+# No runtime dependencies needed - tests use stellar CLI
+
+[dev-dependencies]
+# Tests are self-contained and use stellar CLI via Command

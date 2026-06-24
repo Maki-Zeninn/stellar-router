@@ -8,6 +8,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
+router-common = { path = "../router-common" }
 
 [dev-dependencies]
 soroban-sdk = { version = "21.7.6", features = ["testutils"] }

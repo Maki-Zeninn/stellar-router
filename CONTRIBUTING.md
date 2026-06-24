@@ -1,58 +1,130 @@
 # Contributing to stellar-router
 
-Thanks for your interest in contributing! This guide covers everything you need to get started.
+Thank you for your interest in contributing! This document covers everything you need to get started.
 
-## Prerequisites
+## Dev Environment Setup
 
-- [Rust](https://rustup.rs/) (stable toolchain)
-- `wasm32-unknown-unknown` target
-- [Soroban CLI](https://developers.stellar.org/docs/tools/developer-tools/cli/install-cli)
+### Prerequisites
 
-```sh
-rustup target add wasm32-unknown-unknown
-cargo install --locked stellar-cli --features opt
-```
+| Tool | Install |
+|---|---|
+| Rust (stable, 1.75+) | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| wasm32 target | `rustup target add wasm32-unknown-unknown` |
+| Stellar CLI | `cargo install --locked stellar-cli` |
+| Docker (optional) | [docs.docker.com](https://docs.docker.com/get-docker/) |
 
-## Setup
+### Clone and build
 
-```sh
+```bash
 git clone https://github.com/Maki-Zeninn/stellar-router.git
 cd stellar-router
 cargo build
 ```
 
+### Docker (no local Rust required)
+
+```bash
+docker compose run tests   # run all unit tests
+docker compose run wasm    # build WASM artifacts
+```
+
+## Branch Naming
+
+```
+<type>/<short-description>
+```
+
+| Type | When to use |
+|---|---|
+| `feat/` | New feature |
+| `fix/` | Bug fix |
+| `docs/` | Documentation only |
+| `refactor/` | Code change with no behaviour change |
+| `test/` | Adding or fixing tests |
+| `chore/` | Tooling, CI, dependency updates |
+
+Examples: `feat/compare-quotes`, `fix/execution-collector-rpc`, `docs/contributing`
+
+## Commit Message Format
+
+Follow [Conventional Commits](https://www.conventionalcommits.org/):
+
+```
+<type>(<scope>): <short summary>
+
+[optional body]
+
+[optional footer: Closes #<issue>]
+```
+
+- **type**: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`
+- **scope**: the affected component, e.g. `router-quote`, `metrics/collector`, `router-core`
+- **summary**: imperative, lowercase, no trailing period, ≤ 72 chars
+
+Examples:
+```
+feat(router-quote): add compare_quotes with price impact threshold
+fix(metrics/collector): implement getEvents RPC in QuoteCollector
+docs: add CONTRIBUTING.md
+```
+
+## Pull Request Process
+
+1. **Branch** off `main` using the naming convention above.
+2. **Implement** your change with tests.
+3. **Run tests** locally (see below) — CI must pass.
+4. **Open a PR** against `main` with a title following the commit format.
+5. **Fill in the PR description** with: what changed, how it was tested, and any follow-up work.
+6. **Request a review** — at least one approval is required before merging.
+7. **Squash-merge** is preferred to keep the history clean.
+
+Keep PRs focused. One logical change per PR makes review faster and reverts easier.
+
 ## Running Tests
 
-```sh
+### Unit tests (all contracts + off-chain crates)
+
+```bash
 cargo test
 ```
 
-To test a specific contract:
+### Single crate
 
-```sh
-cargo test -p router-core
+```bash
+cargo test -p router-quote
+cargo test -p router-metrics-exporter
 ```
 
-## Building WASM Artifacts
+### Integration tests (requires Stellar testnet access)
 
-```sh
-stellar contract build
+```bash
+# Quick start (handles funding and deployment automatically)
+./scripts/run-integration-tests.sh
+
+# Or manually
+cargo test --test integration_tests -- --ignored --test-threads=1 --nocapture
 ```
 
-This compiles each contract to `target/wasm32-unknown-unknown/release/*.wasm`.
+See [INTEGRATION_TESTS.md](INTEGRATION_TESTS.md) for full details.
 
-> **Note:** The `wasm32-unknown-unknown` target must be installed separately via `rustup target add wasm32-unknown-unknown` — it is not included with the default Rust installation.
+### Build WASM artifacts
 
-## Branching & PR Conventions
+```bash
+cargo build --target wasm32-unknown-unknown --release
+```
 
-- Branch naming: `feat/<short-description>`, `fix/<short-description>`, `docs/<short-description>`
-- Commit style: use the [Conventional Commits](https://www.conventionalcommits.org/) format (e.g. `feat: add route validation`, `fix: handle empty registry`)
-- Keep PRs focused — one logical change per PR
-- Ensure `cargo test` passes before opening a PR
-- Add a clear description of what changed and why
+## Code Style
 
-## Known Gotchas
+- Run `cargo fmt` before committing.
+- Run `cargo clippy -- -D warnings` and fix any warnings.
+- Match the style and conventions of the surrounding code.
+- Add doc comments (`///`) to all public items.
+- Follow the event naming convention in [`contracts/router-common/EVENT_NAMING_CONVENTION.md`](contracts/router-common/EVENT_NAMING_CONVENTION.md).
 
-- The `wasm32-unknown-unknown` target must be installed manually — `cargo build` alone won't install it.
-- Soroban SDK version is pinned in `Cargo.toml`; avoid bumping it without testing all contracts.
-- `stellar contract build` must be run from the workspace root to pick up all contracts.
+## Reporting Issues
+
+Open a GitHub issue with:
+- A clear title following the commit format (e.g. `bug(router-quote): …`)
+- Steps to reproduce
+- Expected vs actual behaviour
+- Rust / Stellar CLI version (`rustc --version`, `stellar --version`)
