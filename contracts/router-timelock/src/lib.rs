@@ -76,6 +76,10 @@ pub enum TimelockError {
     DelayTooShort = 8,
     /// The grace period has elapsed; the operation can no longer be executed.
     Expired = 9,
+    /// A dependency references itself or creates a cycle.
+    CircularDependency = 10,
+    /// Dependency chain exceeds maximum allowed depth.
+    DependencyTooDeep = 11,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -85,6 +89,8 @@ pub struct RouterTimelock;
 
 #[contractimpl]
 impl RouterTimelock {
+    const MAX_DEPENDENCY_DEPTH: u32 = 8;
+
     /// Initialize with an admin and minimum delay (seconds).
     pub fn initialize(env: Env, admin: Address, min_delay: u64) -> Result<(), TimelockError> {
         if env.storage().instance().has(&DataKey::Admin) {
@@ -109,7 +115,7 @@ impl RouterTimelock {
         target: Address,
         delay: u64,
         grace_period_seconds: u64,
-        _deps: Vec<Bytes>,
+        deps: Vec<Bytes>,
     ) -> Result<Bytes, TimelockError> {
         proposer.require_auth();
         Self::require_admin(&env, &proposer)?;
@@ -134,6 +140,14 @@ impl RouterTimelock {
         preimage.append(&Bytes::from_array(&env, &eta_bytes));
 
         let op_id: Bytes = env.crypto().sha256(&preimage).into();
+
+        // Validate no circular dependencies
+        for dep_id in deps.iter() {
+            if dep_id == op_id {
+                return Err(TimelockError::CircularDependency);
+            }
+            Self::check_dependency_depth(&env, dep_id.clone(), 0)?;
+        }
 
         let op = Op {
             proposer,
@@ -459,6 +473,25 @@ impl RouterTimelock {
                 .instance()
                 .set(&DataKey::PendingOps, &pending);
         }
+    }
+
+    /// Check dependency chain depth to prevent infinite recursion.
+    /// Loads each dependency by ID and checks whether it itself exists
+    /// as an operation, incrementing depth at each level.
+    fn check_dependency_depth(env: &Env, dep_id: Bytes, depth: u32) -> Result<(), TimelockError> {
+        if depth > Self::MAX_DEPENDENCY_DEPTH {
+            return Err(TimelockError::DependencyTooDeep);
+        }
+        if let Some(dep_op) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Op>(&DataKey::Op(dep_id))
+        {
+            if dep_op.executed || dep_op.cancelled {
+                return Ok(());
+            }
+        }
+        Ok(())
     }
 }
 

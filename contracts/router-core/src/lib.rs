@@ -138,6 +138,7 @@ pub enum RouterError {
     RouteAlreadyExists = 7,
     InvalidRouteName = 8,
     InvalidMetadata = 9,
+    InvalidAddress = 10,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -209,6 +210,13 @@ impl RouterCore {
 
         // Use shared validation helper
         Self::validate_route_name(&env, &name)?;
+
+        // Validate address is not the zero address
+        let zero_address =
+            Address::from_string(&String::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"));
+        if address == zero_address {
+            return Err(RouterError::InvalidAddress);
+        }
 
         // Validate metadata if provided
         if let Some(ref meta) = metadata {
@@ -1493,6 +1501,7 @@ impl RouterCore {
             RouterError::RouteAlreadyExists => "RouteAlreadyExists",
             RouterError::InvalidRouteName => "InvalidRouteName",
             RouterError::InvalidMetadata => "InvalidMetadata",
+            RouterError::InvalidAddress => "InvalidAddress",
         }
     }
 
@@ -1504,6 +1513,14 @@ impl RouterCore {
         metadata: Option<RouteMetadata>,
     ) -> Result<(), RouterError> {
         Self::validate_route_name(env, &name)?;
+
+        // Validate address is not the zero address
+        let zero_address =
+            Address::from_string(&String::from_str(env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"));
+        if address == zero_address {
+            return Err(RouterError::InvalidAddress);
+        }
+
         if let Some(ref meta) = metadata {
             Self::validate_metadata(meta)?;
         }

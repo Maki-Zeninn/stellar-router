@@ -41,6 +41,7 @@ pub enum DataKey {
     ConfiguredRoutes,       // Vec<String>
     CallLogSummary(String), // route_name -> CallLogSummary
     RateLimitStrategy(String), // route_name -> RateLimitStrategy
+    CallerRateLimit(String, Address), // (route, caller) -> CallerRateLimitConfig
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -157,6 +158,14 @@ pub enum MiddlewareError {
     CircuitOpen = 8,
 }
 
+/// Per-caller rate limit override for a specific route.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CallerRateLimitConfig {
+    pub max_calls: u32,
+    pub window_secs: u64,
+}
+
 /// Configurable strategy for handling rate limit exceeded events.
 #[contracttype]
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -176,6 +185,8 @@ pub struct RouterMiddleware;
 
 #[contractimpl]
 impl RouterMiddleware {
+    const MAX_LOG_RETENTION: u32 = 10_000;
+
     /// Initialize middleware with an admin.
     ///
     /// Must be called exactly once. Sets the admin, enables middleware globally,
@@ -239,6 +250,10 @@ impl RouterMiddleware {
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, MiddlewareError)?;
 
         if window_seconds == 0 && max_calls_per_window > 0 {
+            return Err(MiddlewareError::InvalidConfig);
+        }
+
+        if log_retention > Self::MAX_LOG_RETENTION {
             return Err(MiddlewareError::InvalidConfig);
         }
 
@@ -1349,6 +1364,107 @@ impl RouterMiddleware {
         Ok(())
     }
 
+    /// Configure a per-caller rate limit override for a specific route.
+    ///
+    /// Sets `max_calls` per `window_secs` time window for a specific caller
+    /// on a specific route. Overrides the global route rate limit for that caller.
+    /// Caller must be the admin.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `caller` - The address initiating the call; must be the admin.
+    /// * `route` - The route name to configure.
+    /// * `target_caller` - The caller address to apply the rate limit to.
+    /// * `max_calls` - Maximum allowed calls per time window.
+    /// * `window_secs` - Duration of the rate-limit window in seconds.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`MiddlewareError::Unauthorized`] — if `caller` is not the admin.
+    /// * [`MiddlewareError::NotInitialized`] — if the contract has not been initialized.
+    pub fn configure_caller_rate_limit(
+        env: Env,
+        caller: Address,
+        route: String,
+        target_caller: Address,
+        max_calls: u32,
+        window_secs: u64,
+    ) -> Result<(), MiddlewareError> {
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, MiddlewareError)?;
+
+        let key = DataKey::CallerRateLimit(route.clone(), target_caller.clone());
+        env.storage().instance().set(
+            &key,
+            &CallerRateLimitConfig {
+                max_calls,
+                window_secs,
+            },
+        );
+        Ok(())
+    }
+
+    /// Check whether a specific caller has exceeded their per-caller rate limit.
+    ///
+    /// Returns `true` if the call is allowed (under the limit or no per-caller
+    /// config exists), `false` if the caller has exceeded their configured limit.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `route` - The route name to check.
+    /// * `caller` - The caller address to check.
+    ///
+    /// # Returns
+    /// `Ok(true)` if the call is allowed, `Ok(false)` if rate limited.
+    pub fn check_caller_rate_limit(
+        env: Env,
+        route: String,
+        caller: Address,
+    ) -> Result<bool, MiddlewareError> {
+        let key = DataKey::CallerRateLimit(route.clone(), caller.clone());
+        if let Some(config) = env
+            .storage()
+            .instance()
+            .get::<DataKey, CallerRateLimitConfig>(&key)
+        {
+            let route_call_state: RouteCallState = env
+                .storage()
+                .instance()
+                .get(&DataKey::RouteCallState(route.clone()))
+                .unwrap_or(RouteCallState {
+                    rate_limits: Map::new(&env),
+                    circuit_breaker: CircuitBreakerState {
+                        failure_count: 0,
+                        opened_at: 0,
+                        is_open: false,
+                        is_half_open: false,
+                    },
+                });
+
+            let state: RateLimitState = route_call_state
+                .rate_limits
+                .get(caller.clone())
+                .unwrap_or(RateLimitState {
+                    calls_in_window: 0,
+                    window_start: env.ledger().timestamp(),
+                    total_violations: 0,
+                });
+
+            let now = env.ledger().timestamp();
+            let window_elapsed = now >= state.window_start + config.window_secs;
+            let calls = if window_elapsed {
+                0
+            } else {
+                state.calls_in_window
+            };
+
+            Ok(calls < config.max_calls)
+        } else {
+            Ok(true)
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
