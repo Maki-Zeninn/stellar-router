@@ -32,17 +32,17 @@ fn test_app() -> Router {
 }
 
 #[tokio::test]
-async fn test_health_returns_200() {
+async fn test_health_returns_503_when_rpc_unreachable() {
     let app = test_app();
     let resp = app
         .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]
-async fn test_health_returns_ok_body() {
+async fn test_health_returns_degraded_body_when_rpc_down() {
     let app = test_app();
     let resp = app
         .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
@@ -50,7 +50,8 @@ async fn test_health_returns_ok_body() {
         .unwrap();
     let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["status"], "ok");
+    assert_eq!(json["status"], "degraded");
+    assert_eq!(json["rpc"], "down");
 }
 
 #[tokio::test]

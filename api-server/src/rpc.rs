@@ -75,6 +75,27 @@ impl SorobanRpcClient {
         }
     }
 
+    /// Ping the RPC node via `getLatestLedger`. Returns `Ok(())` if reachable.
+    pub async fn health_check(&self) -> Result<()> {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: 1,
+            method: "getLatestLedger",
+            params: serde_json::json!({}),
+        };
+        let resp = self
+            .http
+            .post(&self.rpc_url)
+            .json(&req)
+            .send()
+            .await
+            .map_err(|e| anyhow!("RPC unreachable: {}", e))?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("RPC returned status {}", resp.status()));
+        }
+        Ok(())
+    }
+
     pub async fn simulate(
         &self,
         target: &str,

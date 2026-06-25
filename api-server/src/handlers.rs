@@ -16,8 +16,11 @@ use crate::{
 };
 
 /// GET /health
-pub async fn health() -> impl IntoResponse {
-    (StatusCode::OK, Json(json!({"status": "ok"})))
+pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
+    match state.rpc.health_check().await {
+        Ok(()) => (StatusCode::OK, Json(json!({"status": "ok", "rpc": "up"}))),
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"status": "degraded", "rpc": "down"}))),
+    }
 }
 
 /// POST /simulate

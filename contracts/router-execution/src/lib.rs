@@ -30,9 +30,6 @@ const FIXED_POINT_SCALE: u32 = 100;
 /// Minimum valid backoff multiplier: 100 = 1.0× (no growth, constant delay).
 const MIN_BACKOFF_MULTIPLIER: u32 = FIXED_POINT_SCALE;
 
-/// Base network fee in stroops — the Stellar network minimum transaction fee.
-const BASE_FEE_STROOPS: i128 = 100;
-
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -210,7 +207,7 @@ impl RouterExecution {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(ExecutionError::AlreadyInitialized);
         }
-        if max_retries > 5 {
+        if max_retries == 0 || max_retries > 5 {
             return Err(ExecutionError::InvalidConfig);
         }
         if backoff_multiplier < MIN_BACKOFF_MULTIPLIER {
@@ -420,20 +417,6 @@ impl RouterExecution {
             (SURGE_MULTIPLIER, true)
         } else {
             (NORMAL_MULTIPLIER, false)
-        // Base fee: minimum Stellar network fee in stroops
-        let base_fee: i128 = BASE_FEE_STROOPS;
-
-        // Resource fee scales with amount (0.1% of amount, min BASE_FEE_STROOPS)
-        let resource_fee: i128 = {
-            let scaled = amount / 1000;
-            if scaled < BASE_FEE_STROOPS { BASE_FEE_STROOPS } else { scaled }
-        };
-
-        // Surge pricing: if high_load_threshold >= 8000 bps (80%), apply 2x multiplier
-        let (surge_multiplier, high_load) = if high_load_threshold >= 8000 {
-            (FIXED_POINT_SCALE * 2, true)
-        } else {
-            (FIXED_POINT_SCALE, false)
         };
 
         let total_fee = (base_fee + resource_fee) * surge_multiplier as i128 / FIXED_POINT_SCALE as i128;
@@ -551,7 +534,7 @@ impl RouterExecution {
         if admin != caller {
             return Err(ExecutionError::Unauthorized);
         }
-        if new_max > 5 {
+        if new_max == 0 || new_max > 5 {
             return Err(ExecutionError::InvalidConfig);
         }
         env.storage().instance().set(&DataKey::MaxRetries, &new_max);
@@ -678,6 +661,24 @@ mod tests {
         let (_, admin, client) = setup();
         let result = client.try_initialize(&admin, &1, &0, &100);
         assert_eq!(result, Err(Ok(ExecutionError::AlreadyInitialized)));
+    }
+
+    #[test]
+    fn test_initialize_max_retries_zero_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let result = client.try_initialize(&admin, &0, &0, &100);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_set_max_retries_zero_fails() {
+        let (_, admin, client) = setup();
+        let result = client.try_set_max_retries(&admin, &0);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
     }
 
     #[test]
