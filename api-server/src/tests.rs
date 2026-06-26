@@ -1,21 +1,24 @@
-use axum::{body::Body, http::{Request, StatusCode}, routing::{get, post}, Router};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+    routing::{get, post},
+    Router,
+};
 use serde_json::{json, Value};
-use tower::ServiceExt;
+use tower::util::ServiceExt;
 
 use crate::{
     handlers,
     state::AppState,
     types::{
-        RouteDetails,
-        SimulateRequest,
-        SimulateResponse,
-        TransactionStatus,
+        RouteDetails, SimulateRequest, SimulateResponse, TransactionStatus,
         TransactionStatusEvent,
+        RouteDetails, SimulateRequest, SimulateResponse, TransactionStatus, TransactionStatusEvent,
     },
 };
 
 /// Valid 56-char Stellar contract ID for use in tests.
-const VALID_CONTRACT_ID: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+const VALID_CONTRACT_ID: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
 
 fn test_app() -> Router {
     let state = AppState::new(
@@ -35,7 +38,12 @@ fn test_app() -> Router {
 async fn test_health_returns_503_when_rpc_unreachable() {
     let app = test_app();
     let resp = app
-        .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -45,10 +53,17 @@ async fn test_health_returns_503_when_rpc_unreachable() {
 async fn test_health_returns_degraded_body_when_rpc_down() {
     let app = test_app();
     let resp = app
-        .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "degraded");
     assert_eq!(json["rpc"], "down");
@@ -93,7 +108,9 @@ async fn test_simulate_response_has_fee_fields() {
         )
         .await
         .unwrap();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let parsed: SimulateResponse = serde_json::from_slice(&bytes).unwrap();
     assert!(parsed.estimated_fees.base_fee > 0);
     assert!(parsed.estimated_fees.total_fee >= parsed.estimated_fees.base_fee);
@@ -121,7 +138,9 @@ async fn test_simulate_surge_pricing_at_high_load() {
         )
         .await
         .unwrap();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let parsed: SimulateResponse = serde_json::from_slice(&bytes).unwrap();
     assert!(parsed.estimated_fees.high_load);
     assert_eq!(parsed.estimated_fees.surge_multiplier, 200);
@@ -179,9 +198,16 @@ async fn test_simulate_invalid_contract_id_returns_400() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(json["error"].as_str().unwrap().contains("56-character"));
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("56-character"));
+    assert_eq!(json["error"]["code"].as_str().unwrap(), "VALIDATION_ERROR");
+    assert_eq!(json["error"]["field"].as_str().unwrap(), "target");
 }
 
 #[tokio::test]
@@ -238,9 +264,13 @@ async fn test_get_route_returns_500_when_core_not_configured() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(json["error"].is_string());
+    assert!(json["error"].is_object());
+    assert!(json["error"]["code"].is_string());
+    assert!(json["error"]["message"].is_string());
 }
 
 #[tokio::test]
@@ -255,9 +285,40 @@ async fn test_get_route_error_response_is_json() {
         )
         .await
         .unwrap();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(json.get("error").is_some());
+    assert!(json["error"]["code"].is_string());
+    assert!(json["error"]["message"].is_string());
+}
+
+#[tokio::test]
+async fn test_error_response_has_structured_fields() {
+    let app = test_app();
+    let body = json!({ "target": "TOOSHORT", "function": "transfer" });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/simulate")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    let error = &json["error"];
+    assert!(error.is_object(), "error field must be an object");
+    assert_eq!(error["code"].as_str().unwrap(), "VALIDATION_ERROR");
+    assert!(error["message"].is_string());
+    assert_eq!(error["field"].as_str().unwrap(), "target");
 }
 
 #[test]
@@ -298,4 +359,29 @@ fn test_transaction_status_event_serialization() {
     assert_eq!(deserialized.status, event.status);
     assert_eq!(deserialized.timestamp, event.timestamp);
     assert_eq!(deserialized.message, event.message);
+}
+
+#[test]
+fn test_error_code_serialization() {
+    use crate::types::ErrorCode;
+    assert_eq!(
+        serde_json::to_string(&ErrorCode::ValidationError).unwrap(),
+        "\"VALIDATION_ERROR\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ErrorCode::RpcError).unwrap(),
+        "\"RPC_ERROR\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ErrorCode::NotFound).unwrap(),
+        "\"NOT_FOUND\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ErrorCode::InternalError).unwrap(),
+        "\"INTERNAL_ERROR\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ErrorCode::ContractError).unwrap(),
+        "\"CONTRACT_ERROR\""
+    );
 }

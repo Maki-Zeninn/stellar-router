@@ -12,6 +12,7 @@
 //! - `op_executed`            — Operation executed (op_id, target)
 //! - `op_cancelled`           — Operation cancelled (op_id)
 //! - `op_description_updated` — Operation description updated (op_id, new_description)
+//! - `min_delay_updated`      — Minimum delay updated (old_min_delay, new_min_delay)
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, xdr::ToXdr, Address, Bytes, Env, String,
@@ -76,6 +77,10 @@ pub enum TimelockError {
     DelayTooShort = 8,
     /// The grace period has elapsed; the operation can no longer be executed.
     Expired = 9,
+    /// A dependency references itself or creates a cycle.
+    CircularDependency = 10,
+    /// Dependency chain exceeds maximum allowed depth.
+    DependencyTooDeep = 11,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -85,6 +90,8 @@ pub struct RouterTimelock;
 
 #[contractimpl]
 impl RouterTimelock {
+    const MAX_DEPENDENCY_DEPTH: u32 = 8;
+
     /// Initialize with an admin and minimum delay (seconds).
     pub fn initialize(env: Env, admin: Address, min_delay: u64) -> Result<(), TimelockError> {
         if env.storage().instance().has(&DataKey::Admin) {
@@ -109,7 +116,7 @@ impl RouterTimelock {
         target: Address,
         delay: u64,
         grace_period_seconds: u64,
-        _deps: Vec<Bytes>,
+        deps: Vec<Bytes>,
     ) -> Result<Bytes, TimelockError> {
         proposer.require_auth();
         Self::require_admin(&env, &proposer)?;
@@ -134,6 +141,14 @@ impl RouterTimelock {
         preimage.append(&Bytes::from_array(&env, &eta_bytes));
 
         let op_id: Bytes = env.crypto().sha256(&preimage).into();
+
+        // Validate no circular dependencies
+        for dep_id in deps.iter() {
+            if dep_id == op_id {
+                return Err(TimelockError::CircularDependency);
+            }
+            Self::check_dependency_depth(&env, dep_id.clone(), 0)?;
+        }
 
         let op = Op {
             proposer,
@@ -393,6 +408,40 @@ impl RouterTimelock {
             .unwrap_or(0)
     }
 
+    /// Update the minimum delay (seconds) required for newly queued operations.
+    ///
+    /// Only the admin may call this. The new value only applies to operations
+    /// queued after this call — already-queued operations keep the `eta` that
+    /// was computed from the delay in effect when they were queued, so this
+    /// cannot be used to accelerate or stall operations already in the queue.
+    ///
+    /// Emits `min_delay_updated` with `(old_min_delay, new_min_delay)`.
+    pub fn set_min_delay(
+        env: Env,
+        caller: Address,
+        new_min_delay: u64,
+    ) -> Result<(), TimelockError> {
+        caller.require_auth();
+        Self::require_admin(&env, &caller)?;
+
+        let old_min_delay: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinDelay)
+            .ok_or(TimelockError::NotInitialized)?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::MinDelay, &new_min_delay);
+
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_MIN_DELAY_UPDATED),),
+            (old_min_delay, new_min_delay),
+        );
+
+        Ok(())
+    }
+
     /// Get the admin.
     ///
     /// # Errors
@@ -460,6 +509,25 @@ impl RouterTimelock {
             pending.push_back(op_id.clone());
             env.storage().instance().set(&DataKey::PendingOps, &pending);
         }
+    }
+
+    /// Check dependency chain depth to prevent infinite recursion.
+    /// Loads each dependency by ID and checks whether it itself exists
+    /// as an operation, incrementing depth at each level.
+    fn check_dependency_depth(env: &Env, dep_id: Bytes, depth: u32) -> Result<(), TimelockError> {
+        if depth > Self::MAX_DEPENDENCY_DEPTH {
+            return Err(TimelockError::DependencyTooDeep);
+        }
+        if let Some(dep_op) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Op>(&DataKey::Op(dep_id))
+        {
+            if dep_op.executed || dep_op.cancelled {
+                return Ok(());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -987,6 +1055,77 @@ mod tests {
             client.try_queue(&admin, &desc, &target, &3600, &GRACE, &deps),
             Err(Ok(TimelockError::Unauthorized))
         );
+    }
+
+    // ── set_min_delay ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_set_min_delay_updates_value() {
+        let (_env, admin, client) = setup();
+        client.set_min_delay(&admin, &7200);
+        assert_eq!(client.min_delay(), 7200);
+    }
+
+    #[test]
+    fn test_set_min_delay_emits_event() {
+        let (env, admin, client) = setup();
+        client.set_min_delay(&admin, &7200);
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        let topic: Symbol = last.1.get(0).unwrap().into_val(&env);
+        assert_eq!(topic, Symbol::new(&env, router_common::EVENT_MIN_DELAY_UPDATED));
+
+        let (old, new): (u64, u64) = last.2.into_val(&env);
+        assert_eq!(old, 3600);
+        assert_eq!(new, 7200);
+    }
+
+    #[test]
+    fn test_set_min_delay_unauthorized_fails() {
+        let (env, _admin, client) = setup();
+        let attacker = Address::generate(&env);
+        let result = client.try_set_min_delay(&attacker, &7200);
+        assert_eq!(result, Err(Ok(TimelockError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_set_min_delay_does_not_affect_already_queued_ops() {
+        // Operations queued before a min_delay change keep the eta computed
+        // from the delay that was in effect at queue time.
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "upgrade oracle");
+        let deps = Vec::new(&env);
+
+        let op_id = client.queue(&admin, &desc, &target, &3600, &GRACE, &deps);
+        let op_before = client.get_op(&op_id).unwrap();
+
+        // Raise min_delay well above the original queued delay.
+        client.set_min_delay(&admin, &100_000);
+
+        let op_after = client.get_op(&op_id).unwrap();
+        assert_eq!(op_before.eta, op_after.eta);
+
+        // The op still becomes executable at its original eta, unaffected
+        // by the new (higher) min_delay.
+        env.ledger().with_mut(|l| l.timestamp += 3601);
+        client.execute(&admin, &op_id);
+        assert!(client.get_op(&op_id).unwrap().executed);
+    }
+
+    #[test]
+    fn test_set_min_delay_applies_to_newly_queued_ops() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "upgrade oracle");
+        let deps = Vec::new(&env);
+
+        client.set_min_delay(&admin, &7200);
+
+        // A delay below the new min_delay (but above the old one) must fail.
+        let result = client.try_queue(&admin, &desc, &target, &3600, &GRACE, &deps);
+        assert_eq!(result, Err(Ok(TimelockError::DelayTooShort)));
     }
 
     // ── Issue #586: pending ops index and count_by_status ─────────────────────

@@ -11,6 +11,8 @@
 //! - Retry logic for transient (network) failures
 //! - Centralized error event logging
 //! - Fee estimation endpoint with edge-case handling
+//! - Bounded execution history: capped at `max_history_size` records (default
+//!   1000), oldest entries evicted first, to prevent unbounded storage growth
 //!
 //! ## Events (following naming convention: past tense verbs in snake_case)
 //! - `execution_result` — Execution result logged (target, function, success, attempts)
@@ -30,6 +32,11 @@ const FIXED_POINT_SCALE: u32 = 100;
 /// Minimum valid backoff multiplier: 100 = 1.0× (no growth, constant delay).
 const MIN_BACKOFF_MULTIPLIER: u32 = FIXED_POINT_SCALE;
 
+/// Default cap on the number of `ExecutionRecord`s kept in `ExecHistory`
+/// when no explicit limit has been configured via `set_max_history_size`.
+/// Bounds per-entry storage growth so the history can't grow unbounded.
+const DEFAULT_MAX_HISTORY_SIZE: u32 = 1000;
+
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -41,6 +48,8 @@ pub enum DataKey {
     BackoffBaseMs,     // base delay in milliseconds before first retry
     BackoffMultiplier, // multiplier applied each retry (stored as fixed-point *100, e.g. 200 = 2x)
     ExecHistory,       // Vec<ExecutionRecord>
+    ExecHistory,   // Vec<ExecutionRecord>, capped at MaxHistorySize (oldest evicted first)
+    MaxHistorySize, // u32 — cap on ExecHistory length
 }
 
 // ── Error Types ───────────────────────────────────────────────────────────────
@@ -574,6 +583,56 @@ impl RouterExecution {
         Ok(())
     }
 
+    /// Update the cap on the number of execution history records retained
+    /// (admin only). If the history currently holds more than `new_max`
+    /// records, the oldest excess records are evicted immediately.
+    ///
+    /// # Errors
+    /// * [`ExecutionError::Unauthorized`] — if `caller` is not the admin.
+    /// * [`ExecutionError::NotInitialized`] — if the contract is not initialized.
+    /// * [`ExecutionError::InvalidConfig`] — if `new_max` is zero.
+    pub fn set_max_history_size(
+        env: Env,
+        caller: Address,
+        new_max: u32,
+    ) -> Result<(), ExecutionError> {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ExecutionError::NotInitialized)?;
+        if admin != caller {
+            return Err(ExecutionError::Unauthorized);
+        }
+        if new_max == 0 {
+            return Err(ExecutionError::InvalidConfig);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxHistorySize, &new_max);
+
+        let mut history: Vec<ExecutionRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExecHistory)
+            .unwrap_or(Vec::new(&env));
+        while history.len() > new_max {
+            history.remove(0);
+        }
+        env.storage().instance().set(&DataKey::ExecHistory, &history);
+
+        Ok(())
+    }
+
+    /// Get the current cap on the number of execution history records retained.
+    pub fn max_history_size(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxHistorySize)
+            .unwrap_or(DEFAULT_MAX_HISTORY_SIZE)
+    }
+
     /// Return up to `limit` most-recent execution history records (newest first).
     ///
     /// # Errors
@@ -695,6 +754,18 @@ impl RouterExecution {
         env.storage()
             .instance()
             .set(&DataKey::ExecHistory, &history);
+
+        // Cap storage growth: evict the oldest record(s) once over the limit.
+        let max_history: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxHistorySize)
+            .unwrap_or(DEFAULT_MAX_HISTORY_SIZE);
+        while history.len() > max_history {
+            history.remove(0);
+        }
+
+        env.storage().instance().set(&DataKey::ExecHistory, &history);
     }
 }
 
@@ -876,6 +947,71 @@ mod tests {
         let attacker = Address::generate(&env);
         let result = client.try_set_max_retries(&attacker, &2);
         assert_eq!(result, Err(Ok(ExecutionError::Unauthorized)));
+    }
+
+    // ── Execution history size limit (#664) ───────────────────────────────────
+
+    #[test]
+    fn test_max_history_size_default() {
+        let (_, _, client) = setup();
+        assert_eq!(client.max_history_size(), 1000);
+    }
+
+    #[test]
+    fn test_set_max_history_size_updates_value() {
+        let (_, admin, client) = setup();
+        client.set_max_history_size(&admin, &5);
+        assert_eq!(client.max_history_size(), 5);
+    }
+
+    #[test]
+    fn test_set_max_history_size_zero_fails() {
+        let (_, admin, client) = setup();
+        let result = client.try_set_max_history_size(&admin, &0);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_set_max_history_size_unauthorized_fails() {
+        let (env, _, client) = setup();
+        let attacker = Address::generate(&env);
+        let result = client.try_set_max_history_size(&attacker, &5);
+        assert_eq!(result, Err(Ok(ExecutionError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_append_history_evicts_oldest_when_over_limit() {
+        let (env, admin, client) = setup();
+        client.set_max_history_size(&admin, &3);
+
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        env.as_contract(&client.address, || {
+            for _ in 0..5u32 {
+                RouterExecution::append_history(&env, &target, &function, true, 0);
+            }
+        });
+
+        let history = client.get_execution_history(&10);
+        // Capped at 3 despite 5 appends — oldest entries were evicted.
+        assert_eq!(history.len(), 3);
+    }
+
+    #[test]
+    fn test_set_max_history_size_trims_existing_history() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        env.as_contract(&client.address, || {
+            for _ in 0..5u32 {
+                RouterExecution::append_history(&env, &target, &function, true, 0);
+            }
+        });
+        assert_eq!(client.get_execution_history(&10).len(), 5);
+
+        // Shrinking the cap below the current length trims immediately.
+        client.set_max_history_size(&admin, &2);
+        assert_eq!(client.get_execution_history(&10).len(), 2);
     }
 
     #[test]

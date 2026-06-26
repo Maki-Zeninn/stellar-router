@@ -506,6 +506,20 @@ mod tests {
     }
 
     #[test]
+    fn test_set_max_batch_size_zero_fails() {
+        // Regression test for #566: setting max_batch_size to 0 after the
+        // contract is already initialized must be rejected, since 0 would
+        // make every non-empty execute_batch() call fail with
+        // BatchTooLarge while empty batches fail with EmptyBatch — a
+        // permanently broken state with no way to self-recover.
+        let (_env, admin, client) = setup();
+        let result = client.try_set_max_batch_size(&admin, &0);
+        assert_eq!(result, Err(Ok(MulticallError::InvalidConfig)));
+        // The previous, valid value must be left untouched.
+        assert_eq!(client.max_batch_size(), 10);
+    }
+
+    #[test]
     fn test_unauthorized_set_max_fails() {
         let (env, _admin, client) = setup();
         let attacker = Address::generate(&env);

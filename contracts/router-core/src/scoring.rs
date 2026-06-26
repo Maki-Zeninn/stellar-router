@@ -6,7 +6,7 @@
 
 use soroban_sdk::{Env, String, Symbol};
 
-use crate::{DataKey, RouteEntry, RouteScore};
+use crate::{is_route_expired, DataKey, RouteEntry, RouteScore};
 
 /// Recompute and cache the highest-scoring, non-paused route.
 ///
@@ -25,13 +25,13 @@ pub fn recompute_best_route(env: &Env) {
     let mut best_score: i64 = i64::MIN;
 
     for name in names.iter() {
-        // Skip missing or paused routes
+        // Skip missing, paused, or expired routes
         match env
             .storage()
             .instance()
             .get::<DataKey, RouteEntry>(&DataKey::Route(name.clone()))
         {
-            Some(e) if !e.paused => {}
+            Some(e) if !e.paused && !is_route_expired(env, &e) => {}
             _ => continue,
         }
 
