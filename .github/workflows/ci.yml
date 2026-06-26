@@ -179,7 +179,6 @@ jobs:
         run: cargo test --test integration_tests -- --ignored --test-threads=1 --nocapture
         env:
           STELLAR_RPC_URL: https://soroban-testnet.stellar.org
-        continue-on-error: true
 
       - name: Upload integration test results
         if: always()
