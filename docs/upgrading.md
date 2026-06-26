@@ -198,3 +198,136 @@ Before upgrading any contract on mainnet:
 - [ ] Migration function (if needed) tested on testnet
 - [ ] Rollback WASM uploaded and hash noted
 - [ ] On-chain monitoring active during upgrade window
+
+---
+
+## Storage Schema Migration Guide
+
+This section covers how to handle storage schema changes when upgrading deployed
+contracts. Because Soroban preserves all `DataKey` entries across WASM upgrades,
+changing the layout of stored values can make existing data unreadable.
+
+### Storage Schema Versioning
+
+Each contract's `DataKey` enum is the schema. Treat it the same way you would a
+database schema: only append new variants, never change or reorder existing ones.
+
+- **Adding a new `DataKey` variant** — safe. Old storage is unaffected; the new
+  key simply starts absent.
+- **Removing a `DataKey` variant** — safe if no live entries exist for it.
+  Orphaned entries remain in storage but are ignored.
+- **Changing the payload type of an existing variant** — dangerous. The new WASM
+  will attempt to deserialize old bytes with the new type and will panic.
+- **Reordering `DataKey` variants** — dangerous. Soroban encodes `contracttype`
+  enums by discriminant index, so reordering changes which numeric value maps to
+  which key name.
+
+### Storage Compatibility Matrix
+
+| Change | Safe? | Migration Needed? |
+|---|---|---|
+| Add new `DataKey` variant | ✅ Yes | No |
+| Remove unused `DataKey` variant | ✅ Yes | No (orphaned data stays but is ignored) |
+| Add optional field to a stored struct | ⚠️ Risky | Yes — XDR is not forward-compatible; use two-phase migration |
+| Change variant payload type | ❌ No | Yes — data will fail to deserialize |
+| Reorder `DataKey` variants | ❌ No | Yes — discriminants shift, wrong keys are read |
+| Change a `contracterror` discriminant number | ❌ No | Callers that pattern-match on error codes will misinterpret |
+
+### Migration Patterns
+
+#### 1. Lazy migration
+
+Check the schema version on each read and migrate the entry on first access.
+Useful when entries are read infrequently or the data set is large.
+
+```rust
+pub fn get_route_entry(env: &Env, name: &String) -> RouteEntry {
+    // Try the new key first
+    if let Some(entry) = env.storage().instance().get::<DataKey, RouteEntryV2>(&DataKey::RouteV2(name.clone())) {
+        return entry;
+    }
+    // Fall back to old key and migrate
+    let old: RouteEntryV1 = env.storage().instance()
+        .get(&DataKey::Route(name.clone()))
+        .expect("route not found");
+    let new_entry = RouteEntryV2 { address: old.address, name: old.name, paused: old.paused, updated_by: old.updated_by, version: 0 };
+    env.storage().instance().set(&DataKey::RouteV2(name.clone()), &new_entry);
+    env.storage().instance().remove(&DataKey::Route(name.clone()));
+    new_entry
+}
+```
+
+#### 2. Batch migration
+
+Add an admin-only `migrate()` function that iterates all entries and rewrites
+them under the new key. Call it once after deploying the new WASM.
+
+```rust
+pub fn migrate(env: Env, caller: Address) -> Result<u32, RouterError> {
+    caller.require_auth();
+    Self::require_admin(&env, &caller)?;
+
+    let names = Self::get_route_names(&env);
+    let mut count = 0u32;
+    for name in names.iter() {
+        if let Some(old) = env.storage().instance().get::<DataKey, RouteEntryV1>(&DataKey::Route(name.clone())) {
+            let new_entry = RouteEntryV2 { address: old.address, name: old.name, paused: old.paused, updated_by: old.updated_by, version: 0 };
+            env.storage().instance().set(&DataKey::RouteV2(name.clone()), &new_entry);
+            env.storage().instance().remove(&DataKey::Route(name.clone()));
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+```
+
+#### 3. Dual-read
+
+Support old and new schema simultaneously during a transition period. The new
+WASM reads from both keys and writes only to the new one. After all entries are
+migrated, deploy a follow-up upgrade that removes the old key support.
+
+```rust
+fn get_entry(env: &Env, name: &String) -> Option<RouteEntryV2> {
+    // New key first
+    if let Some(e) = env.storage().instance().get(&DataKey::RouteV2(name.clone())) {
+        return Some(e);
+    }
+    // Old key fallback (read-only, no migration)
+    env.storage().instance()
+        .get::<DataKey, RouteEntryV1>(&DataKey::Route(name.clone()))
+        .map(|old| RouteEntryV2 { address: old.address, name: old.name, paused: old.paused, updated_by: old.updated_by, version: 0 })
+}
+```
+
+### Two-Phase Migration Procedure
+
+When a stored struct needs a new field (e.g., adding `registered_at: u64` to
+`ContractEntry`):
+
+**Phase 1 — migration upgrade:**
+1. Add `DataKey::ContractEntryV2` alongside the existing `DataKey::ContractEntry`.
+2. Add `ContractEntryV2` struct with the new field.
+3. Add a `migrate()` admin function that reads all `ContractEntry` values,
+   writes them as `ContractEntryV2` (setting the new field to a sensible default),
+   and removes the old key.
+4. Deploy this upgrade and call `migrate()`.
+
+**Phase 2 — cleanup upgrade:**
+1. Remove `DataKey::ContractEntry`, `ContractEntryV1`, and all code that
+   references them.
+2. Rename `ContractEntryV2` back to `ContractEntry` in a new deployment (this
+   is safe because the in-storage discriminant for `ContractEntryV2` is now the
+   only live key).
+3. Deploy this upgrade.
+
+### Migration Checklist
+
+Before any upgrade that changes a stored type:
+
+- [ ] Verify all existing storage keys are readable after the upgrade (test with
+  populated storage from the previous version on testnet)
+- [ ] Write and run a migration function against testnet state
+- [ ] Document the rollback procedure if migration fails mid-run
+- [ ] Keep old `DataKey` variants in source until all live entries are migrated
+- [ ] Queue the migration upgrade via router-timelock for a 24h review window

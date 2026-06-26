@@ -23,6 +23,7 @@ different things depending on which contract returned it.
 | `RouteAlreadyExists` | 7 | Registering a route or alias with a name that is already in use. | Choose a unique name or update/remove the existing route first. |
 | `InvalidRouteName` | 8 | A route name is empty or only whitespace. | Send a non-empty, trimmed route name. |
 | `InvalidMetadata` | 9 | Route metadata exceeds limits: description over 256 characters or more than 5 tags. | Shorten the description or reduce the tag list before submitting. |
+| `RouteExpired` | 10 | `resolve` targets a route whose TTL ledger has been exceeded, or `extend_route_ttl` targets a route that has already expired. | Re-register the route, or call `extend_route_ttl` before expiry next time. |
 
 ### router-registry `RegistryError`
 
@@ -129,6 +130,30 @@ Updates an existing route to point to a new address. Emits `route_updated` and `
 
 ---
 
+### `register_route_with_ttl(caller, name, address, ttl_ledgers: Option<u32>) → Result<(), RouterError>`
+Registers a new route like `register_route`, but with an optional time-to-live. When `ttl_ledgers` is `Some(n)`, the route expires `n` ledgers from the current ledger sequence number; `resolve` then returns `RouteExpired` and `get_all_routes` excludes it. `None` registers a permanent route, identical to `register_route`.
+
+**Errors:** `Unauthorized`, `RouteAlreadyExists`, `NotInitialized`, `InvalidRouteName`
+
+```bash
+stellar contract invoke --id <CORE_ID> --network testnet --source admin \
+  -- register_route_with_ttl --caller <ADMIN> --name beta-integration --address <CONTRACT_ID> --ttl_ledgers 100000
+```
+
+---
+
+### `get_route_expiry(name) → Option<u32>`
+Returns the expiry ledger sequence number for `name`, or `None` if the route does not exist or has no TTL (permanent).
+
+---
+
+### `extend_route_ttl(caller, name, additional_ledgers: u32) → Result<(), RouterError>`
+Extends a route's TTL by `additional_ledgers`. If the route already has a TTL, the new expiry stacks on top of the existing one; if the route is permanent, it gains a TTL of `additional_ledgers` ledgers from now. Must be called before the route expires.
+
+**Errors:** `Unauthorized`, `RouteNotFound`, `RouteExpired` (route has already lapsed), `NotInitialized`
+
+---
+
 ### `remove_route(caller, name) → Result<(), RouterError>`
 Deletes a route and removes any aliases pointing to it.
 
@@ -139,7 +164,7 @@ Deletes a route and removes any aliases pointing to it.
 ### `resolve(name) → Result<Address, RouterError>`
 Resolves a route name (or alias) to its contract address. Increments `total_routed`.
 
-**Errors:** `RouterPaused`, `RouteNotFound`, `RoutePaused`
+**Errors:** `RouterPaused`, `RouteNotFound`, `RoutePaused`, `RouteExpired` (TTL ledger exceeded)
 
 ```bash
 stellar contract invoke --id <CORE_ID> --network testnet --source any \
@@ -168,7 +193,7 @@ Returns the full `RouteEntry` for `name`, or `None` if not registered.
 ---
 
 ### `get_all_routes() → Vec<String>`
-Returns all registered route names.
+Returns all registered, non-expired route names. Routes whose TTL has lapsed are excluded.
 
 ---
 
@@ -491,6 +516,84 @@ Returns the middleware config for `route`.
 
 ---
 
+### Rate Limiting Algorithm
+
+#### How It Works
+
+The rate limiter uses a **fixed-window counter** per `(route, caller)` pair.
+Each caller has its own independent window — windows are not shared or aligned
+across callers.
+
+**Window lifecycle:**
+
+1. On the first call, `window_start` is set to the current ledger timestamp
+   and `calls_in_window` is set to 1.
+2. Subsequent calls within the same window increment `calls_in_window`.
+3. When `calls_in_window >= max_calls_per_window`, `pre_call` returns
+   `RateLimitExceeded` and increments `total_violations` without counting
+   the call.
+4. On the first call after `window_start + window_seconds` has elapsed, the
+   window resets: `window_start = now`, `calls_in_window = 1`.
+
+The check in `pre_call`:
+```
+window_elapsed = now >= window_start + window_seconds
+calls           = 0               if window_elapsed else calls_in_window
+window_start    = now             if window_elapsed else window_start
+```
+
+#### Ledger Timestamp Granularity
+
+Stellar closes a ledger approximately every **5 seconds**. All calls within
+the same ledger closure share the same `env.ledger().timestamp()` value. This
+means:
+
+- A `window_seconds = 60` window allows all calls within the same 5-second
+  ledger to be counted as a single moment. Setting `max_calls_per_window = 10`
+  does **not** prevent 10 calls in the same ledger.
+- For burst protection, set `window_seconds` smaller than 1 ledger close time
+  only if you want to block multiple calls per ledger (they will all see the
+  same `now` and the first call sets the window, subsequent ones within the
+  same ledger see `window_elapsed = false`).
+
+#### Tuning Guidelines
+
+| Traffic pattern | Suggested config | Notes |
+|---|---|---|
+| Low-traffic route | `max_calls=10, window_secs=60` | 10 calls per minute per caller |
+| High-traffic route | `max_calls=1000, window_secs=300` | 1000 calls per 5 minutes per caller |
+| Burst protection | `max_calls=5, window_secs=5` | 5 calls per 5-second ledger window |
+| Effectively unlimited | `max_calls_per_window=0` | Rate limiting disabled for route |
+
+**Short window + low count** vs **long window + high count:**
+
+- Short windows (e.g., 5s / 5 calls) aggressively block bursts but reset
+  quickly, allowing another burst immediately after.
+- Long windows (e.g., 3600s / 100 calls) smooth traffic over time but a
+  burst at window-start consumes all capacity until the window expires.
+
+Choose based on whether you need burst suppression (short) or sustained
+throughput limiting (long).
+
+#### Gotchas
+
+- **Windows are not aligned across routes or callers.** Each `(route, caller)`
+  window starts independently on first call, so two callers can be in different
+  phases of their windows simultaneously.
+- **A network halt extends the effective window.** If the Stellar network
+  halts for 10 minutes, `now` jumps forward by the halt duration when it
+  resumes. Any caller whose window had not yet expired will suddenly find
+  their window expired, resetting the counter immediately on the next call.
+- **Changing `max_calls` takes effect immediately without resetting counters.**
+  If you lower `max_calls_per_window` from 100 to 10 and a caller has already
+  made 15 calls in the current window, they will be blocked until the window
+  expires — even though those calls were made under the old config.
+- **`window_seconds = 0` with `max_calls_per_window > 0` is rejected** by
+  `configure_route` with `InvalidConfig`. Set `max_calls_per_window = 0` to
+  disable rate limiting entirely.
+
+---
+
 ## router-timelock
 
 **Contract:** `RouterTimelock`  
@@ -727,6 +830,7 @@ Each contract defines its own `#[contracterror]` enum. Use the tables below as t
 | `RouteAlreadyExists` | `7` | Registering route or alias that conflicts with existing route/alias | Use a unique name, or update/remove existing entry first |
 | `InvalidRouteName` | `8` | Route name is empty or whitespace-only | Validate/sanitize names client-side before submit |
 | `InvalidMetadata` | `9` | Route metadata exceeds constraints (description/tags limits) | Trim metadata to allowed bounds, then retry |
+| `RouteExpired` | `10` | `resolve` is called for a route whose TTL ledger has been exceeded, or `extend_route_ttl` is called on an already-expired route | Re-register the route, or extend its TTL before it lapses |
 
 ### router-registry (`RegistryError`)
 
