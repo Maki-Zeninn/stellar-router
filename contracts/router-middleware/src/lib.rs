@@ -808,7 +808,7 @@ impl RouterMiddleware {
             }
         } else {
             for i in 0..cap {
-                let idx = (log_state.head + i) % cap;
+                let idx = (log_state.head + i) % (cap as u32);
                 if let Some(entry) = log_state.entries.get(idx) {
                     ordered.push_back(entry);
                 }
@@ -860,7 +860,7 @@ impl RouterMiddleware {
             }
         } else {
             for i in 0..cap {
-                let idx = (log_state.head + i) % cap;
+                let idx = (log_state.head + i) % (cap as u32);
                 if let Some(entry) = log_state.entries.get(idx) {
                     if entry.success == success_only {
                         ordered.push_back(entry);
@@ -2867,5 +2867,47 @@ mod tests {
         let state = client.rate_limit_state(&route, &caller).unwrap();
         assert_eq!(state.calls_in_window, 2);
         assert_eq!(state.window_start, 10000);
+    }
+
+    // ── Issue #634: get_call_log modulo by zero panic ─────────────────────────
+
+    #[test]
+    fn test_get_call_log_with_log_retention_zero_returns_empty() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        let caller = Address::generate(&env);
+
+        // Configure with retention=5, make some calls
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &5);
+        client.post_call(&caller, &route, &true);
+        client.post_call(&caller, &route, &false);
+
+        // Reconfigure with retention=0 (logging disabled)
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &0);
+
+        // get_call_log must not panic; should return empty
+        let log = client.get_call_log(&route);
+        assert_eq!(log.len(), 0);
+    }
+
+    #[test]
+    fn test_get_call_log_filtered_with_log_retention_zero_returns_empty() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        let caller = Address::generate(&env);
+
+        // Configure with retention=5, make some calls
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &5);
+        client.post_call(&caller, &route, &true);
+        client.post_call(&caller, &route, &false);
+
+        // Reconfigure with retention=0 (logging disabled)
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &0);
+
+        // get_call_log_filtered must not panic; should return empty
+        let log = client.get_call_log_filtered(&route, &true);
+        assert_eq!(log.len(), 0);
+        let log = client.get_call_log_filtered(&route, &false);
+        assert_eq!(log.len(), 0);
     }
 }
