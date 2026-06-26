@@ -97,6 +97,15 @@ pub const EVENT_ROUTE_TAG_ADDED: &str = "route_tag_added";
 /// Standard event topic for route tag removals
 pub const EVENT_ROUTE_TAG_REMOVED: &str = "route_tag_removed";
 
+/// Standard event topic for route TTL being set at registration
+pub const EVENT_ROUTE_TTL_SET: &str = "route_ttl_set";
+
+/// Standard event topic for route TTL extensions
+pub const EVENT_ROUTE_TTL_EXTENDED: &str = "route_ttl_extended";
+
+/// Standard event topic for resolution attempts on an expired route
+pub const EVENT_ROUTE_RESOLVE_EXPIRED: &str = "route_resolve_expired";
+
 /// Standard event topic for role grants
 pub const EVENT_ROLE_GRANTED: &str = "role_granted";
 
@@ -177,6 +186,9 @@ pub const EVENT_OP_CANCELLED: &str = "op_cancelled";
 
 /// Standard event topic for timelock operation description updates
 pub const EVENT_OP_DESCRIPTION_UPDATED: &str = "op_description_updated";
+
+/// Standard event topic for timelock minimum delay updates
+pub const EVENT_MIN_DELAY_UPDATED: &str = "min_delay_updated";
 
 /// Standard event topic for contract registration in registry
 pub const EVENT_CONTRACT_REGISTERED: &str = "contract_registered";
@@ -308,11 +320,8 @@ impl BatchCallResult {
 #[macro_export]
 macro_rules! require_admin {
     ($env:expr, $caller:expr, $key:expr, $not_init_err:expr, $unauth_err:expr) => {{
-        let admin: soroban_sdk::Address = $env
-            .storage()
-            .instance()
-            .get($key)
-            .ok_or($not_init_err)?;
+        let admin: soroban_sdk::Address =
+            $env.storage().instance().get($key).ok_or($not_init_err)?;
         if &admin != $caller {
             return Err($unauth_err);
         }
@@ -431,15 +440,16 @@ mod tests {
 /// ```
 #[macro_export]
 macro_rules! admin_transfer_complete {
-    ($env:expr, $current:expr, $new_admin:expr, $data_key_expr:expr) => {
-        {
-            $env.storage().instance().set($data_key_expr, $new_admin);
-            $env.events().publish(
-                (soroban_sdk::Symbol::new($env, $crate::EVENT_ADMIN_TRANSFERRED),),
-                ($current, $new_admin),
-            );
-        }
-    };
+    ($env:expr, $current:expr, $new_admin:expr, $data_key_expr:expr) => {{
+        $env.storage().instance().set($data_key_expr, $new_admin);
+        $env.events().publish(
+            (soroban_sdk::Symbol::new(
+                $env,
+                $crate::EVENT_ADMIN_TRANSFERRED,
+            ),),
+            ($current, $new_admin),
+        );
+    }};
 }
 
 // ── Shared storage keys & helpers ───────────────────────────────────────────────
@@ -642,11 +652,7 @@ mod storage_helper_tests {
                 Err(TestError::NotInitialized)
             );
             assert_eq!(
-                require_uninitialized(
-                    &env,
-                    &CommonDataKey::Admin,
-                    TestError::AlreadyInitialized
-                ),
+                require_uninitialized(&env, &CommonDataKey::Admin, TestError::AlreadyInitialized),
                 Ok(())
             );
 
@@ -658,11 +664,7 @@ mod storage_helper_tests {
                 Ok(())
             );
             assert_eq!(
-                require_uninitialized(
-                    &env,
-                    &CommonDataKey::Admin,
-                    TestError::AlreadyInitialized
-                ),
+                require_uninitialized(&env, &CommonDataKey::Admin, TestError::AlreadyInitialized),
                 Err(TestError::AlreadyInitialized)
             );
         });
@@ -674,10 +676,7 @@ mod storage_helper_tests {
         let id = env.register_contract(None, TestContract);
         env.as_contract(&id, || {
             assert!(!TestStorage::is_initialized(&env));
-            assert_eq!(
-                TestStorage::require_uninitialized(&env),
-                Ok(())
-            );
+            assert_eq!(TestStorage::require_uninitialized(&env), Ok(()));
 
             let admin = Address::generate(&env);
             TestStorage::set_admin(&env, &admin);

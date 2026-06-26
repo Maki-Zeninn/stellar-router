@@ -24,7 +24,7 @@ pub enum DataKey {
     RouteFee(String),
     /// Default fee if route-specific fee not set (in basis points)
     DefaultFee,
-    ConfiguredRoutes
+    ConfiguredRoutes,
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -99,11 +99,7 @@ impl RouterQuote {
     /// # Errors
     /// * [`QuoteError::AlreadyInitialized`] — if already initialized.
     /// * [`QuoteError::InvalidFeeBps`] — if fee_bps > 10000.
-    pub fn initialize(
-        env: Env,
-        admin: Address,
-        default_fee_bps: u32,
-    ) -> Result<(), QuoteError> {
+    pub fn initialize(env: Env, admin: Address, default_fee_bps: u32) -> Result<(), QuoteError> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(QuoteError::AlreadyInitialized);
         }
@@ -155,7 +151,6 @@ impl RouterQuote {
             return Err(QuoteError::InvalidFeeBps);
         }
 
-
         // Maintain route index — only append if not already tracked
         let mut routes = Self::read_configured_routes(&env);
         if !routes.contains(&route) {
@@ -167,10 +162,8 @@ impl RouterQuote {
             .instance()
             .set(&DataKey::RouteFee(route.clone()), &fee_bps);
 
-        env.events().publish(
-            (Symbol::new(&env, "route_fee_set"),),
-            (route, fee_bps),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "route_fee_set"),), (route, fee_bps));
 
         Ok(())
     }
@@ -216,7 +209,6 @@ impl RouterQuote {
         }
         configures_routes
     }
-
 
     /// Get a quote for a single route with configurable fee.
     ///
@@ -341,6 +333,49 @@ impl RouterQuote {
         Ok(best_quote)
     }
 
+    /// Get all valid quotes sorted by amount_out descending.
+    ///
+    /// Calculates quotes for all provided requests, silently omitting any
+    /// that fail (e.g. invalid amount, arithmetic overflow), and returns the
+    /// remaining quotes sorted from highest to lowest `amount_out`.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `requests` - Vector of quote requests to evaluate.
+    ///
+    /// # Returns
+    /// Sorted [`Vec<QuoteResponse>`] (highest `amount_out` first). Returns an
+    /// empty vec if all requests fail.
+    ///
+    /// # Errors
+    /// * [`QuoteError::NoQuotesProvided`] — if requests vector is empty.
+    pub fn get_quotes_sorted(
+        env: Env,
+        requests: Vec<QuoteRequest>,
+    ) -> Result<Vec<QuoteResponse>, QuoteError> {
+        if requests.is_empty() {
+            return Err(QuoteError::NoQuotesProvided);
+        }
+
+        // Collect valid quotes, skipping failures.
+        let mut sorted: Vec<QuoteResponse> = Vec::new(&env);
+        for request in requests.iter() {
+            if let Ok(response) = Self::get_quote(env.clone(), request) {
+                // Insertion sort: find position where response.amount_out fits.
+                let mut pos = sorted.len();
+                for i in 0..sorted.len() {
+                    if response.amount_out > sorted.get(i).unwrap().amount_out {
+                        pos = i;
+                        break;
+                    }
+                }
+                sorted.insert(pos, response);
+            }
+        }
+
+        Ok(sorted)
+    }
+
     /// Update the default fee in basis points.
     ///
     /// Changes the default fee used when a route-specific fee is not set.
@@ -393,11 +428,14 @@ impl RouterQuote {
     ///
     /// # Returns
     /// The admin [`Address`].
-    pub fn admin(env: Env) -> Address {
+    ///
+    /// # Errors
+    /// * [`QuoteError::NotInitialized`] — if the contract has not been initialized.
+    pub fn admin(env: Env) -> Result<Address, QuoteError> {
         env.storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized")
+            .ok_or(QuoteError::NotInitialized)
     }
 
     /// Transfer admin to a new address.
@@ -432,7 +470,7 @@ impl RouterQuote {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn require_admin(env: &Env, caller: &Address) -> Result<(), QuoteError> {
-        let admin = Self::admin(env.clone());
+        let admin = Self::admin(env.clone())?;
         if &admin != caller {
             return Err(QuoteError::Unauthorized);
         }
@@ -839,13 +877,114 @@ mod tests {
 
         let all_configured_routes = client.get_all_configured_routes();
         assert_eq!(all_configured_routes.len(), 4);
-        assert_eq!(all_configured_routes.get(0).unwrap().0, String::from_str(&env, "uniswap"));
+        assert_eq!(
+            all_configured_routes.get(0).unwrap().0,
+            String::from_str(&env, "uniswap")
+        );
         assert_eq!(all_configured_routes.get(0).unwrap().1, 50);
-         assert_eq!(all_configured_routes.get(1).unwrap().0, String::from_str(&env, "sushiswap"));
+        assert_eq!(
+            all_configured_routes.get(1).unwrap().0,
+            String::from_str(&env, "sushiswap")
+        );
         assert_eq!(all_configured_routes.get(1).unwrap().1, 10);
-         assert_eq!(all_configured_routes.get(2).unwrap().0, String::from_str(&env, "balancer"));
+        assert_eq!(
+            all_configured_routes.get(2).unwrap().0,
+            String::from_str(&env, "balancer")
+        );
         assert_eq!(all_configured_routes.get(2).unwrap().1, 40);
-         assert_eq!(all_configured_routes.get(3).unwrap().0, String::from_str(&env, "aerodrome"));
+        assert_eq!(
+            all_configured_routes.get(3).unwrap().0,
+            String::from_str(&env, "aerodrome")
+        );
         assert_eq!(all_configured_routes.get(3).unwrap().1, 50);
+    }
+
+    #[test]
+    fn test_get_quotes_sorted_returns_descending_order() {
+        let (env, admin, client) = setup();
+
+        let route1 = String::from_str(&env, "uniswap");
+        let route2 = String::from_str(&env, "sushiswap");
+        let route3 = String::from_str(&env, "pancakeswap");
+        client.set_route_fee(&admin, &route1, &100); // 1%   -> out 9900
+        client.set_route_fee(&admin, &route2, &30);  // 0.3% -> out 9970 (best)
+        client.set_route_fee(&admin, &route3, &50);  // 0.5% -> out 9950
+
+        let token_in = Address::generate(&env);
+        let token_out = Address::generate(&env);
+        let mut requests = Vec::new(&env);
+        for route in [&route1, &route2, &route3] {
+            requests.push_back(QuoteRequest {
+                route: route.clone(),
+                token_in: token_in.clone(),
+                token_out: token_out.clone(),
+                amount_in: 10000,
+            });
+        }
+
+        let sorted = client.get_quotes_sorted(&requests);
+        assert_eq!(sorted.len(), 3);
+        assert_eq!(sorted.get(0).unwrap().amount_out, 9970); // sushiswap
+        assert_eq!(sorted.get(1).unwrap().amount_out, 9950); // pancakeswap
+        assert_eq!(sorted.get(2).unwrap().amount_out, 9900); // uniswap
+    }
+
+    #[test]
+    fn test_get_quotes_sorted_skips_invalid_quotes() {
+        let (env, _admin, client) = setup();
+
+        let token_in = Address::generate(&env);
+        let token_out = Address::generate(&env);
+        let mut requests = Vec::new(&env);
+        // Valid request
+        requests.push_back(QuoteRequest {
+            route: String::from_str(&env, "uniswap"),
+            token_in: token_in.clone(),
+            token_out: token_out.clone(),
+            amount_in: 10000,
+        });
+        // Invalid request (amount_in <= 0) — should be skipped
+        requests.push_back(QuoteRequest {
+            route: String::from_str(&env, "sushiswap"),
+            token_in: token_in.clone(),
+            token_out: token_out.clone(),
+            amount_in: 0,
+        });
+        // Another invalid request (overflow) — should be skipped
+        requests.push_back(QuoteRequest {
+            route: String::from_str(&env, "pancakeswap"),
+            token_in,
+            token_out,
+            amount_in: i128::MAX,
+        });
+
+        let sorted = client.get_quotes_sorted(&requests);
+        assert_eq!(sorted.len(), 1);
+        assert_eq!(sorted.get(0).unwrap().route, String::from_str(&env, "uniswap"));
+    }
+
+    #[test]
+    fn test_get_quotes_sorted_empty_fails() {
+        let (env, _admin, client) = setup();
+        let requests = Vec::new(&env);
+        let result = client.try_get_quotes_sorted(&requests);
+        assert_eq!(result, Err(Ok(QuoteError::NoQuotesProvided)));
+    }
+
+    #[test]
+    fn test_get_quotes_sorted_all_invalid_returns_empty() {
+        let (env, _admin, client) = setup();
+        let token_in = Address::generate(&env);
+        let token_out = Address::generate(&env);
+        let mut requests = Vec::new(&env);
+        requests.push_back(QuoteRequest {
+            route: String::from_str(&env, "uniswap"),
+            token_in,
+            token_out,
+            amount_in: -1,
+        });
+
+        let sorted = client.get_quotes_sorted(&requests);
+        assert_eq!(sorted.len(), 0);
     }
 }

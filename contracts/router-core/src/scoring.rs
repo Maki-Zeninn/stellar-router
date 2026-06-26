@@ -6,7 +6,7 @@
 
 use soroban_sdk::{Env, String, Symbol};
 
-use crate::{DataKey, RouteEntry, RouteScore};
+use crate::{is_route_expired, DataKey, RouteEntry, RouteScore};
 
 /// Recompute and cache the highest-scoring, non-paused route.
 ///
@@ -25,29 +25,24 @@ pub fn recompute_best_route(env: &Env) {
     let mut best_score: i64 = i64::MIN;
 
     for name in names.iter() {
-        // Skip missing or paused routes
+        // Skip missing, paused, or expired routes
         match env
             .storage()
             .instance()
             .get::<DataKey, RouteEntry>(&DataKey::Route(name.clone()))
         {
-            Some(e) if !e.paused => {}
+            Some(e) if !e.paused && !is_route_expired(env, &e) => {}
             _ => continue,
         }
 
         // Skip routes without a score
-        let score: RouteScore = match env
-            .storage()
-            .instance()
-            .get(&DataKey::Score(name.clone()))
-        {
+        let score: RouteScore = match env.storage().instance().get(&DataKey::Score(name.clone())) {
             Some(s) => s,
             None => continue,
         };
 
         // Composite score: liquidity + reliability - fee_bps/10
-        let composite: i64 = score.liquidity_score as i64
-            + score.reliability_score as i64
+        let composite: i64 = score.liquidity_score as i64 + score.reliability_score as i64
             - (score.fee_bps as i64 / 10);
 
         if composite > best_score {

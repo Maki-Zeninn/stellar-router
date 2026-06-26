@@ -7,6 +7,7 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 ## [Unreleased]
 
 ### Added
+- `router-core`: routes can now be registered with an optional TTL via `register_route_with_ttl`. `resolve()` returns `RouteExpired` once the current ledger exceeds a route's expiry, `get_all_routes()` excludes expired routes, and `extend_route_ttl` lets the admin extend a route's TTL before it expires. `get_route_expiry` returns a route's expiry ledger, if any. Routes registered without a TTL remain permanent.
 - `router-access`: blacklist entries can now include an optional `reason` and an `expires_at` timestamp. Expired blacklist entries are treated as not blacklisted.
 - `router-registry`: `ContractEntry` includes an optional `deprecation_reason` and the `deprecate()` API accepts an optional reason which is emitted in the `contract_deprecated` event.
 - `metrics/alerts.yml`: example Prometheus alerting rules for circuit breaker opens, high failure/error rates, and high request volume.

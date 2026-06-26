@@ -1,25 +1,28 @@
-use axum::{extract::{Path, State}, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
 use serde_json::json;
 use tracing::{error, info};
 
 use crate::{
     state::AppState,
     types::{
-        ErrorResponse,
-        FeeEstimate,
-        RouteBreakdown,
-        RouteDetails,
-        SimulateRequest,
-        SimulateResponse,
-        SimulationDetail,
+        ErrorCode, ErrorResponse, FeeEstimate, SimulateRequest, SimulateResponse, SimulationDetail,
     },
+    types::{ErrorResponse, FeeEstimate, SimulateRequest, SimulateResponse, SimulationDetail},
 };
 
 /// GET /health
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     match state.rpc.health_check().await {
         Ok(()) => (StatusCode::OK, Json(json!({"status": "ok", "rpc": "up"}))),
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"status": "degraded", "rpc": "down"}))),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status": "degraded", "rpc": "down"})),
+        ),
     }
 }
 
@@ -34,15 +37,28 @@ pub async fn simulate(
     if req.target.is_empty() || req.function.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse { error: "target and function are required".to_string() }),
+            Json(ErrorResponse::with_field(
+                ErrorCode::ValidationError,
+                "target and function are required",
+                "target",
+            )),
+            Json(ErrorResponse {
+                error: "target and function are required".to_string(),
+            }),
         ));
     }
 
     if req.target.len() != 56 || !req.target.starts_with('C') {
         return Err((
             StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_field(
+                ErrorCode::ValidationError,
+                "target must be a 56-character Stellar contract ID starting with C",
+                "target",
+            )),
             Json(ErrorResponse {
-                error: "target must be a 56-character Stellar contract ID starting with C".to_string(),
+                error: "target must be a 56-character Stellar contract ID starting with C"
+                    .to_string(),
             }),
         ));
     }
@@ -53,7 +69,15 @@ pub async fn simulate(
         .rpc
         .simulate(&req.target, &req.function, req.amount, req.network_load_bps)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(ErrorCode::RpcError, e.to_string())),
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
 
     Ok(Json(SimulateResponse {
         success: breakdown.would_succeed,
@@ -92,11 +116,29 @@ pub async fn get_route(
         Ok(Some(entry)) => Ok((StatusCode::OK, Json(entry))),
         Ok(None) => Err((
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse { error: format!("route '{}' not found", name) }),
+            Json(ErrorResponse {
+                error: format!("route '{}' not found", name),
+            }),
         )),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e.to_string() }),
+            Json(ErrorResponse::new(
+                ErrorCode::NotFound,
+                format!("route '{}' not found", name),
+            )),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new(ErrorCode::RpcError, e.to_string())),
+            Json(ErrorResponse {
+                error: format!("route '{}' not found", name),
+            }),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
         )),
     }
 }
@@ -107,11 +149,14 @@ pub async fn get_route(
 /// returns the list of registered route names as JSON.
 pub async fn list_routes(
     State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     if state.router_core_contract_id.is_empty() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
-            "ROUTER_CORE_CONTRACT_ID not configured".to_string(),
+            Json(ErrorResponse::new(
+                ErrorCode::InternalError,
+                "ROUTER_CORE_CONTRACT_ID not configured",
+            )),
         ));
     }
 
@@ -121,7 +166,10 @@ pub async fn list_routes(
         .await
         .map_err(|e| {
             error!("Failed to fetch routes: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(ErrorCode::RpcError, e.to_string())),
+            )
         })?;
 
     info!("Returning {} routes", routes.len());

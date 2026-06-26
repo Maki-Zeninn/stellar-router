@@ -7,6 +7,7 @@ use crate::{rpc::SorobanRpcClient, types::TransactionStatusEvent};
 #[derive(Clone)]
 pub struct AppState {
     pub rpc: SorobanRpcClient,
+    #[allow(dead_code)]
     pub execution_contract_id: String,
     pub router_core_contract_id: String,
     pub tx_status_tx: broadcast::Sender<TransactionStatusEvent>,
@@ -29,6 +30,7 @@ impl AppState {
         }
     }
 
+    #[allow(dead_code)]
     pub fn broadcast_status(&self, event: TransactionStatusEvent) {
         let _ = self.tx_status_tx.send(event);
     }

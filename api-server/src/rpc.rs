@@ -37,12 +37,14 @@ pub struct SimulateTransactionResult {
     #[serde(rename = "minResourceFee", default)]
     pub min_resource_fee: String,
     pub error: Option<String>,
+    #[allow(dead_code)]
     #[serde(default)]
     pub events: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize, Debug)]
 struct SimulateTransactionResultWithReturnValue {
+    #[allow(dead_code)]
     #[serde(rename = "minResourceFee", default)]
     pub min_resource_fee: String,
     pub error: Option<String>,
@@ -252,16 +254,28 @@ impl SorobanRpcClient {
             let val = &item["val"];
             match key {
                 "address" => {
-                    address = val.get("address").and_then(|a| a.as_str()).unwrap_or("").to_string();
+                    address = val
+                        .get("address")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("")
+                        .to_string();
                 }
                 "name" => {
-                    route_name = val.get("str").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    route_name = val
+                        .get("str")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
                 }
                 "paused" => {
                     paused = val.get("b").and_then(|b| b.as_bool()).unwrap_or(false);
                 }
                 "updated_by" => {
-                    updated_by = val.get("address").and_then(|a| a.as_str()).unwrap_or("").to_string();
+                    updated_by = val
+                        .get("address")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("")
+                        .to_string();
                 }
                 "metadata" => {
                     if let Some(meta_map) = val.get("map").and_then(|m| m.as_array()) {
@@ -277,23 +291,40 @@ impl SorobanRpcClient {
                             let mv = &meta_item["val"];
                             match mk {
                                 "description" => {
-                                    description = mv.get("str").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                                    description = mv
+                                        .get("str")
+                                        .and_then(|s| s.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
                                 }
                                 "owner" => {
-                                    owner = mv.get("address").and_then(|a| a.as_str()).unwrap_or("").to_string();
+                                    owner = mv
+                                        .get("address")
+                                        .and_then(|a| a.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
                                 }
                                 "tags" => {
-                                    if let Some(tag_vec) = mv.get("vec").and_then(|v| v.as_array()) {
+                                    if let Some(tag_vec) = mv.get("vec").and_then(|v| v.as_array())
+                                    {
                                         tags = tag_vec
                                             .iter()
-                                            .filter_map(|t| t.get("str").and_then(|s| s.as_str()).map(|s| s.to_string()))
+                                            .filter_map(|t| {
+                                                t.get("str")
+                                                    .and_then(|s| s.as_str())
+                                                    .map(|s| s.to_string())
+                                            })
                                             .collect();
                                     }
                                 }
                                 _ => {}
                             }
                         }
-                        metadata = Some(RouteMetadataResponse { description, tags, owner });
+                        metadata = Some(RouteMetadataResponse {
+                            description,
+                            tags,
+                            owner,
+                        });
                     }
                 }
                 _ => {}
@@ -313,7 +344,56 @@ impl SorobanRpcClient {
         }))
     }
 
-    async fn call_simulate_rpc(&self, target: &str, function: &str) -> Result<SimulateTransactionResult> {
+    fn decode_string_vec_xdr(xdr: &str) -> Option<Vec<String>> {
+        let bytes = base64_decode(xdr)?;
+        let mut result = Vec::new();
+        if bytes.len() < 8 {
+            return Some(result);
+        }
+        let count = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+        let mut pos = 8usize;
+        for _ in 0..count {
+            if pos + 8 > bytes.len() {
+                break;
+            }
+            // Each string element: 4-byte type discriminant + 4-byte length + data (padded to 4)
+            pos += 4; // skip type discriminant
+        // Parse a minimal XDR Vec<String>: 4-byte big-endian length, then null-terminated strings.
+        if bytes.len() < 4 {
+            return Some(Vec::new());
+        }
+        let count = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let mut result = Vec::with_capacity(count);
+        let mut pos = 4;
+        for _ in 0..count {
+            if pos + 4 > bytes.len() {
+                break;
+            }
+            let len =
+                u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
+                    as usize;
+            pos += 4;
+            if pos + len > bytes.len() {
+                break;
+            }
+            if let Ok(s) = std::str::from_utf8(&bytes[pos..pos + len]) {
+                result.push(s.to_string());
+            }
+            // Advance past padding to next 4-byte boundary
+            let padded = (len + 3) & !3;
+            pos += padded;
+                result.push(s.trim_end_matches('\0').to_string());
+            }
+            pos += (len + 3) & !3;
+        }
+        Some(result)
+    }
+
+    async fn call_simulate_rpc(
+        &self,
+        target: &str,
+        function: &str,
+    ) -> Result<SimulateTransactionResult> {
         let placeholder_xdr = format!("AAAAAgAAAAEAAAAA{}{}AAAAAAAAAAA=", target, function);
         let req = JsonRpcRequest {
             jsonrpc: "2.0",
@@ -335,11 +415,42 @@ impl SorobanRpcClient {
         resp.result.ok_or_else(|| anyhow!("empty RPC result"))
     }
 
+    fn decode_string_vec_xdr(xdr: &str) -> Option<Vec<String>> {
+        let bytes = base64_decode(xdr)?;
+        if bytes.len() < 4 {
+            return Some(Vec::new());
+        }
+        let count = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let mut result = Vec::with_capacity(count);
+        let mut pos = 4;
+        for _ in 0..count {
+            if pos + 4 > bytes.len() {
+                break;
+            }
+            let len =
+                u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
+                    as usize;
+            pos += 4;
+            if pos + len > bytes.len() {
+                break;
+            }
+            if let Ok(s) = std::str::from_utf8(&bytes[pos..pos + len]) {
+                result.push(s.trim_end_matches('\0').to_string());
+            }
+            pos += (len + 3) & !3;
+        }
+        Some(result)
+    }
+
     fn heuristic_estimate(amount: i64, network_load_bps: u32) -> FeeBreakdown {
         let base_fee: i64 = 100;
         let resource_fee: i64 = {
             let scaled = amount / 1_000;
-            if scaled < 100 { 100 } else { scaled }
+            if scaled < 100 {
+                100
+            } else {
+                scaled
+            }
         };
         let (surge_multiplier, high_load) = if network_load_bps >= 8_000 {
             (200u32, true)
