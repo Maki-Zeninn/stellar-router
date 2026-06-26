@@ -72,9 +72,56 @@ pub struct RouteBreakdown {
     pub function: String,
 }
 
+/// Machine-readable error codes for API error responses.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ErrorCode {
+    ValidationError,
+    RpcError,
+    ContractError,
+    NotFound,
+    InternalError,
+}
+
+/// Structured error detail embedded in every error response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorDetail {
+    pub code: ErrorCode,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+}
+
+/// Top-level error response body: `{ "error": { "code": "...", "message": "..." } }`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
-    pub error: String,
+    pub error: ErrorDetail,
+}
+
+impl ErrorResponse {
+    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            error: ErrorDetail {
+                code,
+                message: message.into(),
+                field: None,
+            },
+        }
+    }
+
+    pub fn with_field(
+        code: ErrorCode,
+        message: impl Into<String>,
+        field: impl Into<String>,
+    ) -> Self {
+        Self {
+            error: ErrorDetail {
+                code,
+                message: message.into(),
+                field: Some(field.into()),
+            },
+        }
+    }
 }
 
 /// Response for GET /routes/:name — mirrors router-core::RouteEntry

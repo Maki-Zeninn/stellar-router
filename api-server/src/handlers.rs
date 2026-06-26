@@ -9,6 +9,9 @@ use tracing::{error, info};
 
 use crate::{
     state::AppState,
+    types::{
+        ErrorCode, ErrorResponse, FeeEstimate, SimulateRequest, SimulateResponse, SimulationDetail,
+    },
     types::{ErrorResponse, FeeEstimate, SimulateRequest, SimulateResponse, SimulationDetail},
 };
 
@@ -34,6 +37,11 @@ pub async fn simulate(
     if req.target.is_empty() || req.function.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_field(
+                ErrorCode::ValidationError,
+                "target and function are required",
+                "target",
+            )),
             Json(ErrorResponse {
                 error: "target and function are required".to_string(),
             }),
@@ -43,6 +51,11 @@ pub async fn simulate(
     if req.target.len() != 56 || !req.target.starts_with('C') {
         return Err((
             StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_field(
+                ErrorCode::ValidationError,
+                "target must be a 56-character Stellar contract ID starting with C",
+                "target",
+            )),
             Json(ErrorResponse {
                 error: "target must be a 56-character Stellar contract ID starting with C"
                     .to_string(),
@@ -59,6 +72,7 @@ pub async fn simulate(
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(ErrorCode::RpcError, e.to_string())),
                 Json(ErrorResponse {
                     error: e.to_string(),
                 }),
@@ -108,6 +122,20 @@ pub async fn get_route(
         )),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new(
+                ErrorCode::NotFound,
+                format!("route '{}' not found", name),
+            )),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new(ErrorCode::RpcError, e.to_string())),
+            Json(ErrorResponse {
+                error: format!("route '{}' not found", name),
+            }),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
                 error: e.to_string(),
             }),
@@ -121,11 +149,14 @@ pub async fn get_route(
 /// returns the list of registered route names as JSON.
 pub async fn list_routes(
     State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     if state.router_core_contract_id.is_empty() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
-            "ROUTER_CORE_CONTRACT_ID not configured".to_string(),
+            Json(ErrorResponse::new(
+                ErrorCode::InternalError,
+                "ROUTER_CORE_CONTRACT_ID not configured",
+            )),
         ));
     }
 
@@ -135,7 +166,10 @@ pub async fn list_routes(
         .await
         .map_err(|e| {
             error!("Failed to fetch routes: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(ErrorCode::RpcError, e.to_string())),
+            )
         })?;
 
     info!("Returning {} routes", routes.len());

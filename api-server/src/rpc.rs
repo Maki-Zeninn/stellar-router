@@ -358,6 +358,17 @@ impl SorobanRpcClient {
             }
             // Each string element: 4-byte type discriminant + 4-byte length + data (padded to 4)
             pos += 4; // skip type discriminant
+        // Parse a minimal XDR Vec<String>: 4-byte big-endian length, then null-terminated strings.
+        if bytes.len() < 4 {
+            return Some(Vec::new());
+        }
+        let count = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let mut result = Vec::with_capacity(count);
+        let mut pos = 4;
+        for _ in 0..count {
+            if pos + 4 > bytes.len() {
+                break;
+            }
             let len =
                 u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
                     as usize;
@@ -371,6 +382,9 @@ impl SorobanRpcClient {
             // Advance past padding to next 4-byte boundary
             let padded = (len + 3) & !3;
             pos += padded;
+                result.push(s.trim_end_matches('\0').to_string());
+            }
+            pos += (len + 3) & !3;
         }
         Some(result)
     }
@@ -399,6 +413,33 @@ impl SorobanRpcClient {
             return Err(anyhow!("RPC error: {}", err.message));
         }
         resp.result.ok_or_else(|| anyhow!("empty RPC result"))
+    }
+
+    fn decode_string_vec_xdr(xdr: &str) -> Option<Vec<String>> {
+        let bytes = base64_decode(xdr)?;
+        if bytes.len() < 4 {
+            return Some(Vec::new());
+        }
+        let count = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let mut result = Vec::with_capacity(count);
+        let mut pos = 4;
+        for _ in 0..count {
+            if pos + 4 > bytes.len() {
+                break;
+            }
+            let len =
+                u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
+                    as usize;
+            pos += 4;
+            if pos + len > bytes.len() {
+                break;
+            }
+            if let Ok(s) = std::str::from_utf8(&bytes[pos..pos + len]) {
+                result.push(s.trim_end_matches('\0').to_string());
+            }
+            pos += (len + 3) & !3;
+        }
+        Some(result)
     }
 
     fn heuristic_estimate(amount: i64, network_load_bps: u32) -> FeeBreakdown {
