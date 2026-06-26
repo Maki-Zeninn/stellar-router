@@ -475,17 +475,13 @@ impl RouterRegistry {
     /// # Returns
     /// The [`Address`] of the current admin.
     ///
-    /// # Panics
-    /// * Panics if the contract has not been initialized.
-    /// 
-    /// Note: This is a breaking change from the previous Result-based API.
-    /// Calling admin() on an uninitialized contract is considered a programming error
-    /// rather than a runtime condition, consistent with how similar getters work.
-    pub fn admin(env: Env) -> Address {
+    /// # Errors
+    /// * [`RegistryError::NotInitialized`] — if the contract has not been initialized.
+    pub fn admin(env: Env) -> Result<Address, RegistryError> {
         env.storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized")
+            .ok_or(RegistryError::NotInitialized)
     }
 
     /// Get all registered versions for a name.
@@ -661,7 +657,7 @@ impl RouterRegistry {
     }
 
     fn require_admin(env: &Env, caller: &Address) -> Result<(), RegistryError> {
-        let admin = Self::admin(env.clone());
+        let admin = Self::admin(env.clone())?;
         if &admin != caller {
             return Err(RegistryError::Unauthorized);
         }

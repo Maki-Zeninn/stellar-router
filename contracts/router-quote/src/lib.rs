@@ -393,11 +393,14 @@ impl RouterQuote {
     ///
     /// # Returns
     /// The admin [`Address`].
-    pub fn admin(env: Env) -> Address {
+    ///
+    /// # Errors
+    /// * [`QuoteError::NotInitialized`] — if the contract has not been initialized.
+    pub fn admin(env: Env) -> Result<Address, QuoteError> {
         env.storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized")
+            .ok_or(QuoteError::NotInitialized)
     }
 
     /// Transfer admin to a new address.
@@ -432,7 +435,7 @@ impl RouterQuote {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn require_admin(env: &Env, caller: &Address) -> Result<(), QuoteError> {
-        let admin = Self::admin(env.clone());
+        let admin = Self::admin(env.clone())?;
         if &admin != caller {
             return Err(QuoteError::Unauthorized);
         }
