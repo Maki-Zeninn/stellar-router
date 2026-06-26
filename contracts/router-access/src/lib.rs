@@ -353,9 +353,7 @@ impl RouterAccess {
             .unwrap_or_else(|| Vec::new(env));
         if !all_roles.iter().any(|r| r == *role) {
             all_roles.push_back(role.clone());
-            env.storage()
-                .instance()
-                .set(&DataKey::AllRoles, &all_roles);
+            env.storage().instance().set(&DataKey::AllRoles, &all_roles);
         }
     }
 
@@ -626,8 +624,7 @@ mod tests {
         client.set_role_admin(&admin, &role, &attacker);
 
         // Grant role to victim
-        client
-            .grant_role(&admin, &victim, &role, &None);
+        client.grant_role(&admin, &victim, &role, &None);
 
         // Blacklist the attacker
         client.blacklist(&admin, &attacker);
@@ -646,8 +643,7 @@ mod tests {
         let user = Address::generate(&env);
 
         // Grant the role
-        client
-            .grant_role(&admin, &user, &role, &None);
+        client.grant_role(&admin, &user, &role, &None);
 
         // Revoke should succeed (not return RoleNotFound)
         let result = client.try_revoke_role(&admin, &role, &user);
@@ -663,8 +659,7 @@ mod tests {
         let role = String::from_str(&env, "editor");
         let user = Address::generate(&env);
 
-        client
-            .grant_role(&admin, &user, &role, &Some(100));
+        client.grant_role(&admin, &user, &role, &Some(100));
 
         client.revoke_role(&admin, &role, &user);
 
@@ -692,8 +687,7 @@ mod tests {
         assert!(members_before.is_empty());
 
         // Grant role to user1
-        client
-            .grant_role(&admin, &user1, &role, &None);
+        client.grant_role(&admin, &user1, &role, &None);
 
         // Check that user1 is in role members
         let members_after_first = client.get_role_members(&role);
@@ -701,8 +695,7 @@ mod tests {
         assert!(members_after_first.contains(&user1));
 
         // Grant role to user2
-        client
-            .grant_role(&admin, &user2, &role, &None);
+        client.grant_role(&admin, &user2, &role, &None);
 
         // Check that both users are in role members
         let members_after_second = client.get_role_members(&role);
@@ -732,8 +725,7 @@ mod tests {
         let user = Address::generate(&env);
         let past_ledger = 0u64;
 
-        client
-            .grant_role(&admin, &user, &role, &None);
+        client.grant_role(&admin, &user, &role, &None);
 
         let result = client.try_grant_role(&admin, &user, &role, &None);
         assert_eq!(result, Err(Ok(AccessError::AlreadyHasRole)));
@@ -777,8 +769,7 @@ mod tests {
         assert!(roles_before.is_empty());
 
         // Grant role1 to user
-        client
-            .grant_role(&admin, &user, &role1, &None);
+        client.grant_role(&admin, &user, &role1, &None);
 
         // Check that role1 is in user's roles
         let roles_after_first = client.get_roles_for_address(&user);
@@ -786,8 +777,7 @@ mod tests {
         assert!(roles_after_first.contains(&role1));
 
         // Grant role2 to user
-        client
-            .grant_role(&admin, &user, &role2, &None);
+        client.grant_role(&admin, &user, &role2, &None);
 
         // Check that both roles are in user's roles
         let roles_after_second = client.get_roles_for_address(&user);

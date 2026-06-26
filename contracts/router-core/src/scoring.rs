@@ -36,18 +36,13 @@ pub fn recompute_best_route(env: &Env) {
         }
 
         // Skip routes without a score
-        let score: RouteScore = match env
-            .storage()
-            .instance()
-            .get(&DataKey::Score(name.clone()))
-        {
+        let score: RouteScore = match env.storage().instance().get(&DataKey::Score(name.clone())) {
             Some(s) => s,
             None => continue,
         };
 
         // Composite score: liquidity + reliability - fee_bps/10
-        let composite: i64 = score.liquidity_score as i64
-            + score.reliability_score as i64
+        let composite: i64 = score.liquidity_score as i64 + score.reliability_score as i64
             - (score.fee_bps as i64 / 10);
 
         if composite > best_score {

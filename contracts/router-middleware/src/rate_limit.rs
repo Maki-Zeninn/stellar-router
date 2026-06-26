@@ -23,18 +23,27 @@ pub fn check_and_increment(
     }
 
     let now = env.ledger().timestamp();
-    let state: RateLimitState = route_call_state
-        .rate_limits
-        .get(caller.clone())
-        .unwrap_or(RateLimitState {
-            calls_in_window: 0,
-            window_start: now,
-            total_violations: 0,
-        });
+    let state: RateLimitState =
+        route_call_state
+            .rate_limits
+            .get(caller.clone())
+            .unwrap_or(RateLimitState {
+                calls_in_window: 0,
+                window_start: now,
+                total_violations: 0,
+            });
 
     let window_elapsed = now >= state.window_start + config.window_seconds;
-    let calls = if window_elapsed { 0 } else { state.calls_in_window };
-    let window_start = if window_elapsed { now } else { state.window_start };
+    let calls = if window_elapsed {
+        0
+    } else {
+        state.calls_in_window
+    };
+    let window_start = if window_elapsed {
+        now
+    } else {
+        state.window_start
+    };
 
     if calls >= config.max_calls_per_window {
         // Record violation without incrementing the call count

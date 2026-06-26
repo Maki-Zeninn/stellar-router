@@ -51,11 +51,12 @@ pub enum DataKey {
     RouteCount, // u32: O(1) counter kept in sync with RouteNames
     Paused,
     TotalRouted,
-    Alias(String),    // alias -> original_name
-    Aliases,          // Vec<String> of all alias names
-    Score(String),    // name -> RouteScore
-    Metadata(String), // name -> RouteMetadata (stored separately; avoids nested contracttype)
-    BestRoute,        // cached name of the highest-scoring non-paused route, if any
+    Alias(String),        // alias -> original_name
+    Aliases,              // Vec<String> of all alias names
+    Score(String),        // name -> RouteScore
+    Metadata(String),     // name -> RouteMetadata (stored separately; avoids nested contracttype)
+    Dependencies(String), // name -> Vec<String> of direct dependencies
+    BestRoute,            // cached name of the highest-scoring non-paused route, if any
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -144,6 +145,8 @@ pub enum RouterError {
     RouteAlreadyExists = 7,
     InvalidRouteName = 8,
     InvalidMetadata = 9,
+    CircularDependency = 10,
+    RouteInUse = 11,
     InvalidAddress = 10,
     RouteExpired = 10,
 }
@@ -485,6 +488,18 @@ impl RouterCore {
             return Err(RouterError::RouteNotFound);
         }
 
+        let route_names = Self::get_route_names(&env);
+        for dependent_name in route_names.iter() {
+            if dependent_name != name {
+                let dependencies = Self::get_dependencies_for_route(&env, dependent_name.clone());
+                for dependency in dependencies.iter() {
+                    if dependency == name {
+                        return Err(RouterError::RouteInUse);
+                    }
+                }
+            }
+        }
+
         env.storage()
             .instance()
             .remove(&DataKey::Route(name.clone()));
@@ -542,8 +557,10 @@ impl RouterCore {
         // Removing a route may invalidate the cached best route; refresh it.
         scoring::recompute_best_route(&env);
 
-        env.events()
-            .publish((Symbol::new(&env, router_common::EVENT_ROUTE_REMOVED),), name.clone());
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROUTE_REMOVED),),
+            name.clone(),
+        );
 
         Ok(())
     }
@@ -846,8 +863,10 @@ impl RouterCore {
             .instance()
             .set(&DataKey::Route(name.clone()), &entry);
 
-        env.events()
-            .publish((Symbol::new(&env, router_common::EVENT_ROUTE_PAUSED),), (name.clone(), paused));
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROUTE_PAUSED),),
+            (name.clone(), paused),
+        );
 
         // Pause state affects best-route eligibility; refresh the cache.
         scoring::recompute_best_route(&env);
@@ -877,8 +896,10 @@ impl RouterCore {
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
         env.storage().instance().set(&DataKey::Paused, &paused);
 
-        env.events()
-            .publish((Symbol::new(&env, router_common::EVENT_ROUTER_PAUSED),), paused);
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROUTER_PAUSED),),
+            paused,
+        );
 
         Ok(())
     }
@@ -896,6 +917,98 @@ impl RouterCore {
     /// `Some(`[`RouteEntry`]`)` if the route exists, `None` otherwise.
     pub fn get_route(env: Env, name: String) -> Option<RouteEntry> {
         env.storage().instance().get(&DataKey::Route(name))
+    }
+
+    /// Associate a route with a required dependency.
+    ///
+    /// The dependency is stored as a direct prerequisite for `route`. The
+    /// dependency must already exist, and adding the edge must not introduce a
+    /// cycle. Caller must be the admin.
+    pub fn set_route_dependency(
+        env: Env,
+        caller: Address,
+        route: String,
+        depends_on: String,
+    ) -> Result<(), RouterError> {
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
+
+        if !env.storage().instance().has(&DataKey::Route(route.clone())) {
+            return Err(RouterError::RouteNotFound);
+        }
+
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Route(depends_on.clone()))
+        {
+            return Err(RouterError::RouteNotFound);
+        }
+
+        if route == depends_on {
+            return Err(RouterError::CircularDependency);
+        }
+
+        Self::validate_dependency_cycle(&env, &route, &depends_on)?;
+
+        let mut dependencies = Self::get_dependencies_for_route(&env, route.clone());
+        let mut already_present = false;
+        for dependency in dependencies.iter() {
+            if dependency == depends_on {
+                already_present = true;
+                break;
+            }
+        }
+
+        if !already_present {
+            dependencies.push_back(depends_on.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey::Dependencies(route.clone()), &dependencies);
+        }
+
+        Ok(())
+    }
+
+    /// Return the direct dependencies for a route.
+    pub fn get_route_dependencies(env: Env, route: String) -> Result<Vec<String>, RouterError> {
+        if !env.storage().instance().has(&DataKey::Route(route.clone())) {
+            return Err(RouterError::RouteNotFound);
+        }
+
+        Ok(Self::get_dependencies_for_route(&env, route))
+    }
+
+    /// Resolve a route together with all of its dependencies in dependency-first order.
+    pub fn resolve_with_dependencies(
+        env: Env,
+        name: String,
+    ) -> Result<Vec<(String, Address)>, RouterError> {
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false);
+        if paused {
+            return Err(RouterError::RouterPaused);
+        }
+
+        if !env.storage().instance().has(&DataKey::Route(name.clone())) {
+            return Err(RouterError::RouteNotFound);
+        }
+
+        let mut resolved: Vec<(String, Address)> = Vec::new(&env);
+        let mut resolved_names: Vec<String> = Vec::new(&env);
+        let mut active_stack: Vec<String> = Vec::new(&env);
+        Self::resolve_dependencies_recursive(
+            &env,
+            &name,
+            &mut active_stack,
+            &mut resolved_names,
+            &mut resolved,
+        )?;
+
+        Ok(resolved)
     }
 
     /// Update metadata for an existing route.
@@ -1031,8 +1144,10 @@ impl RouterCore {
                 .instance()
                 .set(&DataKey::Metadata(name.clone()), &metadata);
 
-            env.events()
-                .publish((Symbol::new(&env, router_common::EVENT_ROUTE_TAG_ADDED),), (name, tag));
+            env.events().publish(
+                (Symbol::new(&env, router_common::EVENT_ROUTE_TAG_ADDED),),
+                (name, tag),
+            );
         }
 
         Ok(())
@@ -1077,8 +1192,10 @@ impl RouterCore {
                     .instance()
                     .set(&DataKey::Metadata(name.clone()), &metadata);
 
-                env.events()
-                    .publish((Symbol::new(&env, router_common::EVENT_ROUTE_TAG_REMOVED),), (name, tag));
+                env.events().publish(
+                    (Symbol::new(&env, router_common::EVENT_ROUTE_TAG_REMOVED),),
+                    (name, tag),
+                );
             }
         }
 
@@ -1240,8 +1357,10 @@ impl RouterCore {
             .instance()
             .set(&DataKey::Aliases, &updated_aliases);
 
-        env.events()
-            .publish((Symbol::new(&env, router_common::EVENT_ALIAS_REMOVED),), alias_name);
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ALIAS_REMOVED),),
+            alias_name,
+        );
 
         Ok(())
     }
@@ -1541,11 +1660,106 @@ impl RouterCore {
             .unwrap_or(Vec::new(env))
     }
 
+    fn get_dependencies_for_route(env: &Env, route: String) -> Vec<String> {
+        env.storage()
+            .instance()
+            .get::<DataKey, Vec<String>>(&DataKey::Dependencies(route))
+            .unwrap_or(Vec::new(env))
+    }
+
     fn get_aliases(env: &Env) -> Vec<String> {
         env.storage()
             .instance()
             .get(&DataKey::Aliases)
             .unwrap_or(Vec::new(env))
+    }
+
+    fn resolve_dependencies_recursive(
+        env: &Env,
+        name: &String,
+        active_stack: &mut Vec<String>,
+        resolved_names: &mut Vec<String>,
+        resolved: &mut Vec<(String, Address)>,
+    ) -> Result<(), RouterError> {
+        for existing in active_stack.iter() {
+            if existing == *name {
+                return Err(RouterError::CircularDependency);
+            }
+        }
+
+        let mut already_resolved = false;
+        for existing in resolved_names.iter() {
+            if existing == *name {
+                already_resolved = true;
+                break;
+            }
+        }
+        if already_resolved {
+            return Ok(());
+        }
+
+        active_stack.push_back(name.clone());
+
+        let dependencies = Self::get_dependencies_for_route(env, name.clone());
+        for dependency in dependencies.iter() {
+            Self::resolve_dependencies_recursive(
+                env,
+                &dependency,
+                active_stack,
+                resolved_names,
+                resolved,
+            )?;
+        }
+
+        let entry: RouteEntry = env
+            .storage()
+            .instance()
+            .get(&DataKey::Route(name.clone()))
+            .ok_or(RouterError::RouteNotFound)?;
+        if entry.paused {
+            return Err(RouterError::RoutePaused);
+        }
+
+        resolved.push_back((name.clone(), entry.address.clone()));
+        resolved_names.push_back(name.clone());
+        active_stack.pop_back();
+
+        Ok(())
+    }
+
+    fn validate_dependency_cycle(
+        env: &Env,
+        route: &String,
+        depends_on: &String,
+    ) -> Result<(), RouterError> {
+        let mut stack = Vec::new(env);
+        Self::visit_dependencies(env, depends_on, route, &mut stack)
+    }
+
+    fn visit_dependencies(
+        env: &Env,
+        current: &String,
+        target: &String,
+        stack: &mut Vec<String>,
+    ) -> Result<(), RouterError> {
+        for existing in stack.iter() {
+            if existing == *current {
+                return Err(RouterError::CircularDependency);
+            }
+        }
+
+        if *current == *target {
+            return Err(RouterError::CircularDependency);
+        }
+
+        stack.push_back(current.clone());
+        let dependencies = Self::get_dependencies_for_route(env, current.clone());
+        for dependency in dependencies.iter() {
+            Self::visit_dependencies(env, &dependency, target, stack)?;
+        }
+        stack.pop_back();
+
+        Ok(())
     }
 
     /// Recompute and cache the highest-scoring, non-paused route.
@@ -1600,7 +1814,7 @@ impl RouterCore {
         }
     }
 
-        /// Returns `true` if `name` is empty or consists entirely of ASCII whitespace
+    /// Returns `true` if `name` is empty or consists entirely of ASCII whitespace
     /// characters (space 0x20, tab 0x09, newline 0x0A, vertical tab 0x0B,
     /// form feed 0x0C, carriage return 0x0D).
     fn is_empty_or_whitespace(name: &String) -> bool {
@@ -1675,6 +1889,8 @@ impl RouterCore {
             RouterError::RouteAlreadyExists => "RouteAlreadyExists",
             RouterError::InvalidRouteName => "InvalidRouteName",
             RouterError::InvalidMetadata => "InvalidMetadata",
+            RouterError::CircularDependency => "CircularDependency",
+            RouterError::RouteInUse => "RouteInUse",
             RouterError::InvalidAddress => "InvalidAddress",
             RouterError::RouteExpired => "RouteExpired",
         }
@@ -1744,12 +1960,32 @@ impl RouterCore {
             return Err(RouterError::RouteNotFound);
         }
 
+        let route_names = Self::get_route_names(env);
+        for dependent_name in route_names.iter() {
+            if dependent_name != name {
+                let dependencies = Self::get_dependencies_for_route(env, dependent_name.clone());
+                let mut depends_on_removed = false;
+                for dependency in dependencies.iter() {
+                    if dependency == name {
+                        depends_on_removed = true;
+                        break;
+                    }
+                }
+                if depends_on_removed {
+                    return Err(RouterError::RouteInUse);
+                }
+            }
+        }
+
         env.storage()
             .instance()
             .remove(&DataKey::Route(name.clone()));
         env.storage()
             .instance()
             .remove(&DataKey::Metadata(name.clone()));
+        env.storage()
+            .instance()
+            .remove(&DataKey::Dependencies(name.clone()));
 
         let route_names = Self::get_route_names(env);
         let mut updated_route_names = Vec::new(env);
@@ -1792,8 +2028,10 @@ impl RouterCore {
             .instance()
             .set(&DataKey::Aliases, &updated_aliases);
 
-        env.events()
-            .publish((Symbol::new(env, router_common::EVENT_ROUTE_REMOVED),), name);
+        env.events().publish(
+            (Symbol::new(env, router_common::EVENT_ROUTE_REMOVED),),
+            name,
+        );
 
         Ok(())
     }
@@ -1868,6 +2106,70 @@ mod tests {
         client.remove_route(&admin, &name);
         let result = client.try_resolve(&name);
         assert_eq!(result, Err(Ok(RouterError::RouteNotFound)));
+    }
+
+    #[test]
+    fn test_set_and_get_route_dependencies() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let dex = String::from_str(&env, "dex");
+        let oracle_addr = Address::generate(&env);
+        let dex_addr = Address::generate(&env);
+
+        client.register_route(&admin, &oracle, &oracle_addr, &None);
+        client.register_route(&admin, &dex, &dex_addr, &None);
+        client.set_route_dependency(&admin, &dex, &oracle);
+
+        let dependencies = client.get_route_dependencies(&dex);
+        assert_eq!(dependencies.len(), 1);
+        assert_eq!(dependencies.get(0).unwrap(), oracle);
+    }
+
+    #[test]
+    fn test_circular_dependency_is_rejected() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+
+        client.register_route(&admin, &name, &addr, &None);
+        let result = client.try_set_route_dependency(&admin, &name, &name);
+        assert_eq!(result, Err(Ok(RouterError::CircularDependency)));
+    }
+
+    #[test]
+    fn test_remove_route_rejected_when_other_routes_depend_on_it() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let dex = String::from_str(&env, "dex");
+        let oracle_addr = Address::generate(&env);
+        let dex_addr = Address::generate(&env);
+
+        client.register_route(&admin, &oracle, &oracle_addr, &None);
+        client.register_route(&admin, &dex, &dex_addr, &None);
+        client.set_route_dependency(&admin, &dex, &oracle);
+
+        let result = client.try_remove_route(&admin, &oracle);
+        assert_eq!(result, Err(Ok(RouterError::RouteInUse)));
+    }
+
+    #[test]
+    fn test_resolve_with_dependencies_returns_dependency_order() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let dex = String::from_str(&env, "dex");
+        let oracle_addr = Address::generate(&env);
+        let dex_addr = Address::generate(&env);
+
+        client.register_route(&admin, &oracle, &oracle_addr, &None);
+        client.register_route(&admin, &dex, &dex_addr, &None);
+        client.set_route_dependency(&admin, &dex, &oracle);
+
+        let resolved = client.resolve_with_dependencies(&dex);
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved.get(0).unwrap().0, oracle);
+        assert_eq!(resolved.get(0).unwrap().1, oracle_addr);
+        assert_eq!(resolved.get(1).unwrap().0, dex);
+        assert_eq!(resolved.get(1).unwrap().1, dex_addr);
     }
 
     #[test]

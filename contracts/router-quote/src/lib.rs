@@ -24,7 +24,7 @@ pub enum DataKey {
     RouteFee(String),
     /// Default fee if route-specific fee not set (in basis points)
     DefaultFee,
-    ConfiguredRoutes
+    ConfiguredRoutes,
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -99,11 +99,7 @@ impl RouterQuote {
     /// # Errors
     /// * [`QuoteError::AlreadyInitialized`] — if already initialized.
     /// * [`QuoteError::InvalidFeeBps`] — if fee_bps > 10000.
-    pub fn initialize(
-        env: Env,
-        admin: Address,
-        default_fee_bps: u32,
-    ) -> Result<(), QuoteError> {
+    pub fn initialize(env: Env, admin: Address, default_fee_bps: u32) -> Result<(), QuoteError> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(QuoteError::AlreadyInitialized);
         }
@@ -155,7 +151,6 @@ impl RouterQuote {
             return Err(QuoteError::InvalidFeeBps);
         }
 
-
         // Maintain route index — only append if not already tracked
         let mut routes = Self::read_configured_routes(&env);
         if !routes.contains(&route) {
@@ -167,10 +162,8 @@ impl RouterQuote {
             .instance()
             .set(&DataKey::RouteFee(route.clone()), &fee_bps);
 
-        env.events().publish(
-            (Symbol::new(&env, "route_fee_set"),),
-            (route, fee_bps),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "route_fee_set"),), (route, fee_bps));
 
         Ok(())
     }
@@ -216,7 +209,6 @@ impl RouterQuote {
         }
         configures_routes
     }
-
 
     /// Get a quote for a single route with configurable fee.
     ///
@@ -842,13 +834,25 @@ mod tests {
 
         let all_configured_routes = client.get_all_configured_routes();
         assert_eq!(all_configured_routes.len(), 4);
-        assert_eq!(all_configured_routes.get(0).unwrap().0, String::from_str(&env, "uniswap"));
+        assert_eq!(
+            all_configured_routes.get(0).unwrap().0,
+            String::from_str(&env, "uniswap")
+        );
         assert_eq!(all_configured_routes.get(0).unwrap().1, 50);
-         assert_eq!(all_configured_routes.get(1).unwrap().0, String::from_str(&env, "sushiswap"));
+        assert_eq!(
+            all_configured_routes.get(1).unwrap().0,
+            String::from_str(&env, "sushiswap")
+        );
         assert_eq!(all_configured_routes.get(1).unwrap().1, 10);
-         assert_eq!(all_configured_routes.get(2).unwrap().0, String::from_str(&env, "balancer"));
+        assert_eq!(
+            all_configured_routes.get(2).unwrap().0,
+            String::from_str(&env, "balancer")
+        );
         assert_eq!(all_configured_routes.get(2).unwrap().1, 40);
-         assert_eq!(all_configured_routes.get(3).unwrap().0, String::from_str(&env, "aerodrome"));
+        assert_eq!(
+            all_configured_routes.get(3).unwrap().0,
+            String::from_str(&env, "aerodrome")
+        );
         assert_eq!(all_configured_routes.get(3).unwrap().1, 50);
     }
 }

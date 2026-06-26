@@ -50,7 +50,10 @@ pub fn handle_failure(
         route_call_state.circuit_breaker.failure_count = 1;
         env.events().publish(
             (Symbol::new(env, "circuit_opened"),),
-            (route.clone(), route_call_state.circuit_breaker.failure_count),
+            (
+                route.clone(),
+                route_call_state.circuit_breaker.failure_count,
+            ),
         );
     } else {
         route_call_state.circuit_breaker.failure_count += 1;
@@ -59,7 +62,10 @@ pub fn handle_failure(
             route_call_state.circuit_breaker.opened_at = env.ledger().timestamp();
             env.events().publish(
                 (Symbol::new(env, "circuit_opened"),),
-                (route.clone(), route_call_state.circuit_breaker.failure_count),
+                (
+                    route.clone(),
+                    route_call_state.circuit_breaker.failure_count,
+                ),
             );
         }
     }
