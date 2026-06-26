@@ -482,6 +482,47 @@ impl RouterTimelock {
         }
         count
     }
+    
+    /// Get all operations matching a specific status.
+    pub fn get_operations_by_status(env: Env, status: OperationStatus) -> Result<Vec<(Bytes, Op)>, TimelockError> {
+        let pending: Vec<Bytes> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingOps)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let now = env.ledger().timestamp();
+        let mut result = Vec::new(&env);
+
+        for op_id in pending.iter() {
+            if let Some(op) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Op>(&DataKey::Op(op_id.clone())) 
+            {
+                let matches = match status {
+                    OperationStatus::Cancelled => op.cancelled,
+                    OperationStatus::Executed => op.executed,
+                    OperationStatus::Expired => {
+                        !op.executed && !op.cancelled && now > op.eta + op.grace_period_seconds
+                    }
+                    OperationStatus::Ready => {
+                        !op.executed
+                            && !op.cancelled
+                            && now >= op.eta
+                            && now <= op.eta + op.grace_period_seconds
+                    }
+                    OperationStatus::Queued => !op.executed && !op.cancelled && now < op.eta,
+                };
+
+                if matches {
+                    result.push_back((op_id.clone(), op));
+                }
+            }
+        }
+
+        Ok(result)
+    }
 
     /// Get the minimum delay.
     pub fn min_delay(env: Env) -> u64 {
