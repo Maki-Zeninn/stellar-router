@@ -12,7 +12,6 @@ use crate::{
     types::{
         ErrorCode, ErrorResponse, FeeEstimate, SimulateRequest, SimulateResponse, SimulationDetail,
     },
-    types::{ErrorResponse, FeeEstimate, SimulateRequest, SimulateResponse, SimulationDetail},
 };
 
 /// GET /health
@@ -42,9 +41,6 @@ pub async fn simulate(
                 "target and function are required",
                 "target",
             )),
-            Json(ErrorResponse {
-                error: "target and function are required".to_string(),
-            }),
         ));
     }
 
@@ -56,10 +52,6 @@ pub async fn simulate(
                 "target must be a 56-character Stellar contract ID starting with C",
                 "target",
             )),
-            Json(ErrorResponse {
-                error: "target must be a 56-character Stellar contract ID starting with C"
-                    .to_string(),
-            }),
         ));
     }
 
@@ -73,9 +65,6 @@ pub async fn simulate(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new(ErrorCode::RpcError, e.to_string())),
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
             )
         })?;
 
@@ -122,23 +111,7 @@ pub async fn get_route(
         )),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new(
-                ErrorCode::NotFound,
-                format!("route '{}' not found", name),
-            )),
-        )),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::new(ErrorCode::RpcError, e.to_string())),
-            Json(ErrorResponse {
-                error: format!("route '{}' not found", name),
-            }),
-        )),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
         )),
     }
 }
