@@ -19,6 +19,7 @@ use axum::{
 use clap::Parser;
 use std::net::SocketAddr;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tracing::{info, warn};
 use tracing::{info, info_span, warn, Instrument};
 
 use crate::state::AppState;

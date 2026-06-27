@@ -324,6 +324,9 @@ impl RouterRegistry {
         }
 
         let constraint_str = constraint.unwrap();
+
+        Self::validate_constraint(&constraint_str)?;
+
         if versions.is_empty() {
             return Err(RegistryError::NotFound);
         }
@@ -485,7 +488,6 @@ impl RouterRegistry {
     /// Note: This is a breaking change from the previous Result-based API.
     /// Calling admin() on an uninitialized contract is considered a programming error
     /// rather than a runtime condition, consistent with how similar getters work.
-    pub fn admin(env: Env) -> Address {
     /// # Errors
     /// * [`RegistryError::NotInitialized`] — if the contract has not been initialized.
     pub fn admin(env: Env) -> Result<Address, RegistryError> {
@@ -674,6 +676,33 @@ impl RouterRegistry {
             .instance()
             .get(&DataKey::Versions(name.clone()))
             .unwrap_or(Vec::new(env))
+    }
+
+    /// Validate that a constraint string uses a supported format before use.
+    ///
+    /// Supported formats: `>=X`, `<=X`, `>X`, `<X`, `^X`, `~X`, or an exact
+    /// version number `X`, where `X` is a non-negative integer.
+    ///
+    /// # Errors
+    /// * [`RegistryError::InvalidConstraint`] — if the format is not recognised.
+    fn validate_constraint(constraint: &String) -> Result<(), RegistryError> {
+        let s = constraint.to_string();
+        let num_part = if s.starts_with(">=") || s.starts_with("<=") {
+            &s[2..]
+        } else if s.starts_with('>')
+            || s.starts_with('<')
+            || s.starts_with('^')
+            || s.starts_with('~')
+        {
+            &s[1..]
+        } else {
+            s.as_str()
+        };
+
+        if num_part.is_empty() || num_part.parse::<u32>().is_err() {
+            return Err(RegistryError::InvalidConstraint);
+        }
+        Ok(())
     }
 
     fn version_matches_constraint(
