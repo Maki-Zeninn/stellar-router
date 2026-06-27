@@ -14,6 +14,7 @@
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
 };
+use router_common;
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -114,7 +115,7 @@ impl RouterQuote {
             .set(&DataKey::DefaultFee, &default_fee_bps);
 
         env.events().publish(
-            (Symbol::new(&env, "initialized"),),
+            (Symbol::new(&env, router_common::EVENT_INITIALIZED),),
             (admin, default_fee_bps),
         );
 
@@ -163,7 +164,7 @@ impl RouterQuote {
             .set(&DataKey::RouteFee(route.clone()), &fee_bps);
 
         env.events()
-            .publish((Symbol::new(&env, "route_fee_set"),), (route, fee_bps));
+            .publish((Symbol::new(&env, router_common::EVENT_ROUTE_FEE_SET),), (route, fee_bps));
 
         Ok(())
     }
@@ -256,7 +257,7 @@ impl RouterQuote {
         };
 
         env.events().publish(
-            (Symbol::new(&env, "quote_calculated"),),
+            (Symbol::new(&env, router_common::EVENT_QUOTE_CALCULATED),),
             (request.route, amount_out, fee_amount),
         );
 
@@ -326,7 +327,7 @@ impl RouterQuote {
         }
 
         env.events().publish(
-            (Symbol::new(&env, "best_quote_selected"),),
+            (Symbol::new(&env, router_common::EVENT_BEST_QUOTE_SELECTED),),
             (best_quote.route.clone(), best_quote.amount_out),
         );
 
@@ -402,7 +403,7 @@ impl RouterQuote {
         env.storage().instance().set(&DataKey::DefaultFee, &fee_bps);
 
         env.events()
-            .publish((Symbol::new(&env, "default_fee_updated"),), fee_bps);
+            .publish((Symbol::new(&env, router_common::EVENT_DEFAULT_FEE_UPDATED),), fee_bps);
 
         Ok(())
     }
@@ -460,7 +461,7 @@ impl RouterQuote {
         env.storage().instance().set(&DataKey::Admin, &new_admin);
 
         env.events().publish(
-            (Symbol::new(&env, "admin_transferred"),),
+            (Symbol::new(&env, router_common::EVENT_ADMIN_TRANSFERRED),),
             (current, new_admin),
         );
 

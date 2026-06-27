@@ -7,6 +7,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
+use std::collections::HashSet;
 use tracing::{error, info, warn};
 
 use crate::{
@@ -24,11 +25,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     info!("WebSocket client connected");
 
-    let mut subscriptions: Vec<String> = Vec::new();
-    let mut rx_handles: Vec<(
-        String,
-        tokio::sync::broadcast::Receiver<TransactionStatusEvent>,
-    )> = Vec::new();
+    // One receiver for the whole connection. Events for all subscriptions
+    // arrive on the same broadcast channel and are filtered by tx_id below.
+    let mut rx = state.tx_status_tx.subscribe();
+    let mut subscriptions: HashSet<String> = HashSet::new();
 
     loop {
         tokio::select! {
@@ -39,10 +39,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             Ok(sub_msg) => {
                                 if sub_msg.action == "subscribe" {
                                     info!("Client subscribed to tx_id: {}", sub_msg.tx_id);
-                                    subscriptions.push(sub_msg.tx_id.clone());
+                                    subscriptions.insert(sub_msg.tx_id.clone());
                                     state.add_subscriber(sub_msg.tx_id.clone());
-                                    let rx = state.tx_status_tx.subscribe();
-                                    rx_handles.push((sub_msg.tx_id.clone(), rx));
 
                                     let response = json!({
                                         "msg_type": "subscribed",
@@ -58,9 +56,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     }
                                 } else if sub_msg.action == "unsubscribe" {
                                     info!("Client unsubscribed from tx_id: {}", sub_msg.tx_id);
-                                    subscriptions.retain(|id| id != &sub_msg.tx_id);
+                                    subscriptions.remove(&sub_msg.tx_id);
                                     state.remove_subscriber(&sub_msg.tx_id);
-                                    rx_handles.retain(|(id, _)| id != &sub_msg.tx_id);
                                 }
                             }
                             Err(e) => {
@@ -79,36 +76,25 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     _ => {}
                 }
             }
-            result = async {
-                for (tx_id, rx) in &mut rx_handles {
-                    if let Ok(event) = rx.try_recv() {
-                        return Some((tx_id.clone(), event));
-                    }
-                }
-                if let Some((tx_id, rx)) = rx_handles.first_mut() {
-                    match rx.recv().await {
-                        Ok(event) => Some((tx_id.clone(), event)),
-                        Err(_) => None,
-                    }
-                } else {
-                    std::future::pending().await
-                }
-            } => {
-                if let Some((_tx_id, event)) = result {
-                    let response = json!({
-                        "msg_type": "status_update",
-                        "data": {
-                            "tx_id": event.tx_id,
-                            "status": event.status,
-                            "timestamp": event.timestamp,
-                            "message": event.message,
-                        },
-                    });
+            result = recv_matching(&mut rx, &subscriptions) => {
+                match result {
+                    Some(event) => {
+                        let response = json!({
+                            "msg_type": "status_update",
+                            "data": {
+                                "tx_id": event.tx_id,
+                                "status": event.status,
+                                "timestamp": event.timestamp,
+                                "message": event.message,
+                            },
+                        });
 
-                    if let Err(e) = sender.send(Message::Text(response.to_string())).await {
-                        error!("Failed to send status update: {}", e);
-                        break;
+                        if let Err(e) = sender.send(Message::Text(response.to_string())).await {
+                            error!("Failed to send status update: {}", e);
+                            break;
+                        }
                     }
+                    None => break,
                 }
             }
         }
@@ -121,4 +107,28 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     }
 
     info!("WebSocket handler exiting");
+}
+
+/// Wait for the next broadcast event that matches one of the subscribed tx_ids.
+/// Returns `None` if the sender is dropped (server shutting down).
+async fn recv_matching(
+    rx: &mut tokio::sync::broadcast::Receiver<TransactionStatusEvent>,
+    subscriptions: &HashSet<String>,
+) -> Option<TransactionStatusEvent> {
+    if subscriptions.is_empty() {
+        // Nothing subscribed — park indefinitely until there are subscriptions.
+        std::future::pending::<Option<TransactionStatusEvent>>().await
+    } else {
+        loop {
+            match rx.recv().await {
+                Ok(event) if subscriptions.contains(&event.tx_id) => return Some(event),
+                Ok(_) => continue, // event for a different tx_id; keep waiting
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("WebSocket receiver lagged, skipped {} events", n);
+                    continue;
+                }
+                Err(_) => return None, // sender dropped
+            }
+        }
+    }
 }

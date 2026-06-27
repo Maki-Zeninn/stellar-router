@@ -20,6 +20,7 @@
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, Symbol, Val, Vec,
 };
+use router_common;
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -244,14 +245,14 @@ impl RouterMulticall {
             }
 
             env.events().publish(
-                (Symbol::new(&env, "call_result"),),
+                (Symbol::new(&env, router_common::EVENT_CALL_RESULT),),
                 (&caller, &call.target, &call.function, success, call_index),
             );
 
             if !success {
                 if call.required {
                     env.events().publish(
-                        (Symbol::new(&env, "call_failed"),),
+                        (Symbol::new(&env, router_common::EVENT_CALL_FAILED),),
                         (call_index, &call.target, &call.function),
                     );
                     env.storage().instance().remove(&DataKey::Executing);
@@ -313,7 +314,7 @@ impl RouterMulticall {
             .instance()
             .set(&DataKey::MaxBatchSize, &max_batch_size);
         env.events().publish(
-            (Symbol::new(&env, "max_batch_size_updated"),),
+            (Symbol::new(&env, router_common::EVENT_MAX_BATCH_SIZE_UPDATED),),
             (old_max, max_batch_size),
         );
         Ok(())

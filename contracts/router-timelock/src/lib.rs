@@ -18,6 +18,7 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, xdr::ToXdr, Address, Bytes, Env, String,
     Symbol, Vec,
 };
+use router_common;
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -363,7 +364,7 @@ impl RouterTimelock {
 
         if cleaned_count > 0 {
             env.storage().instance().set(&DataKey::PendingOps, &new_pending);
-            env.events().publish((Symbol::new(&env, "ops_cleaned"),), cleaned_count);
+            env.events().publish((Symbol::new(&env, router_common::EVENT_OPS_CLEANED),), cleaned_count);
         }
 
         Ok(cleaned_count)
@@ -548,7 +549,7 @@ impl RouterTimelock {
         env.storage().instance().set(&DataKey::Admin, &new_admin);
 
         env.events().publish(
-            (Symbol::new(&env, "admin_transferred"),),
+            (Symbol::new(&env, router_common::EVENT_ADMIN_TRANSFERRED),),
             (current, new_admin),
         );
 

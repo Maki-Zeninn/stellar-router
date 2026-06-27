@@ -55,7 +55,7 @@ pub fn recompute_best_route(env: &Env) {
         Some(name) => {
             env.storage().instance().set(&DataKey::BestRoute, &name);
             env.events().publish(
-                (Symbol::new(env, "best_route_selected"),),
+                (Symbol::new(env, router_common::EVENT_BEST_ROUTE_SELECTED),),
                 (name, best_score),
             );
         }
