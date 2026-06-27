@@ -25,6 +25,7 @@ futures-util = { version = "0.3" }
 clap = { version = "4.5.37", features = ["derive", "env"] }
 async-trait = { version = "0.1.88" }
 tower-http = { version = "0.5", features = ["cors"] }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 axum-test = "15.0"

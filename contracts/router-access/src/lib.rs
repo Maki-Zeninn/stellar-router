@@ -7,6 +7,7 @@
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
 };
+use router_common;
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -143,7 +144,7 @@ impl RouterAccess {
             .remove(&DataKey::RoleExpiry(role.clone(), target.clone()));
 
         env.events()
-            .publish((Symbol::new(&env, "role_revoked"),), (role, target));
+            .publish((Symbol::new(&env, router_common::EVENT_ROLE_REVOKED),), (role, target));
         Ok(())
     }
 
@@ -199,7 +200,7 @@ impl RouterAccess {
             .instance()
             .set(&DataKey::RoleAdmin(role.clone()), &admin);
         env.events()
-            .publish((Symbol::new(&env, "role_admin_set"),), (role, admin));
+            .publish((Symbol::new(&env, router_common::EVENT_ROLE_ADMIN_SET),), (role, admin));
         Ok(())
     }
 
@@ -248,7 +249,7 @@ impl RouterAccess {
             .instance()
             .set(&DataKey::Blacklisted(target.clone()), &true);
         env.events()
-            .publish((Symbol::new(&env, "address_blacklisted"),), target);
+            .publish((Symbol::new(&env, router_common::EVENT_ADDRESS_BLACKLISTED),), target);
         Ok(())
     }
 
@@ -260,7 +261,7 @@ impl RouterAccess {
             .instance()
             .remove(&DataKey::Blacklisted(target.clone()));
         env.events()
-            .publish((Symbol::new(&env, "address_unblacklisted"),), target);
+            .publish((Symbol::new(&env, router_common::EVENT_ADDRESS_UNBLACKLISTED),), target);
         Ok(())
     }
 
@@ -310,7 +311,7 @@ impl RouterAccess {
             .instance()
             .set(&DataKey::SuperAdmin, &new_admin);
         env.events().publish(
-            (Symbol::new(&env, "admin_transferred"),),
+            (Symbol::new(&env, router_common::EVENT_ADMIN_TRANSFERRED),),
             (current, new_admin),
         );
         Ok(())
@@ -338,7 +339,7 @@ impl RouterAccess {
             .instance()
             .remove(&DataKey::HasRole(role.clone(), target.clone()));
         env.events()
-            .publish((Symbol::new(&env, "role_expired"),), (role, target));
+            .publish((Symbol::new(&env, router_common::EVENT_ROLE_EXPIRED),), (role, target));
         Ok(())
     }
 
@@ -422,7 +423,7 @@ impl RouterAccess {
         env.storage().instance().set(&key, &expiry_timestamp);
 
         env.events().publish(
-            (Symbol::new(env, "role_grant"),),
+            (Symbol::new(env, router_common::EVENT_ROLE_GRANT),),
             (account.clone(), role.clone(), expiry_timestamp),
         );
         Ok(())

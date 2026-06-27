@@ -52,6 +52,7 @@ pub enum DataKey {
     BackoffMultiplier, // multiplier applied each retry (stored as fixed-point *100, e.g. 200 = 2x)
     ExecHistory,       // Vec<ExecutionRecord>, capped at MaxHistorySize (oldest evicted first)
     MaxHistorySize,    // u32 — cap on ExecHistory length
+    MaxHistorySize, // u32 — cap on ExecHistory length
 }
 
 // ── Error Types ───────────────────────────────────────────────────────────────
@@ -378,7 +379,7 @@ impl RouterExecution {
                         simulated: request.simulate_first,
                     };
                     env.events().publish(
-                        (Symbol::new(&env, "execution_result"),),
+                        (Symbol::new(&env, router_common::EVENT_EXECUTION_RESULT),),
                         (&request.target, &request.function, true, attempts),
                     );
                     return Ok(exec_result);
@@ -394,7 +395,7 @@ impl RouterExecution {
                             attempts - 1,
                         );
                         env.events().publish(
-                            (Symbol::new(&env, "execution_retry"),),
+                            (Symbol::new(&env, router_common::EVENT_EXECUTION_RETRY),),
                             (&request.target, &request.function, attempts, delay_ms),
                         );
                         // Retry
@@ -470,7 +471,7 @@ impl RouterExecution {
             (base_fee + resource_fee) * surge_multiplier as i128 / FIXED_POINT_SCALE as i128;
 
         env.events().publish(
-            (Symbol::new(&env, "fee_estimated"),),
+            (Symbol::new(&env, router_common::EVENT_FEE_ESTIMATED),),
             (total_fee, high_load),
         );
 
@@ -526,7 +527,7 @@ impl RouterExecution {
         };
 
         env.events().publish(
-            (Symbol::new(&env, "simulation_result"),),
+            (Symbol::new(&env, router_common::EVENT_SIMULATION_RESULT),),
             (&target, &function, sim_ok),
         );
 
@@ -724,7 +725,7 @@ impl RouterExecution {
         // Emit a structured error event; does not leak internal details beyond
         // the error code and attempt count.
         env.events().publish(
-            (Symbol::new(env, "execution_error"),),
+            (Symbol::new(env, router_common::EVENT_EXECUTION_ERROR),),
             (target, function, error as u32, attempts),
         );
     }
