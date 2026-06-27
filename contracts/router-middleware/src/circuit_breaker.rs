@@ -5,6 +5,7 @@
 //! in `lib.rs`.
 
 use soroban_sdk::{Env, Map, String, Symbol};
+use router_common;
 
 use crate::{CircuitBreakerState, DataKey, RouteCallState, RouteConfig};
 
@@ -49,7 +50,7 @@ pub fn handle_failure(
         route_call_state.circuit_breaker.opened_at = env.ledger().timestamp();
         route_call_state.circuit_breaker.failure_count = 1;
         env.events().publish(
-            (Symbol::new(env, "circuit_opened"),),
+            (Symbol::new(env, router_common::EVENT_CIRCUIT_OPENED),),
             (
                 route.clone(),
                 route_call_state.circuit_breaker.failure_count,
@@ -61,7 +62,7 @@ pub fn handle_failure(
             route_call_state.circuit_breaker.is_open = true;
             route_call_state.circuit_breaker.opened_at = env.ledger().timestamp();
             env.events().publish(
-                (Symbol::new(env, "circuit_opened"),),
+                (Symbol::new(env, router_common::EVENT_CIRCUIT_OPENED),),
                 (
                     route.clone(),
                     route_call_state.circuit_breaker.failure_count,

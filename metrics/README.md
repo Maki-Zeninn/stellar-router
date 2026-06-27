@@ -21,6 +21,11 @@ Soroban smart contracts run inside the Stellar network as WASM and cannot open s
 | `router_middleware_circuit_open` | Gauge | `contract`, `route` | 1 if the circuit breaker is open |
 | `router_middleware_failure_count` | Gauge | `contract`, `route` | Consecutive failure count |
 | `router_registry_total_names` | Gauge | `contract` | Total contract names registered |
+| `router_quote_total_generated` | Gauge | `contract` | Running total of `quote_generated` events |
+| `router_quote_total_fee_estimated` | Gauge | `contract` | Running total of `fee_estimated` events |
+| `router_execution_total_executions` | Gauge | `contract` | Cumulative executions from on-chain storage |
+| `router_execution_total_errors` | Gauge | `contract` | Cumulative execution errors from on-chain storage |
+| `router_execution_max_retries` | Gauge | `contract` | Configured max retries from on-chain storage |
 | `router_scrape_duration_seconds` | Histogram | `contract` | Time spent scraping each contract |
 | `router_scrape_errors_total` | Counter | `contract` | Number of failed scrape attempts |
 | `router_up` | Gauge | — | 1 if the last scrape cycle succeeded |
@@ -85,6 +90,16 @@ Options:
       [env: ROUTER_REGISTRY_CONTRACT_ID]
       [default: ]
 
+  --quote-contract-id <CONTRACT_ID>
+      Contract ID of the deployed router-quote contract
+      [env: ROUTER_QUOTE_CONTRACT_ID]
+      [default: ]
+
+  --execution-contract-id <CONTRACT_ID>
+      Contract ID of the deployed router-execution contract
+      [env: ROUTER_EXECUTION_CONTRACT_ID]
+      [default: ]
+
   --scrape-interval-secs <SECONDS>
       How often (in seconds) to poll the Soroban RPC for fresh data
       [env: ROUTER_SCRAPE_INTERVAL_SECS]
@@ -114,6 +129,8 @@ export ROUTER_RPC_URL="https://soroban-testnet.stellar.org"
 export ROUTER_CORE_CONTRACT_ID="CBGTG...YOUR_CONTRACT_ID"
 export ROUTER_MIDDLEWARE_CONTRACT_ID="CBGTG...YOUR_CONTRACT_ID"
 export ROUTER_REGISTRY_CONTRACT_ID="CBGTG...YOUR_CONTRACT_ID"
+export ROUTER_QUOTE_CONTRACT_ID="CBGTG...YOUR_CONTRACT_ID"
+export ROUTER_EXECUTION_CONTRACT_ID="CBGTG...YOUR_CONTRACT_ID"
 export ROUTER_SCRAPE_INTERVAL_SECS=30
 export ROUTER_LISTEN="0.0.0.0:9090"
 
@@ -127,10 +144,57 @@ export ROUTER_RPC_URL="https://soroban-mainnet.stellar.org"
 export ROUTER_NETWORK_PASSPHRASE="Public Global Stellar Network ; September 2015"
 export ROUTER_CORE_CONTRACT_ID="CBGTG...YOUR_CONTRACT_ID"
 export ROUTER_MIDDLEWARE_CONTRACT_ID="CBGTG...YOUR_CONTRACT_ID"
+export ROUTER_QUOTE_CONTRACT_ID="CBGTG...YOUR_CONTRACT_ID"
+export ROUTER_EXECUTION_CONTRACT_ID="CBGTG...YOUR_CONTRACT_ID"
 export ROUTER_SCRAPE_INTERVAL_SECS=60
 
 ./target/release/router-metrics-exporter
 ```
+
+## Authentication
+
+The `/metrics` endpoint can be protected with API key authentication.
+
+> **Warning:** Authentication is **disabled by default**. An unauthenticated
+> `/metrics` endpoint exposes contract state, circuit breaker status, route
+> names, and error rates to any client. Always enable authentication in
+> production deployments.
+
+### Enabling authentication
+
+Set the following environment variables before starting the exporter:
+
+```bash
+export ROUTER_AUTH_ENABLED=true
+export ROUTER_API_KEY="your-secret-api-key"
+```
+
+When `ROUTER_AUTH_ENABLED` is not set (or set to `false`), the exporter logs
+a startup warning:
+
+```
+WARN router_metrics_exporter::auth: Metrics endpoint is unauthenticated — set ROUTER_AUTH_ENABLED=true for production
+```
+
+### Making authenticated requests
+
+The exporter accepts the API key in either of two request headers:
+
+```bash
+# Authorization: Bearer header
+curl -H "Authorization: Bearer your-secret-api-key" http://localhost:9090/metrics
+
+# X-API-Key header
+curl -H "X-API-Key: your-secret-api-key" http://localhost:9090/metrics
+```
+
+### Deployment recommendations
+
+- Place the exporter behind a reverse proxy (nginx, Caddy, Traefik) that enforces
+  TLS and restricts access to your Prometheus scraper IP.
+- Use a network firewall or Kubernetes NetworkPolicy to allow only the Prometheus
+  pod to reach port 9090.
+- Rotate `ROUTER_API_KEY` regularly and update the Prometheus scrape config accordingly.
 
 ## Prometheus Configuration
 
@@ -140,6 +204,9 @@ Add the exporter as a scrape target in your `prometheus.yml`:
 scrape_configs:
   - job_name: 'stellar-router'
     scrape_interval: 30s
+    # Include the API key if ROUTER_AUTH_ENABLED=true
+    authorization:
+      credentials: 'your-secret-api-key'
     static_configs:
       - targets: ['localhost:9090']
         labels:
@@ -155,6 +222,19 @@ Example queries for a Grafana dashboard:
 
 ```promql
 rate(router_core_total_routed{contract="CBGTG..."}[5m]) * 60
+```
+
+### Execution error rate
+
+```promql
+rate(router_execution_total_errors{contract="CBGTG..."}[5m])
+  / rate(router_execution_total_executions{contract="CBGTG..."}[5m])
+```
+
+### Quote activity
+
+```promql
+rate(router_quote_total_generated{contract="CBGTG..."}[5m]) * 60
 ```
 
 ### Circuit breaker status
@@ -190,6 +270,8 @@ The exporter calls view functions on each contract via `simulateTransaction`:
 - **router-core**: `total_routed()`, `get_all_routes()`, `get_route(name)` for each route
 - **router-middleware**: `total_calls()`, `get_configured_routes()`, `circuit_breaker_state(route)` for each route
 - **router-registry**: `get_all_names()` (total count)
+- **router-quote**: `quote_generated` and `fee_estimated` events via `getEvents` RPC
+- **router-execution**: `TotalExecutions`, `TotalErrors`, `MaxRetries` from on-chain storage via `getLedgerEntries`
 
 Each contract scrape is timed and any error increments the `router_scrape_errors_total` counter.
 
@@ -278,6 +360,8 @@ cargo test -p router-metrics-exporter
 ```bash
 cargo run -p router-metrics-exporter -- \
   --core-contract-id "CBGTG..." \
+  --execution-contract-id "CBGTG..." \
+  --quote-contract-id "CBGTG..." \
   --scrape-interval-secs 10
 ```
 

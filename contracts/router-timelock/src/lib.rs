@@ -18,6 +18,7 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, xdr::ToXdr, Address, Bytes, Env, String,
     Symbol, Vec,
 };
+use router_common;
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -363,7 +364,7 @@ impl RouterTimelock {
 
         if cleaned_count > 0 {
             env.storage().instance().set(&DataKey::PendingOps, &new_pending);
-            env.events().publish((Symbol::new(&env, "ops_cleaned"),), cleaned_count);
+            env.events().publish((Symbol::new(&env, router_common::EVENT_OPS_CLEANED),), cleaned_count);
         }
 
         Ok(cleaned_count)
@@ -482,6 +483,47 @@ impl RouterTimelock {
         }
         count
     }
+    
+    /// Get all operations matching a specific status.
+    pub fn get_operations_by_status(env: Env, status: OperationStatus) -> Result<Vec<(Bytes, Op)>, TimelockError> {
+        let pending: Vec<Bytes> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingOps)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let now = env.ledger().timestamp();
+        let mut result = Vec::new(&env);
+
+        for op_id in pending.iter() {
+            if let Some(op) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Op>(&DataKey::Op(op_id.clone())) 
+            {
+                let matches = match status {
+                    OperationStatus::Cancelled => op.cancelled,
+                    OperationStatus::Executed => op.executed,
+                    OperationStatus::Expired => {
+                        !op.executed && !op.cancelled && now > op.eta + op.grace_period_seconds
+                    }
+                    OperationStatus::Ready => {
+                        !op.executed
+                            && !op.cancelled
+                            && now >= op.eta
+                            && now <= op.eta + op.grace_period_seconds
+                    }
+                    OperationStatus::Queued => !op.executed && !op.cancelled && now < op.eta,
+                };
+
+                if matches {
+                    result.push_back((op_id.clone(), op));
+                }
+            }
+        }
+
+        Ok(result)
+    }
 
     /// Get the minimum delay.
     pub fn min_delay(env: Env) -> u64 {
@@ -548,7 +590,7 @@ impl RouterTimelock {
         env.storage().instance().set(&DataKey::Admin, &new_admin);
 
         env.events().publish(
-            (Symbol::new(&env, "admin_transferred"),),
+            (Symbol::new(&env, router_common::EVENT_ADMIN_TRANSFERRED),),
             (current, new_admin),
         );
 

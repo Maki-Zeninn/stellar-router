@@ -196,6 +196,36 @@ pub const EVENT_CONTRACT_REGISTERED: &str = "contract_registered";
 /// Standard event topic for contract deprecation in registry
 pub const EVENT_CONTRACT_DEPRECATED: &str = "contract_deprecated";
 
+/// Standard event topic for contract/module initialisation
+pub const EVENT_INITIALIZED: &str = "initialized";
+
+/// Standard event topic for per-route fee configuration
+pub const EVENT_ROUTE_FEE_SET: &str = "route_fee_set";
+
+/// Standard event topic for a quote being calculated
+pub const EVENT_QUOTE_CALCULATED: &str = "quote_calculated";
+
+/// Standard event topic for the best quote being selected
+pub const EVENT_BEST_QUOTE_SELECTED: &str = "best_quote_selected";
+
+/// Standard event topic for the default fee being updated
+pub const EVENT_DEFAULT_FEE_UPDATED: &str = "default_fee_updated";
+
+/// Standard event topic for a role admin being set
+pub const EVENT_ROLE_ADMIN_SET: &str = "role_admin_set";
+
+/// Standard event topic for an address being un-blacklisted
+pub const EVENT_ADDRESS_UNBLACKLISTED: &str = "address_unblacklisted";
+
+/// Standard event topic for a role grant (pending or direct)
+pub const EVENT_ROLE_GRANT: &str = "role_grant";
+
+/// Standard event topic for a role expiring
+pub const EVENT_ROLE_EXPIRED: &str = "role_expired";
+
+/// Standard event topic for cleaning up completed/cancelled timelock ops
+pub const EVENT_OPS_CLEANED: &str = "ops_cleaned";
+
 // ── Batch types ───────────────────────────────────────────────────────────────
 
 use soroban_sdk::{contracttype, Address, Env, IntoVal, String, Symbol, Val, Vec};

@@ -39,6 +39,10 @@ impl AuthConfig {
             warn!("Authentication enabled but ROUTER_API_KEY not set. Authentication will be disabled.");
         }
 
+        if !enabled {
+            warn!("Metrics endpoint is unauthenticated — set ROUTER_AUTH_ENABLED=true for production");
+        }
+
         AuthConfig {
             enabled: enabled && api_key.is_some(),
             api_key,

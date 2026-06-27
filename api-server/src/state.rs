@@ -1,8 +1,14 @@
 use dashmap::DashMap;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use tokio::sync::broadcast;
 
 use crate::{rpc::SorobanRpcClient, types::TransactionStatusEvent};
+
+pub const MAX_WS_CONNECTIONS: usize = 100;
+pub const MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 100;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -12,6 +18,7 @@ pub struct AppState {
     pub router_core_contract_id: String,
     pub tx_status_tx: broadcast::Sender<TransactionStatusEvent>,
     pub tx_subscribers: Arc<DashMap<String, usize>>,
+    pub ws_connection_count: Arc<AtomicUsize>,
 }
 
 impl AppState {
@@ -27,6 +34,7 @@ impl AppState {
             router_core_contract_id,
             tx_status_tx,
             tx_subscribers: Arc::new(DashMap::new()),
+            ws_connection_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -51,5 +59,22 @@ impl AppState {
                 self.tx_subscribers.remove(tx_id);
             }
         }
+    }
+
+    /// Returns true if a new connection was accepted, false if the limit is reached.
+    pub fn try_acquire_ws_connection(&self) -> bool {
+        self.ws_connection_count
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                if current < MAX_WS_CONNECTIONS {
+                    Some(current + 1)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
+    }
+
+    pub fn release_ws_connection(&self) {
+        self.ws_connection_count.fetch_sub(1, Ordering::SeqCst);
     }
 }
