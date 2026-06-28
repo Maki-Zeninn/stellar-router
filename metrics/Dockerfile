@@ -30,4 +30,7 @@ USER metrics
 
 EXPOSE 9090
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -f http://localhost:9090/health || exit 1
+
 ENTRYPOINT ["router-metrics-exporter"]
