@@ -4,10 +4,10 @@
 //!
 //! Role-based access control for the stellar-router suite.
 
+use router_common;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
 };
-use router_common;
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -143,8 +143,10 @@ impl RouterAccess {
             .instance()
             .remove(&DataKey::RoleExpiry(role.clone(), target.clone()));
 
-        env.events()
-            .publish((Symbol::new(&env, router_common::EVENT_ROLE_REVOKED),), (role, target));
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROLE_REVOKED),),
+            (role, target),
+        );
         Ok(())
     }
 
@@ -199,8 +201,10 @@ impl RouterAccess {
         env.storage()
             .instance()
             .set(&DataKey::RoleAdmin(role.clone()), &admin);
-        env.events()
-            .publish((Symbol::new(&env, router_common::EVENT_ROLE_ADMIN_SET),), (role, admin));
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROLE_ADMIN_SET),),
+            (role, admin),
+        );
         Ok(())
     }
 
@@ -248,8 +252,10 @@ impl RouterAccess {
         env.storage()
             .instance()
             .set(&DataKey::Blacklisted(target.clone()), &true);
-        env.events()
-            .publish((Symbol::new(&env, router_common::EVENT_ADDRESS_BLACKLISTED),), target);
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ADDRESS_BLACKLISTED),),
+            target,
+        );
         Ok(())
     }
 
@@ -260,8 +266,13 @@ impl RouterAccess {
         env.storage()
             .instance()
             .remove(&DataKey::Blacklisted(target.clone()));
-        env.events()
-            .publish((Symbol::new(&env, router_common::EVENT_ADDRESS_UNBLACKLISTED),), target);
+        env.events().publish(
+            (Symbol::new(
+                &env,
+                router_common::EVENT_ADDRESS_UNBLACKLISTED,
+            ),),
+            target,
+        );
         Ok(())
     }
 
@@ -338,8 +349,10 @@ impl RouterAccess {
         env.storage()
             .instance()
             .remove(&DataKey::HasRole(role.clone(), target.clone()));
-        env.events()
-            .publish((Symbol::new(&env, router_common::EVENT_ROLE_EXPIRED),), (role, target));
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROLE_EXPIRED),),
+            (role, target),
+        );
         Ok(())
     }
 
@@ -379,8 +392,29 @@ impl RouterAccess {
         if Self::is_blacklisted_internal(env, account) {
             return Err(AccessError::Blacklisted);
         }
-        if Self::has_role_internal(env, account, role) {
-            return Err(AccessError::AlreadyHasRole);
+
+        let raw_key = DataKey::HasRole(role.clone(), account.clone());
+        let has_raw_assignment = env.storage().instance().has(&raw_key);
+
+        // If there is an existing unexpired assignment, only treat it as a duplicate error when
+        // the requested expiry matches the existing expiry.
+        //
+        // This allows admins to extend/shorten expiry (or remove it by granting with `None`).
+        if has_raw_assignment && Self::has_role_internal(env, account, role) {
+            let existing_expiry: Option<u64> = env
+                .storage()
+                .instance()
+                .get::<DataKey, u64>(&DataKey::RoleExpiry(role.clone(), account.clone()));
+
+            let requested_expiry = match expires_in {
+                Some(seconds) => env.ledger().timestamp() + seconds,
+                None => u64::MAX,
+            };
+
+            let existing_expiry = existing_expiry.unwrap_or(u64::MAX);
+            if existing_expiry == requested_expiry {
+                return Err(AccessError::AlreadyHasRole);
+            }
         }
 
         // Track this role in AllRoles if it's the first time we've seen it
@@ -724,8 +758,8 @@ mod tests {
         let (env, admin, client) = setup();
         let role = String::from_str(&env, "operator");
         let user = Address::generate(&env);
-        let past_ledger = 0u64;
 
+        // Duplicate grant with identical expiry should fail.
         client.grant_role(&admin, &user, &role, &None);
 
         let result = client.try_grant_role(&admin, &user, &role, &None);
@@ -742,6 +776,93 @@ mod tests {
         let result = client.try_grant_role(&unauthorized, &user, &role, &None);
         assert_eq!(result, Err(Ok(AccessError::Unauthorized)));
     }
+
+    #[test]
+    fn test_grant_role_already_has_role_duplicate_with_identical_expiry_fails() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let user = Address::generate(&env);
+
+        client.grant_role(&admin, &user, &role, &Some(100));
+
+        let result = client.try_grant_role(&admin, &user, &role, &Some(100));
+        assert_eq!(result, Err(Ok(AccessError::AlreadyHasRole)));
+    }
+
+    #[test]
+    fn test_grant_role_extends_expiry_if_role_exists() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let user = Address::generate(&env);
+
+        let now = env.ledger().timestamp();
+        client.grant_role(&admin, &user, &role, &Some(100));
+        assert_eq!(client.get_role_expiry(&role, &user), Some(now + 100));
+
+        // Extend expiry
+        client.grant_role(&admin, &user, &role, &Some(200));
+        assert_eq!(client.get_role_expiry(&role, &user), Some(now + 200));
+        assert!(client.has_role(&user, &role));
+    }
+
+    #[test]
+    fn test_grant_role_shortens_expiry_if_role_exists() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let user = Address::generate(&env);
+
+        let now = env.ledger().timestamp();
+        client.grant_role(&admin, &user, &role, &Some(200));
+        assert_eq!(client.get_role_expiry(&role, &user), Some(now + 200));
+
+        // Shorten expiry
+        client.grant_role(&admin, &user, &role, &Some(50));
+        assert_eq!(client.get_role_expiry(&role, &user), Some(now + 50));
+        assert!(client.has_role(&user, &role));
+
+        // After the shortened expiry, role should be considered expired
+        env.ledger().set_timestamp(now + 51);
+        assert!(!client.has_role(&user, &role));
+    }
+
+    #[test]
+    fn test_grant_role_after_expiry_succeeds() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let user = Address::generate(&env);
+
+        let now = env.ledger().timestamp();
+        client.grant_role(&admin, &user, &role, &Some(100));
+        env.ledger().set_timestamp(now + 101);
+        assert!(!client.has_role(&user, &role));
+
+        // Re-grant should succeed after expiry.
+        assert!(client
+            .try_grant_role(&admin, &user, &role, &Some(100))
+            .is_ok());
+        assert!(client.has_role(&user, &role));
+    }
+
+    #[test]
+    fn test_grant_role_none_expiry_over_existing_some_makes_permanent() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let user = Address::generate(&env);
+
+        client.grant_role(&admin, &user, &role, &Some(100));
+        assert!(client.has_role(&user, &role));
+        assert_ne!(client.get_role_expiry(&role, &user), Some(u64::MAX));
+
+        // Upgrade to permanent
+        client.grant_role(&admin, &user, &role, &None);
+        assert_eq!(client.get_role_expiry(&role, &user), Some(u64::MAX));
+
+        // Still active far in the future
+        let future = env.ledger().timestamp() + 10_000;
+        env.ledger().set_timestamp(future);
+        assert!(client.has_role(&user, &role));
+    }
+
     #[test]
     fn test_blacklisted_address_cannot_use_role() {
         let (env, admin, client) = setup();
