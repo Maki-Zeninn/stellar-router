@@ -15,15 +15,47 @@ use axum::{
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
-    Router,
+    Json, Router,
 };
 use clap::Parser;
 use std::net::SocketAddr;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{info, warn};
 use tracing::{info, info_span, warn, Instrument};
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{rate_limit::{RateLimitConfig, RateLimiter}, state::AppState};
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        crate::handlers::health,
+        crate::handlers::simulate,
+        crate::handlers::list_routes,
+        crate::handlers::get_route,
+    ),
+    components(schemas(
+        crate::types::HealthResponse,
+        crate::types::SimulateRequest,
+        crate::types::SimulateResponse,
+        crate::types::FeeEstimate,
+        crate::types::SimulationDetail,
+        crate::types::RouteDetails,
+        crate::types::RouteEntryResponse,
+        crate::types::RouteMetadataResponse,
+        crate::types::RouteListResponse,
+        crate::types::ErrorResponse,
+        crate::types::ErrorDetail,
+        crate::types::ErrorCode,
+    )),
+    tags(
+        (name = "health", description = "Health check"),
+        (name = "simulation", description = "Transaction simulation"),
+        (name = "routes", description = "Route discovery"),
+    )
+)]
+struct ApiDoc;
 
 #[derive(Parser, Debug)]
 #[command(name = "router-api-server")]
@@ -91,6 +123,8 @@ async fn main() -> Result<()> {
 
     let cors = build_cors_layer(&args.cors_origins);
 
+    let docs = SwaggerUi::new("/docs/{tail:.*}").url("/openapi.json", ApiDoc::openapi());
+
     let app = Router::new()
         .route("/health", get(handlers::health))
         .route(
@@ -100,6 +134,8 @@ async fn main() -> Result<()> {
         .route("/routes", get(handlers::list_routes))
         .route("/routes/:name", get(handlers::get_route))
         .route("/ws", get(websocket::ws_handler))
+        .route("/openapi.json", get(openapi_json))
+        .merge(docs)
         .layer(middleware::from_fn(request_id_middleware))
         .layer(cors)
         .layer(DefaultBodyLimit::max(1024 * 1024))
@@ -135,6 +171,10 @@ async fn main() -> Result<()> {
 /// All logs emitted while handling the request inherit the `request_id` field
 /// from the enclosing span, enabling correlation across log lines for a single
 /// request. The ID is also returned to the client in the `X-Request-Id` header.
+async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
+    Json(ApiDoc::openapi())
+}
+
 async fn request_id_middleware(req: Request<axum::body::Body>, next: Next) -> Response {
     let request_id = uuid::Uuid::new_v4().to_string();
     let method = req.method().clone();
