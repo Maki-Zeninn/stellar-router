@@ -23,6 +23,8 @@ pub enum DataKey {
     Admin,
     /// Route name -> fee in basis points (1 bps = 0.01%)
     RouteFee(String),
+    /// Route name -> tiered fee schedule for that route
+    RouteFeeTiers(String),
     /// Default fee if route-specific fee not set (in basis points)
     DefaultFee,
     ConfiguredRoutes,
@@ -59,6 +61,15 @@ pub struct QuoteResponse {
     /// Fee amount deducted (in input token units)
     pub fee_amount: i128,
     /// Fee in basis points used for this quote
+    pub fee_bps: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FeeTier {
+    /// Minimum amount required for this tier to apply.
+    pub min_amount: i128,
+    /// Fee in basis points for this tier.
     pub fee_bps: u32,
 }
 
@@ -124,8 +135,8 @@ impl RouterQuote {
 
     /// Set fee in basis points for a specific route.
     ///
-    /// Allows admin to configure per-route fees. If not set, the default fee
-    /// is used.
+    /// Allows admin to configure a flat per-route fee. If not set, the default
+    /// fee is used.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -152,12 +163,7 @@ impl RouterQuote {
             return Err(QuoteError::InvalidFeeBps);
         }
 
-        // Maintain route index — only append if not already tracked
-        let mut routes = Self::read_configured_routes(&env);
-        if !routes.contains(&route) {
-            routes.push_back(route.clone());
-            Self::write_configured_routes(&env, &routes);
-        }
+        Self::track_configured_route(&env, &route);
 
         env.storage()
             .instance()
@@ -165,6 +171,45 @@ impl RouterQuote {
 
         env.events()
             .publish((Symbol::new(&env, router_common::EVENT_ROUTE_FEE_SET),), (route, fee_bps));
+
+        Ok(())
+    }
+
+    /// Set tiered fees for a specific route.
+    ///
+    /// The tiers are sorted by `min_amount` ascending and are used to select
+    /// the highest matching tier for a quote. When no tier matches, the flat
+    /// route fee (if any) or the default fee is used.
+    pub fn set_route_fee_tiers(
+        env: Env,
+        caller: Address,
+        route: String,
+        tiers: Vec<FeeTier>,
+    ) -> Result<(), QuoteError> {
+        caller.require_auth();
+        Self::require_admin(&env, &caller)?;
+
+        let mut sorted_tiers = Vec::new(&env);
+        for tier in tiers.iter() {
+            if tier.fee_bps > 10000 {
+                return Err(QuoteError::InvalidFeeBps);
+            }
+
+            let mut position = sorted_tiers.len();
+            for index in 0..sorted_tiers.len() {
+                let current = sorted_tiers.get(index).unwrap();
+                if tier.min_amount < current.min_amount {
+                    position = index;
+                    break;
+                }
+            }
+            sorted_tiers.insert(position, tier.clone());
+        }
+
+        Self::track_configured_route(&env, &route);
+        env.storage()
+            .instance()
+            .set(&DataKey::RouteFeeTiers(route.clone()), &sorted_tiers);
 
         Ok(())
     }
@@ -192,6 +237,14 @@ impl RouterQuote {
             Some(fee) => Ok(fee),
             None => Self::get_default_fee(env),
         }
+    }
+
+    /// Get the configured fee tiers for a route.
+    pub fn get_route_fee_tiers(env: Env, route: String) -> Vec<FeeTier> {
+        env.storage()
+            .instance()
+            .get(&DataKey::RouteFeeTiers(route))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Get all configured router fee.
@@ -235,7 +288,11 @@ impl RouterQuote {
             return Err(QuoteError::InvalidAmount);
         }
 
-        let fee_bps = Self::get_route_fee(env.clone(), request.route.clone())?;
+        let fee_bps = Self::resolve_route_fee_bps(
+            env.clone(),
+            request.route.clone(),
+            request.amount_in,
+        )?;
 
         // Calculate fee: fee_amount = amount_in * fee_bps / 10000
         let fee_amount = request
@@ -502,6 +559,31 @@ impl RouterQuote {
             .instance()
             .set(&DataKey::ConfiguredRoutes, routes);
     }
+
+    fn track_configured_route(env: &Env, route: &String) {
+        let mut routes = Self::read_configured_routes(env);
+        if !routes.contains(route) {
+            routes.push_back(route.clone());
+            Self::write_configured_routes(env, &routes);
+        }
+    }
+
+    fn resolve_route_fee_bps(env: Env, route: String, amount_in: i128) -> Result<u32, QuoteError> {
+        let tiers = Self::get_route_fee_tiers(env.clone(), route.clone());
+        if !tiers.is_empty() {
+            let mut matching_fee = None;
+            for tier in tiers.iter() {
+                if amount_in >= tier.min_amount {
+                    matching_fee = Some(tier.fee_bps);
+                }
+            }
+            if let Some(fee) = matching_fee {
+                return Ok(fee);
+            }
+        }
+
+        Self::get_route_fee(env, route)
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -650,6 +732,58 @@ mod tests {
         assert_eq!(response.fee_bps, 30); // 0.3%
         assert_eq!(response.fee_amount, 30); // 10000 * 30 / 10000 = 30
         assert_eq!(response.amount_out, 9970); // 10000 - 30 = 9970
+    }
+
+    #[test]
+    fn test_get_quote_uses_highest_matching_fee_tier() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+        let tiers = vec![
+            &env,
+            FeeTier {
+                min_amount: 0,
+                fee_bps: 50,
+            },
+            FeeTier {
+                min_amount: 10000,
+                fee_bps: 30,
+            },
+            FeeTier {
+                min_amount: 100000,
+                fee_bps: 10,
+            },
+        ];
+        client.set_route_fee_tiers(&admin, &route, &tiers);
+
+        let token_in = Address::generate(&env);
+        let token_out = Address::generate(&env);
+
+        let small_request = QuoteRequest {
+            route: route.clone(),
+            token_in: token_in.clone(),
+            token_out: token_out.clone(),
+            amount_in: 1000,
+        };
+        let medium_request = QuoteRequest {
+            route: route.clone(),
+            token_in: token_in.clone(),
+            token_out: token_out.clone(),
+            amount_in: 20000,
+        };
+        let large_request = QuoteRequest {
+            route: route.clone(),
+            token_in,
+            token_out,
+            amount_in: 200000,
+        };
+
+        let small_response = client.get_quote(&small_request);
+        let medium_response = client.get_quote(&medium_request);
+        let large_response = client.get_quote(&large_request);
+
+        assert_eq!(small_response.fee_bps, 50);
+        assert_eq!(medium_response.fee_bps, 30);
+        assert_eq!(large_response.fee_bps, 10);
     }
 
     #[test]
