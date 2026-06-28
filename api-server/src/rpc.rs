@@ -73,12 +73,28 @@ pub struct FeeBreakdown {
 
 impl SorobanRpcClient {
     pub fn new(rpc_url: impl Into<String>, router_core_contract_id: Option<String>) -> Self {
+        Self::with_timeout(rpc_url, router_core_contract_id, 10)
+    }
+
+    pub fn with_timeout(
+        rpc_url: impl Into<String>,
+        router_core_contract_id: Option<String>,
+        rpc_timeout_secs: u64,
+    ) -> Self {
+        let rpc_timeout = std::time::Duration::from_secs(rpc_timeout_secs);
+        let connect_timeout = std::time::Duration::from_secs(5);
+
         Self {
             rpc_url: rpc_url.into(),
             router_core_contract_id,
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .connect_timeout(connect_timeout)
+                .timeout(rpc_timeout)
+                .build()
+                .expect("failed to build HTTP client"),
         }
     }
+
 
     /// Ping the RPC node via `getLatestLedger`. Returns `Ok(())` if reachable.
     pub async fn health_check(&self) -> Result<()> {

@@ -20,8 +20,10 @@ use axum::{
 use clap::Parser;
 use std::net::SocketAddr;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use tracing::{info, warn};
 use tracing::{info, info_span, warn, Instrument};
+use axum::http::HeaderValue;
+
+
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -92,7 +94,16 @@ struct Args {
     /// Seconds to wait for in-flight requests to complete on shutdown (default: 30)
     #[arg(long, env = "SHUTDOWN_TIMEOUT_SECS", default_value = "30")]
     shutdown_timeout_secs: u64,
+
+    // Soroban RPC request timeout in seconds.
+    // Used by SorobanRpcClient::new via its default (10s) currently.
+    // TODO: wire through once AppState::new accepts rpc timeout.
+    #[arg(long, env = "RPC_TIMEOUT_SECS", default_value = "10")]
+    rpc_timeout_secs: u64,
 }
+
+
+
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -120,6 +131,8 @@ async fn main() -> Result<()> {
         args.router_core_contract_id,
         rate_limiter,
     );
+
+
 
     let cors = build_cors_layer(&args.cors_origins);
 
