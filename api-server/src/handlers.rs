@@ -6,25 +6,54 @@ use axum::{
 };
 use serde_json::json;
 use tracing::{error, info};
+use utoipa::ToSchema;
 
 use crate::{
     state::AppState,
     types::{
-        ErrorCode, ErrorResponse, FeeEstimate, SimulateRequest, SimulateResponse, SimulationDetail,
+        ErrorCode, ErrorResponse, FeeEstimate, HealthResponse, RouteListResponse, RouteEntryResponse,
+        SimulateRequest, SimulateResponse, SimulationDetail,
     },
 };
 
+#[utoipa::path(
+    get,
+    path = "/health",
+    responses(
+        (status = 200, description = "Service is healthy", body = HealthResponse),
+        (status = 503, description = "RPC is unavailable", body = HealthResponse),
+    )
+)]
 /// GET /health
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     match state.rpc.health_check().await {
-        Ok(()) => (StatusCode::OK, Json(json!({"status": "ok", "rpc": "up"}))),
+        Ok(()) => (
+            StatusCode::OK,
+            Json(HealthResponse {
+                status: "ok".to_string(),
+                rpc: "up".to_string(),
+            }),
+        ),
         Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"status": "degraded", "rpc": "down"})),
+            Json(HealthResponse {
+                status: "degraded".to_string(),
+                rpc: "down".to_string(),
+            }),
         ),
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/simulate",
+    request_body = SimulateRequest,
+    responses(
+        (status = 200, description = "Simulation completed", body = SimulateResponse),
+        (status = 400, description = "Validation failed", body = ErrorResponse),
+        (status = 500, description = "RPC or simulation error", body = ErrorResponse),
+    )
+)]
 /// POST /simulate
 ///
 /// Calls the Soroban RPC `simulateTransaction` endpoint to get real fee
@@ -91,6 +120,16 @@ pub async fn simulate(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/routes/{name}",
+    params(("name" = String, Path, description = "Route name")),
+    responses(
+        (status = 200, description = "Route entry returned", body = RouteEntryResponse),
+        (status = 404, description = "Route not found", body = ErrorResponse),
+        (status = 500, description = "RPC error", body = ErrorResponse),
+    )
+)]
 /// GET /routes/:name
 ///
 /// Calls router-core::get_route(name) via the Soroban RPC and returns the
@@ -120,13 +159,22 @@ pub async fn get_route(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/routes",
+    responses(
+        (status = 200, description = "List of routes", body = RouteListResponse),
+        (status = 503, description = "Router core contract not configured", body = ErrorResponse),
+        (status = 500, description = "RPC error", body = ErrorResponse),
+    )
+)]
 /// GET /routes
 ///
 /// Calls `get_all_routes` on the router-core contract via Soroban RPC and
 /// returns the list of registered route names as JSON.
 pub async fn list_routes(
     State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<RouteListResponse>, (StatusCode, Json<ErrorResponse>)> {
     if state.router_core_contract_id.is_empty() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -150,5 +198,5 @@ pub async fn list_routes(
         })?;
 
     info!("Returning {} routes", routes.len());
-    Ok(Json(json!({ "routes": routes })))
+    Ok(Json(RouteListResponse { routes }))
 }

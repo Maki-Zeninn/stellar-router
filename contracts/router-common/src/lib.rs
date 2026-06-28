@@ -82,6 +82,9 @@ pub const EVENT_ALIAS_ADDED: &str = "alias_added";
 /// Standard event topic for alias removals
 pub const EVENT_ALIAS_REMOVED: &str = "alias_removed";
 
+/// Standard event topic for alias resolution (emitted when resolve goes through an alias)
+pub const EVENT_ALIAS_RESOLVED: &str = "alias_resolved";
+
 /// Standard event topic for route removals
 pub const EVENT_ROUTE_REMOVED: &str = "route_removed";
 

@@ -91,13 +91,10 @@ impl NonceCache {
             return false;
         }
 
-        // Check cache size limit
+        // If still at capacity after TTL cleanup, evict the oldest entry to
+        // bound memory use rather than rejecting a legitimate nonce.
         if self.cache.len() >= self.config.cache_size {
-            warn!(
-                "Nonce cache at capacity ({}), rejecting new nonce",
-                self.config.cache_size
-            );
-            return false;
+            self.evict_oldest();
         }
 
         // Add nonce to cache
@@ -113,6 +110,18 @@ impl NonceCache {
     fn cleanup_expired(&self, now: u64) {
         let ttl = self.config.nonce_ttl_secs;
         self.cache.retain(|_, entry| now - entry.timestamp < ttl);
+    }
+
+    /// Evict the single oldest nonce to make room for a new entry.
+    fn evict_oldest(&self) {
+        if let Some(oldest_key) = self
+            .cache
+            .iter()
+            .min_by_key(|entry| entry.value().timestamp)
+            .map(|entry| entry.key().clone())
+        {
+            self.cache.remove(&oldest_key);
+        }
     }
 }
 

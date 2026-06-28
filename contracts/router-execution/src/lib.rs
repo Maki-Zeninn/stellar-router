@@ -1095,11 +1095,111 @@ mod tests {
         assert_eq!(RouterExecution::compute_backoff_ms(250, 100, 5), 250);
     }
 
+    // ── Backoff delay calculation: base/multiplier fixed-point math ─────────
+
+    #[test]
+    fn test_backoff_delay_base_100_multiplier_200_attempts_1_to_5() {
+        // base=100ms, multiplier=200 (2x fixed-point *100)
+        // compute_backoff_ms(base, multiplier, attempt_index)
+        // execute() uses attempt_index = attempts - 1.
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 0), 100); // attempt=1
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 1), 200); // attempt=2
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 2), 400); // attempt=3
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 3), 800); // attempt=4
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 4), 1600); // attempt=5
+    }
+
+    #[test]
+    fn test_backoff_delay_exponential_growth_attempt_index_0_to_4() {
+        // Explicitly verify growth for attempt indices 0..4.
+        // delay = base * (multiplier/100)^attempt_index
+        let base = 100u64;
+        let mult = 200u32; // 2x
+        let expected = [100u64, 200u64, 400u64, 800u64, 1600u64];
+        for (attempt_index, &exp) in expected.iter().enumerate() {
+            assert_eq!(RouterExecution::compute_backoff_ms(base, mult, attempt_index as u32), exp);
+        }
+    }
+
+    #[test]
+    fn test_backoff_delay_min_multiplier_boundary_constant_delay() {
+        // Minimum allowed multiplier: 100 => constant delay, no growth.
+        let base = 123u64;
+        let mult = 100u32;
+        for attempt_index in 0u32..=10u32 {
+            assert_eq!(RouterExecution::compute_backoff_ms(base, mult, attempt_index), base);
+        }
+    }
+
+    #[test]
+    fn test_backoff_delay_zero_base_is_zero_for_any_attempt() {
+        let mult = 300u32;
+        for attempt_index in 0u32..=10u32 {
+            assert_eq!(RouterExecution::compute_backoff_ms(0, mult, attempt_index), 0);
+        }
+    }
+
+    #[test]
+    fn test_backoff_delay_large_multiplier_saturates_safely_and_is_monotonic() {
+        // Large multiplier must not overflow due to saturating_mul.
+        // We can’t easily assert exact values far out without knowing the saturation point,
+        // but we can assert monotonic non-decreasing behavior.
+        let base = 100u64;
+        let mult = 300u32;
+
+        let mut prev = RouterExecution::compute_backoff_ms(base, mult, 0);
+        for attempt_index in 1u32..=20u32 {
+            let next = RouterExecution::compute_backoff_ms(base, mult, attempt_index);
+            assert!(next >= prev, "backoff should be monotonic: {} -> {}", prev, next);
+            prev = next;
+        }
+    }
+
+    // ── Backoff retry exhaustion behavior (max retries) ────────────────────────
+
+    #[test]
+    fn test_execute_reaches_max_retries_exhaustion() {
+        // This contract's execute() retries on any Err(_) from try_invoke_contract.
+        // In the test environment, calling an unregistered contract/function should
+        // cause try_invoke_contract to Err consistently, so execute() should exhaust.
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &2, &100, &200).unwrap();
+
+        let caller = Address::generate(&env);
+        env.as_contract(&client.address, || {
+            // Build a request with max_retries=1, but global max_retries=2.
+            // effective_retries = min(1, 2) = 1.
+            // That means: attempts 1 (initial) and attempt 2 (retry) are allowed,
+            // and failure after attempt 2 returns ContractRejected.
+
+            let target = Address::generate(&env);
+            let function = Symbol::new(&env, "transfer");
+
+            // execute() is called as a contract call to bypass caller.require_auth
+            // signature complexity in tests; env.mock_all_auths() makes auth pass.
+            let request = ExecutionRequest {
+                target,
+                function,
+                simulate_first: false,
+                max_retries: 1,
+            };
+
+            let result = RouterExecution::execute(env.clone(), caller.clone(), request);
+            assert_eq!(result, Err(ExecutionError::ContractRejected));
+        });
+    }
+
     // ── Issue #633: backoff_multiplier upper bound validation ────────────────
 
     #[test]
     fn test_initialize_invalid_multiplier_too_high_fails() {
         let env = Env::default();
+
         env.mock_all_auths();
         let contract_id = env.register_contract(None, RouterExecution);
         let client = RouterExecutionClient::new(&env, &contract_id);
