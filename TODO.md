@@ -1,10 +1,4 @@
-# TODO
-
-- [ ] Update `contracts/router-access/src/lib.rs` storage: add `DataKey::RoleMemberCount(String)`.
-- [ ] Add view function `get_role_member_count(role: String) -> u32`.
-- [ ] Maintain counter in `grant_role_internal`.
-- [ ] Maintain counter in `revoke_role`.
-- [ ] Maintain counter in `expire_role`.
-- [ ] Add/extend unit tests for member count behavior.
-- [ ] Run `cargo test` to verify compilation + passing tests.
-
+- [x] Explore router-multicall contract code and existing tests (read contracts/router-multicall/src/lib.rs)
+- [x] Add/adjust tests to verify stored batch results behavior via get_batch_result/get_batch_results
+- [x] Fix compilation issues in tests due to Soroban client return types (Option/Vec handling)
+- [x] Run `cargo test -p router-multicall` and ensure tests pass

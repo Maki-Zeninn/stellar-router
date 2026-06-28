@@ -17,10 +17,10 @@
 //! - `max_batch_size_updated` — Max batch size updated (old_size, new_size)
 //! - `admin_transferred` — Admin transferred (old_admin, new_admin)
 
+use router_common;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, Symbol, Val, Vec,
 };
-use router_common;
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -314,7 +314,10 @@ impl RouterMulticall {
             .instance()
             .set(&DataKey::MaxBatchSize, &max_batch_size);
         env.events().publish(
-            (Symbol::new(&env, router_common::EVENT_MAX_BATCH_SIZE_UPDATED),),
+            (Symbol::new(
+                &env,
+                router_common::EVENT_MAX_BATCH_SIZE_UPDATED,
+            ),),
             (old_max, max_batch_size),
         );
         Ok(())
@@ -456,8 +459,9 @@ impl RouterMulticall {
             match env
                 .storage()
                 .instance()
-                .get::<DataKey, router_common::CallResult>(&DataKey::BatchResult(batch_id, call_index))
-            {
+                .get::<DataKey, router_common::CallResult>(&DataKey::BatchResult(
+                    batch_id, call_index,
+                )) {
                 Some(result) => {
                     results.push_back(result);
                     call_index += 1;
@@ -818,10 +822,9 @@ mod tests {
         assert_eq!(summary.successes.len(), 1);
 
         let result = client.get_batch_result(&0u64, &0u32);
-        assert!(result.is_ok());
         let call_result = result.unwrap();
-        assert!(call_result.is_some());
-        let cr = call_result.unwrap();
+        let cr = call_result;
+
         assert_eq!(cr.target, mock_id);
         assert_eq!(cr.function, Symbol::new(&env, "success"));
         assert!(cr.success);
@@ -848,8 +851,7 @@ mod tests {
 
         // Attempt to retrieve — should return None
         let result = client.get_batch_result(&0u64, &0u32);
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
+        assert_eq!(result.is_none(), true);
     }
 
     #[test]
@@ -872,8 +874,7 @@ mod tests {
 
         // Try to get an index that doesn't exist
         let result = client.get_batch_result(&0u64, &5u32);
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
+        assert_eq!(result.is_none(), true);
     }
 
     #[test]
@@ -913,8 +914,7 @@ mod tests {
         assert_eq!(summary.failures.len(), 1);
 
         let results = client.get_batch_results(&0u64);
-        assert!(results.is_ok());
-        let results_vec = results.unwrap();
+        let results_vec = results;
         assert_eq!(results_vec.len(), 3);
 
         // Verify call 0
@@ -953,8 +953,7 @@ mod tests {
 
         // Retrieve results — should be empty
         let results = client.get_batch_results(&0u64);
-        assert!(results.is_ok());
-        assert_eq!(results.unwrap().len(), 0);
+        assert_eq!(results.len(), 0);
     }
 
     #[test]
@@ -963,8 +962,7 @@ mod tests {
 
         // Try to get results for a batch that was never executed
         let results = client.get_batch_results(&99u64);
-        assert!(results.is_ok());
-        assert_eq!(results.unwrap().len(), 0);
+        assert_eq!(results.len(), 0);
     }
 
     #[test]
