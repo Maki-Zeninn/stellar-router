@@ -158,7 +158,7 @@ pub enum RouterError {
     RouteInUse = 11,
     InvalidAddress = 12,
     RouteExpired = 13,
-    InvalidScore = 10,
+    InvalidScore = 14,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -1505,26 +1505,23 @@ impl RouterCore {
     /// * [`RouterError::RouteNotFound`] — if the route does not exist.
     /// * [`RouterError::NotInitialized`] — if the contract is not initialized.
     pub fn set_route_score(
-    env: Env,
-    caller: Address,
-    name: String,
-    score: RouteScore,
-) -> Result<(), RouterError> {
-    caller.require_auth();
-    router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
+        env: Env,
+        caller: Address,
+        name: String,
+        score: RouteScore,
+    ) -> Result<(), RouterError> {
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
 
-    if !env.storage().instance().has(&DataKey::Route(name.clone())) {
-        return Err(RouterError::RouteNotFound);
-    }
+        if !env.storage().instance().has(&DataKey::Route(name.clone())) {
+            return Err(RouterError::RouteNotFound);
+        }
 
-    // Scores are expected to be normalized in the range 0..=100.
-    if score.liquidity_score > 100 || score.reliability_score > 100 {
-        return Err(RouterError::InvalidScore);
-    }
+        if score.liquidity_score > 100 || score.reliability_score > 100 {
+            return Err(RouterError::InvalidScore);
+        }
 
-    env.storage()
-        .instance()
-        .set(&DataKey::Score(name.clone()), &score);
+        env.storage().instance().set(&DataKey::Score(name.clone()), &score);
         env.events().publish(
             (Symbol::new(&env, router_common::EVENT_ROUTE_SCORED),),
             (
@@ -1535,12 +1532,15 @@ impl RouterCore {
             ),
         );
 
-        // Scoring can change which route is best; refresh the cache.
         Self::recompute_best_route(&env);
 
         Ok(())
     }
+
     /// Set scores for multiple routes in a single transaction.
+    ///
+    /// Validates every route and score before applying anything, then updates
+    /// each score and recomputes the cached best route once.
     pub fn set_route_scores_batch(
         env: Env,
         caller: Address,
@@ -1549,25 +1549,23 @@ impl RouterCore {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
 
-        // Validate every route first.
         for item in scores.iter() {
-            if !env
-                .storage()
-                .instance()
-                .has(&DataKey::Route(item.name.clone()))
-            {
+            if !env.storage().instance().has(&DataKey::Route(item.name.clone())) {
                 return Err(RouterError::RouteNotFound);
+            }
+
+            if item.score.liquidity_score > 100 || item.score.reliability_score > 100 {
+                return Err(RouterError::InvalidScore);
             }
         }
 
-        // Apply every score.
         for item in scores.iter() {
             env.storage()
                 .instance()
                 .set(&DataKey::Score(item.name.clone()), &item.score);
 
             env.events().publish(
-                (Symbol::new(&env, "route_scored"),),
+                (Symbol::new(&env, router_common::EVENT_ROUTE_SCORED),),
                 (
                     item.name.clone(),
                     item.score.liquidity_score,
@@ -1576,27 +1574,12 @@ impl RouterCore {
                 ),
             );
         }
-    env.events().publish(
-        (Symbol::new(&env, "route_scored"),),
-        (
-            name,
-            score.liquidity_score,
-            score.fee_bps,
-            score.reliability_score,
-        ),
-    );
 
-    // Scoring can change which route is best; refresh the cache.
-    scoring::recompute_best_route(&env);
-
-    Ok(())
-}
-
-        // Refresh the cached best route once.
         Self::recompute_best_route(&env);
 
         Ok(())
     }
+
     /// Get the score for a route.
     ///
     /// Returns `None` if no score has been set for the route.
@@ -1995,6 +1978,10 @@ impl RouterCore {
             RouterError::RouteAlreadyExists => "RouteAlreadyExists",
             RouterError::InvalidRouteName => "InvalidRouteName",
             RouterError::InvalidMetadata => "InvalidMetadata",
+            RouterError::CircularDependency => "CircularDependency",
+            RouterError::RouteInUse => "RouteInUse",
+            RouterError::InvalidAddress => "InvalidAddress",
+            RouterError::RouteExpired => "RouteExpired",
             RouterError::InvalidScore => "InvalidScore",
         }
     }
@@ -2129,6 +2116,7 @@ impl RouterCore {
 mod tests {
     extern crate std;
     use super::*;
+    use alloc::format;
     use soroban_sdk::{
         testutils::{Address as _, Events, Ledger},
         vec, Env, IntoVal, String,
@@ -2173,14 +2161,79 @@ mod tests {
     }
 
     #[test]
-    fn test_set_route_score_rejects_liquidity_above_100()
+    fn test_set_route_score_rejects_liquidity_above_100() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        let result = client.try_set_route_score(
+            &admin,
+            &name,
+            &RouteScore {
+                liquidity_score: 101,
+                fee_bps: 10,
+                reliability_score: 90,
+            },
+        );
+
+        assert_eq!(result, Err(Ok(RouterError::InvalidScore)));
+    }
 
     #[test]
-    fn test_set_route_score_rejects_reliability_above_100()
-    
+    fn test_set_route_score_rejects_reliability_above_100() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        let result = client.try_set_route_score(
+            &admin,
+            &name,
+            &RouteScore {
+                liquidity_score: 80,
+                fee_bps: 10,
+                reliability_score: 101,
+            },
+        );
+
+        assert_eq!(result, Err(Ok(RouterError::InvalidScore)));
+    }
+
     #[test]
-    fn test_best_route_score_calculation_still_works()
-    
+    fn test_best_route_score_calculation_still_works() {
+        let (env, admin, client) = setup();
+        let route_a = String::from_str(&env, "route-a");
+        let route_b = String::from_str(&env, "route-b");
+        let addr_a = Address::generate(&env);
+        let addr_b = Address::generate(&env);
+
+        client.register_route(&admin, &route_a, &addr_a, &None);
+        client.register_route(&admin, &route_b, &addr_b, &None);
+        client.set_route_score(
+            &admin,
+            &route_a,
+            &RouteScore {
+                liquidity_score: 80,
+                fee_bps: 10,
+                reliability_score: 90,
+            },
+        );
+        client.set_route_score(
+            &admin,
+            &route_b,
+            &RouteScore {
+                liquidity_score: 90,
+                fee_bps: 20,
+                reliability_score: 70,
+            },
+        );
+
+        let candidates = vec![&env, route_a.clone(), route_b.clone()];
+        let best = client.get_best_route(&candidates, &0, &None);
+        assert_eq!(best, Some(route_a));
+    }
+
     #[test]
     fn test_update_route() {
         let (env, admin, client) = setup();
@@ -3880,6 +3933,9 @@ mod tests {
         assert_eq!(
             client.try_resolve(&price_feed),
             Err(Ok(RouterError::RouteNotFound))
+        );
+    }
+
     #[test]
     fn test_route_count() {
         let (env, admin, client) = setup();
@@ -4064,6 +4120,9 @@ mod tests {
         assert!(client.get_alias_target(&alias2).is_none());
         // Route itself is gone
         assert!(client.get_route(&oracle).is_none());
+    }
+
+    #[test]
     fn test_batch_resolve_paused_route_returns_err() {
         let (env, admin, client) = setup();
         let oracle = String::from_str(&env, "oracle");
