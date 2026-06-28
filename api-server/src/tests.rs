@@ -1,6 +1,7 @@
 use axum::{
     body::Body,
     http::{Request, StatusCode},
+    middleware,
     routing::{get, post},
     Router,
 };
@@ -9,6 +10,7 @@ use tower::util::ServiceExt;
 
 use crate::{
     handlers,
+    rate_limit::{RateLimitConfig, RateLimiter},
     state::AppState,
     types::{
         RouteDetails, SimulateRequest, SimulateResponse, TransactionStatus, TransactionStatusEvent,
@@ -19,15 +21,20 @@ use crate::{
 const VALID_CONTRACT_ID: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
 
 fn test_app() -> Router {
+    let rate_limiter = RateLimiter::new(RateLimitConfig::default());
     let state = AppState::new(
         "http://localhost:1".to_string(),
         "".to_string(),
         "".to_string(),
+        rate_limiter,
     );
 
     Router::new()
+        .route(
+            "/simulate",
+            post(handlers::simulate).layer(middleware::from_fn(crate::rate_limit::rate_limit_middleware)),
+        )
         .route("/health", get(handlers::health))
-        .route("/simulate", post(handlers::simulate))
         .route("/routes/:name", get(handlers::get_route))
         .with_state(state)
 }
@@ -114,6 +121,44 @@ async fn test_simulate_response_has_fee_fields() {
     assert!(parsed.estimated_fees.total_fee >= parsed.estimated_fees.base_fee);
     assert_eq!(parsed.simulation.target, VALID_CONTRACT_ID);
     assert_eq!(parsed.simulation.function, "transfer");
+}
+
+#[tokio::test]
+async fn test_simulate_rate_limit_headers_and_rejects_after_limit() {
+    let app = test_app();
+    let body = json!({ "target": VALID_CONTRACT_ID, "function": "transfer" });
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/simulate")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    };
+
+    for _ in 0..100 {
+        let resp = app
+            .clone()
+            .oneshot(request())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["x-rate-limit-limit"], "100");
+    }
+
+    let resp = app
+        .clone()
+        .oneshot(request())
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(resp.headers().get("retry-after").is_some());
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["error"].as_str().unwrap(), "rate_limit_exceeded");
 }
 
 #[tokio::test]
@@ -388,10 +433,12 @@ fn test_error_code_serialization() {
 
 /// Helper: create an AppState with a real broadcast channel for WebSocket tests.
 fn ws_app_state() -> AppState {
+    let rate_limiter = RateLimiter::new(RateLimitConfig::default());
     AppState::new(
         "http://localhost:1".to_string(),
         "".to_string(),
         "".to_string(),
+        rate_limiter,
     )
 }
 

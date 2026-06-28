@@ -1,4 +1,5 @@
 mod handlers;
+mod rate_limit;
 mod rpc;
 mod state;
 mod types;
@@ -10,7 +11,7 @@ mod tests;
 use anyhow::{Context, Result};
 use axum::{
     extract::DefaultBodyLimit,
-    http::{header, HeaderValue, Method, Request},
+    http::{header, Method, Request},
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
@@ -22,7 +23,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{info, warn};
 use tracing::{info, info_span, warn, Instrument};
 
-use crate::state::AppState;
+use crate::{rate_limit::{RateLimitConfig, RateLimiter}, state::AppState};
 
 #[derive(Parser, Debug)]
 #[command(name = "router-api-server")]
@@ -50,6 +51,12 @@ struct Args {
     /// Omit to disable cross-origin requests (production default).
     #[arg(long, env = "CORS_ORIGINS", value_delimiter = ',')]
     cors_origins: Vec<String>,
+    /// Maximum number of /simulate requests allowed per window.
+    #[arg(long, env = "RATE_LIMIT_MAX_REQUESTS", default_value = "100")]
+    rate_limit_max_requests: u32,
+    /// Sliding window for rate limiting in seconds.
+    #[arg(long, env = "RATE_LIMIT_WINDOW_SECS", default_value = "60")]
+    rate_limit_window_secs: u64,
     /// Seconds to wait for in-flight requests to complete on shutdown (default: 30)
     #[arg(long, env = "SHUTDOWN_TIMEOUT_SECS", default_value = "30")]
     shutdown_timeout_secs: u64,
@@ -70,17 +77,26 @@ async fn main() -> Result<()> {
     info!("Listen address: {}", args.listen);
     info!("RPC URL: {}", args.rpc_url);
 
+    let rate_limiter = RateLimiter::new(RateLimitConfig {
+        max_requests: args.rate_limit_max_requests,
+        window: std::time::Duration::from_secs(args.rate_limit_window_secs),
+    });
+
     let state = AppState::new(
         args.rpc_url,
         args.execution_contract_id,
         args.router_core_contract_id,
+        rate_limiter,
     );
 
     let cors = build_cors_layer(&args.cors_origins);
 
     let app = Router::new()
         .route("/health", get(handlers::health))
-        .route("/simulate", post(handlers::simulate))
+        .route(
+            "/simulate",
+            post(handlers::simulate).layer(middleware::from_fn(rate_limit::rate_limit_middleware)),
+        )
         .route("/routes", get(handlers::list_routes))
         .route("/routes/:name", get(handlers::get_route))
         .route("/ws", get(websocket::ws_handler))
