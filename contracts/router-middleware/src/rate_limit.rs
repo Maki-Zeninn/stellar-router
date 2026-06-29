@@ -45,7 +45,7 @@ pub fn check_and_increment(
         state.window_start
     };
 
-    if calls >= config.max_calls_per_window {
+    if calls >= config.max_calls_per_window + config.burst_allowance {
         // Record violation without incrementing the call count
         let mut violation_state = state.clone();
         violation_state.total_violations = violation_state.total_violations.saturating_add(1);
