@@ -11,7 +11,7 @@ mod tests;
 use anyhow::{Context, Result};
 use axum::{
     extract::DefaultBodyLimit,
-    http::{header, Method, Request},
+    http::{header, HeaderValue, Method, Request},
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
@@ -20,7 +20,6 @@ use axum::{
 use clap::Parser;
 use std::net::SocketAddr;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use tracing::{info, warn};
 use tracing::{info, info_span, warn, Instrument};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -202,7 +201,7 @@ async fn request_id_middleware(req: Request<axum::body::Body>, next: Next) -> Re
     .await
 }
 
-fn build_cors_layer(origins: &[String]) -> CorsLayer {
+pub(crate) fn build_cors_layer(origins: &[String]) -> CorsLayer {
     let allow_methods = [Method::GET, Method::POST, Method::OPTIONS];
     let allow_headers = [header::CONTENT_TYPE, header::AUTHORIZATION];
 
@@ -213,8 +212,14 @@ fn build_cors_layer(origins: &[String]) -> CorsLayer {
     let allow_origin = if origins.iter().any(|o| o == "*") {
         AllowOrigin::any()
     } else {
-        let parsed: Vec<_> = origins.iter().filter_map(|o| o.parse().ok()).collect();
-        AllowOrigin::list(parsed)
+        let mut allowed = Vec::new();
+        for origin in origins {
+            match origin.parse::<HeaderValue>() {
+                Ok(v) => allowed.push(v),
+                Err(e) => warn!("Ignoring invalid CORS origin '{}': {}", origin, e),
+            }
+        }
+        AllowOrigin::list(allowed)
     };
 
     CorsLayer::new()
