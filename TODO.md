@@ -1,3 +1,7 @@
+- [x] Explore router-multicall contract code and existing tests (read contracts/router-multicall/src/lib.rs)
+- [x] Add/adjust tests to verify stored batch results behavior via get_batch_result/get_batch_results
+- [x] Fix compilation issues in tests due to Soroban client return types (Option/Vec handling)
+- [x] Run `cargo test -p router-multicall` and ensure tests pass
 # TODO
 
 - [ ] Inspect router-access role/expiry logic and existing tests for `grant_role`.
