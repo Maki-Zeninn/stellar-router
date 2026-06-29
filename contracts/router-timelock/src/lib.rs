@@ -20,8 +20,6 @@ use soroban_sdk::{
 };
 use router_common;
 
-// ── Storage Keys ──────────────────────────────────────────────────────────────
-
 #[contracttype]
 pub enum DataKey {
     Admin,
