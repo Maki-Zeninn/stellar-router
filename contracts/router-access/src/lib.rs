@@ -38,7 +38,9 @@ pub enum AccessError {
     RoleNotFound = 5,
     Blacklisted = 6,
     CannotBlacklistAdmin = 7,
+    DestinationAlreadyHasRole = 8,
 }
+
 
 // ── Contract ──────────────────────────────────────────────────────────────────
 
@@ -354,11 +356,164 @@ impl RouterAccess {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
+    /// Transfer an existing role grant from one address to another.
+    ///
+    /// Semantics (per task): transfers only if `from` currently has the role
+    /// *active* (i.e. not expired). Expired grants on `from` are rejected.
+    ///
+    /// The destination `to` receives the same expiry timestamp as `from`.
+    pub fn transfer_role_membership(
+        env: Env,
+        caller: Address,
+        role: String,
+        from: Address,
+        to: Address,
+    ) -> Result<(), AccessError> {
+        caller.require_auth();
+        Self::require_role_manager(&env, &caller, &role)?;
+
+        if from == to {
+        // No-op but still validate that `from` currently has the role active.
+        if !Self::has_role_internal(&env, &from, &role) {
+            return Err(AccessError::RoleNotFound);
+        }
+        if from == to {
+            return Ok(());
+        }
+
+        // Must be active on `from`.
+        if !Self::has_role_internal(&env, &from, &role) {
+            return Err(AccessError::RoleNotFound);
+        }
+
+
+        // Do not overwrite an existing active assignment on destination.
+        if Self::has_role_internal(&env, &to, &role) {
+            return Err(AccessError::DestinationAlreadyHasRole);
+        }
+
+        // Read expiry timestamp from storage. Since from is active, this should exist.
+        let expiry = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::RoleExpiry(role.clone(), from.clone()))
+            .ok_or(AccessError::RoleNotFound)?;
+
+        // Remove grant from source (including member counters/lists).
+        let from_key = DataKey::HasRole(role.clone(), from.clone());
+        if !env.storage().instance().has(&from_key) {
+            return Err(AccessError::RoleNotFound);
+        }
+
+        let was_active = true; // we already validated from is active
+        env.storage().instance().remove(&from_key);
+        if was_active {
+            let current: u32 = env
+                .storage()
+                .instance()
+                .get::<DataKey, u32>(&DataKey::RoleMemberCount(role.clone()))
+                .unwrap_or(0u32);
+            let new_count = current.saturating_sub(1);
+            env.storage().instance().set(&DataKey::RoleMemberCount(role.clone()), &new_count);
+        }
+
+        let mut members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::RoleMembers(role.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        if let Some(i) = members.iter().position(|a| a == from) {
+            members.remove(i as u32);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RoleMembers(role.clone()), &members);
+
+        let mut roles: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AddressRoles(from.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        if let Some(i) = roles.iter().position(|r| r == &role) {
+            roles.remove(i as u32);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::AddressRoles(from.clone()), &roles);
+
+        env.storage()
+            .instance()
+            .remove(&DataKey::RoleExpiry(role.clone(), from.clone()));
+
+        // Grant to destination with same expiry timestamp.
+        if Self::is_blacklisted_internal(&env, &to) {
+            return Err(AccessError::Blacklisted);
+        }
+
+        // Track this role in AllRoles if it's the first time we've seen it.
+        Self::track_role_in_all_roles(&env, &role);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::HasRole(role.clone(), to.clone()), &true);
+
+        let mut members_to: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::RoleMembers(role.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        if !members_to.iter().any(|a| a == &to) {
+            members_to.push_back(to.clone());
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RoleMembers(role.clone()), &members_to);
+
+        let mut roles_to: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AddressRoles(to.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        if !roles_to.iter().any(|r| r == &role) {
+            roles_to.push_back(role.clone());
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::AddressRoles(to.clone()), &roles_to);
+
+        let key_to = DataKey::RoleExpiry(role.clone(), to.clone());
+        env.storage().instance().set(&key_to, &expiry);
+
+        // Since from was active and we preserve expiry, destination should become active too.
+        let current: u32 = env
+            .storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::RoleMemberCount(role.clone()))
+            .unwrap_or(0u32);
+        let new_count = current.saturating_add(1);
+        env.storage()
+            .instance()
+            .set(&DataKey::RoleMemberCount(role.clone()), &new_count);
+
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROLE_GRANTED),),
+            (to.clone(), role.clone(), expiry),
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROLE_REVOKED),),
+            (role, from),
+        );
+
+        Ok(())
+    }
+
     pub fn transfer_super_admin(
         env: Env,
         current: Address,
         new_admin: Address,
     ) -> Result<(), AccessError> {
+
         current.require_auth();
         Self::require_super_admin(&env, &current)?;
         env.storage()
@@ -546,6 +701,7 @@ impl RouterAccess {
     }
 
     fn has_role_internal(env: &Env, account: &Address, role: &String) -> bool {
+
         if Self::is_blacklisted_internal(env, account) {
             return false;
         }
