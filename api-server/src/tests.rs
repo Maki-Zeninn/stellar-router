@@ -758,3 +758,42 @@ fn test_status_event_round_trips_through_json() {
     assert_eq!(decoded.timestamp, event.timestamp);
     assert_eq!(decoded.message, event.message);
 }
+
+// ── Issue #720: CORS invalid origin warning ───────────────────────────────────
+
+#[test]
+fn test_build_cors_layer_valid_origins_accepted() {
+    use crate::build_cors_layer;
+    // Should not panic with valid HTTP origins
+    let origins = vec![
+        "http://localhost:3000".to_string(),
+        "https://example.com".to_string(),
+    ];
+    let _ = build_cors_layer(&origins);
+}
+
+#[test]
+fn test_build_cors_layer_empty_origins() {
+    use crate::build_cors_layer;
+    let _ = build_cors_layer(&[]);
+}
+
+#[test]
+fn test_build_cors_layer_wildcard() {
+    use crate::build_cors_layer;
+    let origins = vec!["*".to_string()];
+    let _ = build_cors_layer(&origins);
+}
+
+#[test]
+fn test_build_cors_layer_invalid_origin_does_not_panic() {
+    use crate::build_cors_layer;
+    // Invalid origins (missing scheme, trailing slash, etc.) must be skipped
+    // with a warning rather than causing a panic.
+    let origins = vec![
+        "not-a-valid-origin".to_string(),
+        "https://example.com".to_string(),
+    ];
+    // Must complete without panicking; the invalid entry is dropped + warned.
+    let _ = build_cors_layer(&origins);
+}
