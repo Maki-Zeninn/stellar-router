@@ -1,3 +1,4 @@
+use crate::rate_limit::RateLimiter;
 use dashmap::DashMap;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -16,6 +17,7 @@ pub struct AppState {
     #[allow(dead_code)]
     pub execution_contract_id: String,
     pub router_core_contract_id: String,
+    pub rate_limiter: RateLimiter,
     pub tx_status_tx: broadcast::Sender<TransactionStatusEvent>,
     pub tx_subscribers: Arc<DashMap<String, usize>>,
     pub ws_connection_count: Arc<AtomicUsize>,
@@ -26,12 +28,14 @@ impl AppState {
         rpc_url: String,
         execution_contract_id: String,
         router_core_contract_id: String,
+        rate_limiter: RateLimiter,
     ) -> Self {
         let (tx_status_tx, _) = broadcast::channel(1000);
         Self {
             rpc: SorobanRpcClient::new(rpc_url, Some(router_core_contract_id.clone())),
             execution_contract_id,
             router_core_contract_id,
+            rate_limiter,
             tx_status_tx,
             tx_subscribers: Arc::new(DashMap::new()),
             ws_connection_count: Arc::new(AtomicUsize::new(0)),

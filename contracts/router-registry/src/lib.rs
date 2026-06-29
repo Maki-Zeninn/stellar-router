@@ -510,10 +510,18 @@ impl RouterRegistry {
     /// A [`Vec<u32>`] of version numbers. Returns an empty vector if `name`
     /// has no registered versions.
     pub fn versions(env: Env, name: String) -> Vec<u32> {
+        // Invariant: versions for a given `name` are stored in ascending order.
+        //
+        // This is guaranteed by `register_entry()` enforcing that each new
+        // `version` is strictly greater than all existing versions for the
+        // same name and then appending to the end of the stored list.
         Self::get_versions_list(&env, &name)
     }
 
+
+
     /// Get all contract entries for a name.
+
     ///
     /// Returns all [`ContractEntry`] structs for `name`, including deprecated ones,
     /// in version order (ascending).

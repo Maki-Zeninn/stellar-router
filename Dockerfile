@@ -9,6 +9,7 @@ WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
 COPY contracts/ contracts/
+COPY metrics/ metrics/
 
 RUN cargo build \
     --package router-common \
@@ -19,7 +20,8 @@ RUN cargo build \
     --package router-timelock \
     --package router-multicall \
     --package router-quote \
-    --package router-execution
+    --package router-execution \
+    --package router-metrics-exporter
 
 # ── Test stage ────────────────────────────────────────────────────────────────
 FROM builder AS test
@@ -47,5 +49,12 @@ RUN cargo build --target wasm32-unknown-unknown --release \
 
 # ── Metrics exporter runtime ──────────────────────────────────────────────────
 FROM debian:bookworm-slim AS metrics
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/target/release/router-metrics-exporter /usr/local/bin/
+RUN useradd -m -u 1000 metrics && \
+    chown -R metrics:metrics /usr/local/bin/router-metrics-exporter
+USER metrics
 EXPOSE 9090
+ENTRYPOINT ["router-metrics-exporter"]
