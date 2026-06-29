@@ -18,7 +18,7 @@
 //! - `admin_transferred` — Admin transferred (old_admin, new_admin)
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, Symbol, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Val, Vec,
 };
 use router_common;
 
@@ -225,12 +225,16 @@ impl RouterMulticall {
             if success {
                 result.record_success(call_index, call_result);
             } else {
-                let failure_msg = if call.instruction_budget.is_some() {
-                    "budget_exceeded"
+                let failure_error = if call.instruction_budget.is_some() {
+                    router_common::BatchItemError::Custom(
+                        soroban_sdk::String::from_str(&env, "budget_exceeded"),
+                    )
                 } else {
-                    "invoke_failed"
+                    router_common::BatchItemError::Custom(
+                        soroban_sdk::String::from_str(&env, "invoke_failed"),
+                    )
                 };
-                result.record_failure(&env, call_index, failure_msg);
+                result.record_failure(call_index, failure_error);
             }
 
             if store_results {
@@ -525,12 +529,14 @@ mod tests {
     }
 
     fn budget_failure_count(env: &Env, result: &router_common::BatchCallResult) -> u32 {
+        let budget_msg = soroban_sdk::String::from_str(env, "budget_exceeded");
         let mut count = 0u32;
-        let budget = String::from_str(env, "budget_exceeded");
         for i in 0..result.failures.len() {
             let failure = result.failures.get(i).unwrap();
-            if failure.message == budget {
-                count += 1;
+            if let router_common::BatchItemError::Custom(ref msg) = failure.error {
+                if msg == &budget_msg {
+                    count += 1;
+                }
             }
         }
         count

@@ -185,7 +185,7 @@ impl RouterRegistry {
             for (index, entry) in entries.iter().enumerate() {
                 let idx = index as u32;
                 if let Err(err) = Self::validate_registration(&env, &entry.name, entry.version) {
-                    result.record_failure(&env, idx, Self::registry_error_message(err));
+                    result.record_failure(idx, Self::registry_error_to_batch(&env, err));
                     return Ok(result);
                 }
             }
@@ -212,11 +212,11 @@ impl RouterRegistry {
                     ) {
                         Ok(()) => result.record_success(idx),
                         Err(err) => {
-                            result.record_failure(&env, idx, Self::registry_error_message(err));
+                            result.record_failure(idx, Self::registry_error_to_batch(&env, err));
                         }
                     },
                     Err(err) => {
-                        result.record_failure(&env, idx, Self::registry_error_message(err));
+                        result.record_failure(idx, Self::registry_error_to_batch(&env, err));
                     }
                 }
             }
@@ -433,7 +433,7 @@ impl RouterRegistry {
             match Self::deprecate_one(&env, name.clone(), version, None) {
                 Ok(()) => result.record_success(idx),
                 Err(err) => {
-                    result.record_failure(&env, idx, Self::registry_error_message(err));
+                    result.record_failure(idx, Self::registry_error_to_batch(&env, err));
                     if fail_fast {
                         break;
                     }
@@ -584,19 +584,15 @@ impl RouterRegistry {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    fn registry_error_message(err: RegistryError) -> &'static str {
+    fn registry_error_to_batch(env: &Env, err: RegistryError) -> router_common::BatchItemError {
         match err {
-            RegistryError::AlreadyInitialized => "AlreadyInitialized",
-            RegistryError::NotInitialized => "NotInitialized",
-            RegistryError::Unauthorized => "Unauthorized",
-            RegistryError::NotFound => "NotFound",
-            RegistryError::AlreadyRegistered => "AlreadyRegistered",
-            RegistryError::AlreadyDeprecated => "AlreadyDeprecated",
-            RegistryError::InvalidVersion => "InvalidVersion",
-            RegistryError::VersionNotFound => "VersionNotFound",
-            RegistryError::InvalidConstraint => "InvalidConstraint",
-            RegistryError::AllVersionsDeprecated => "AllVersionsDeprecated",
-            RegistryError::ContractUnreachable => "ContractUnreachable",
+            RegistryError::AlreadyRegistered => router_common::BatchItemError::AlreadyExists,
+            RegistryError::InvalidVersion => router_common::BatchItemError::InvalidName,
+            RegistryError::Unauthorized => router_common::BatchItemError::Unauthorized,
+            RegistryError::InvalidConstraint => router_common::BatchItemError::InvalidMetadata,
+            _ => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "Error"),
+            ),
         }
     }
 
@@ -1086,13 +1082,13 @@ mod tests {
         assert_eq!(results.failures.len(), 2);
         assert_eq!(results.failures.get(0).unwrap().index, 1);
         assert_eq!(
-            results.failures.get(0).unwrap().message,
-            String::from_str(&env, "VersionNotFound")
+            results.failures.get(0).unwrap().error,
+            router_common::BatchItemError::Custom(String::from_str(&env, "Error"))
         );
         assert_eq!(results.failures.get(1).unwrap().index, 2);
         assert_eq!(
-            results.failures.get(1).unwrap().message,
-            String::from_str(&env, "AlreadyDeprecated")
+            results.failures.get(1).unwrap().error,
+            router_common::BatchItemError::Custom(String::from_str(&env, "Error"))
         );
     }
 
@@ -1151,12 +1147,12 @@ mod tests {
         assert_eq!(result.successes.get(0).unwrap().index, 0);
         assert_eq!(result.failures.len(), 2);
         assert_eq!(
-            result.failures.get(0).unwrap().message,
-            String::from_str(&env, "InvalidVersion")
+            result.failures.get(0).unwrap().error,
+            router_common::BatchItemError::InvalidName
         );
         assert_eq!(
-            result.failures.get(1).unwrap().message,
-            String::from_str(&env, "AlreadyRegistered")
+            result.failures.get(1).unwrap().error,
+            router_common::BatchItemError::AlreadyExists
         );
     }
 

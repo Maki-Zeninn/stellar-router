@@ -85,7 +85,7 @@ impl RouterAccess {
             match Self::grant_role_internal(&env, &account, &role, expires_in) {
                 Ok(()) => result.record_success(idx),
                 Err(err) => {
-                    result.record_failure(&env, idx, Self::access_error_message(err));
+                    result.record_failure(idx, Self::access_error_to_batch(&env, err));
                     if fail_fast {
                         break;
                     }
@@ -358,15 +358,14 @@ impl RouterAccess {
         }
     }
 
-    fn access_error_message(err: AccessError) -> &'static str {
+    fn access_error_to_batch(env: &Env, err: AccessError) -> router_common::BatchItemError {
         match err {
-            AccessError::AlreadyInitialized => "AlreadyInitialized",
-            AccessError::NotInitialized => "NotInitialized",
-            AccessError::Unauthorized => "Unauthorized",
-            AccessError::AlreadyHasRole => "AlreadyHasRole",
-            AccessError::RoleNotFound => "RoleNotFound",
-            AccessError::Blacklisted => "Blacklisted",
-            AccessError::CannotBlacklistAdmin => "CannotBlacklistAdmin",
+            AccessError::AlreadyHasRole => router_common::BatchItemError::AlreadyExists,
+            AccessError::Unauthorized => router_common::BatchItemError::Unauthorized,
+            AccessError::Blacklisted => router_common::BatchItemError::InvalidMetadata,
+            _ => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "Error"),
+            ),
         }
     }
 
@@ -1020,8 +1019,8 @@ mod tests {
         assert_eq!(result.failures.len(), 2);
         assert_eq!(result.failures.get(0).unwrap().index, 0);
         assert_eq!(
-            result.failures.get(0).unwrap().message,
-            String::from_str(&env, "AlreadyHasRole")
+            result.failures.get(0).unwrap().error,
+            router_common::BatchItemError::AlreadyExists
         );
     }
 
