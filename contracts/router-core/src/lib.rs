@@ -4999,3 +4999,29 @@ mod tests {
         assert_eq!(client.resolve(&other), addr2);
     }
 }
+
+    // ── Issue #721: multi-hop circular dependency detection ──────────────────
+
+    /// A→B, B→C, then C→A must be rejected as a CircularDependency.
+    /// This validates that validate_dependency_cycle walks the full graph,
+    /// not just immediate (depth-1) predecessors.
+    #[test]
+    fn test_multihop_circular_dependency_is_rejected() {
+        let (env, admin, client) = setup();
+        let a = String::from_str(&env, "route-a");
+        let b = String::from_str(&env, "route-b");
+        let c = String::from_str(&env, "route-c");
+        let addr = Address::generate(&env);
+
+        client.register_route(&admin, &a, &addr, &None);
+        client.register_route(&admin, &b, &addr, &None);
+        client.register_route(&admin, &c, &addr, &None);
+
+        // Build A → B → C (no cycle yet)
+        client.set_route_dependency(&admin, &a, &b);
+        client.set_route_dependency(&admin, &b, &c);
+
+        // Adding C → A would create A → B → C → A: must be rejected
+        let result = client.try_set_route_dependency(&admin, &c, &a);
+        assert_eq!(result, Err(Ok(RouterError::CircularDependency)));
+    }
