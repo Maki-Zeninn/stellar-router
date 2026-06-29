@@ -682,7 +682,7 @@ impl RouterMiddleware {
             }
         } else {
             for i in 0..cap {
-                let idx = (log_state.head + i) % cap;
+                let idx = (log_state.head + i) % (cap as u32);
                 if let Some(entry) = log_state.entries.get(idx) {
                     let should_include = match success_filter {
                         None => true,

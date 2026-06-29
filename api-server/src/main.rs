@@ -1,4 +1,5 @@
 mod handlers;
+mod rate_limit;
 mod rpc;
 mod state;
 mod types;
@@ -10,17 +11,51 @@ mod tests;
 use anyhow::{Context, Result};
 use axum::{
     extract::DefaultBodyLimit,
-    http::{header, Method},
+    http::{header, Method, Request},
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
-    Router,
+    Json, Router,
 };
 use clap::Parser;
 use std::net::SocketAddr;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use tracing::info;
 use tracing::{info, warn};
+use tracing::{info, info_span, warn, Instrument};
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
-use crate::state::AppState;
+use crate::{rate_limit::{RateLimitConfig, RateLimiter}, state::AppState};
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        crate::handlers::health,
+        crate::handlers::simulate,
+        crate::handlers::list_routes,
+        crate::handlers::get_route,
+    ),
+    components(schemas(
+        crate::types::HealthResponse,
+        crate::types::SimulateRequest,
+        crate::types::SimulateResponse,
+        crate::types::FeeEstimate,
+        crate::types::SimulationDetail,
+        crate::types::RouteDetails,
+        crate::types::RouteEntryResponse,
+        crate::types::RouteMetadataResponse,
+        crate::types::RouteListResponse,
+        crate::types::ErrorResponse,
+        crate::types::ErrorDetail,
+        crate::types::ErrorCode,
+    )),
+    tags(
+        (name = "health", description = "Health check"),
+        (name = "simulation", description = "Transaction simulation"),
+        (name = "routes", description = "Route discovery"),
+    )
+)]
+struct ApiDoc;
 
 #[derive(Parser, Debug)]
 #[command(name = "router-api-server")]
@@ -48,6 +83,12 @@ struct Args {
     /// Omit to disable cross-origin requests (production default).
     #[arg(long, env = "CORS_ORIGINS", value_delimiter = ',')]
     cors_origins: Vec<String>,
+    /// Maximum number of /simulate requests allowed per window.
+    #[arg(long, env = "RATE_LIMIT_MAX_REQUESTS", default_value = "100")]
+    rate_limit_max_requests: u32,
+    /// Sliding window for rate limiting in seconds.
+    #[arg(long, env = "RATE_LIMIT_WINDOW_SECS", default_value = "60")]
+    rate_limit_window_secs: u64,
     /// Seconds to wait for in-flight requests to complete on shutdown (default: 30)
     #[arg(long, env = "SHUTDOWN_TIMEOUT_SECS", default_value = "30")]
     shutdown_timeout_secs: u64,
@@ -68,20 +109,34 @@ async fn main() -> Result<()> {
     info!("Listen address: {}", args.listen);
     info!("RPC URL: {}", args.rpc_url);
 
+    let rate_limiter = RateLimiter::new(RateLimitConfig {
+        max_requests: args.rate_limit_max_requests,
+        window: std::time::Duration::from_secs(args.rate_limit_window_secs),
+    });
+
     let state = AppState::new(
         args.rpc_url,
         args.execution_contract_id,
         args.router_core_contract_id,
+        rate_limiter,
     );
 
     let cors = build_cors_layer(&args.cors_origins);
 
+    let docs = SwaggerUi::new("/docs/{tail:.*}").url("/openapi.json", ApiDoc::openapi());
+
     let app = Router::new()
         .route("/health", get(handlers::health))
-        .route("/simulate", post(handlers::simulate))
+        .route(
+            "/simulate",
+            post(handlers::simulate).layer(middleware::from_fn(rate_limit::rate_limit_middleware)),
+        )
         .route("/routes", get(handlers::list_routes))
         .route("/routes/:name", get(handlers::get_route))
         .route("/ws", get(websocket::ws_handler))
+        .route("/openapi.json", get(openapi_json))
+        .merge(docs)
+        .layer(middleware::from_fn(request_id_middleware))
         .layer(cors)
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .with_state(state);
@@ -111,6 +166,42 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Attach a unique `request_id` (UUID v4) to every request span and response header.
+///
+/// All logs emitted while handling the request inherit the `request_id` field
+/// from the enclosing span, enabling correlation across log lines for a single
+/// request. The ID is also returned to the client in the `X-Request-Id` header.
+async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
+    Json(ApiDoc::openapi())
+}
+
+async fn request_id_middleware(req: Request<axum::body::Body>, next: Next) -> Response {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+
+    let span = info_span!(
+        "http_request",
+        request_id = %request_id,
+        method = %method,
+        uri = %uri,
+    );
+
+    async move {
+        info!(request_id = %request_id, %method, %uri, "incoming request");
+        let mut response = next.run(req).await;
+        let status = response.status().as_u16();
+        info!(request_id = %request_id, status, "request complete");
+
+        if let Ok(val) = HeaderValue::from_str(&request_id) {
+            response.headers_mut().insert("x-request-id", val);
+        }
+        response
+    }
+    .instrument(span)
+    .await
+}
+
 fn build_cors_layer(origins: &[String]) -> CorsLayer {
     let allow_methods = [Method::GET, Method::POST, Method::OPTIONS];
     let allow_headers = [header::CONTENT_TYPE, header::AUTHORIZATION];
@@ -130,6 +221,8 @@ fn build_cors_layer(origins: &[String]) -> CorsLayer {
         .allow_origin(allow_origin)
         .allow_methods(allow_methods)
         .allow_headers(allow_headers)
+}
+
 async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()

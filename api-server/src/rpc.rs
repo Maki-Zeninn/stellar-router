@@ -66,6 +66,9 @@ pub struct FeeBreakdown {
     pub high_load: bool,
     pub would_succeed: bool,
     pub fee_estimated: bool,
+    /// `true` only when fees were derived from a live RPC simulation.
+    /// `false` when the heuristic fallback was used (RPC unreachable).
+    pub simulated: bool,
 }
 
 impl SorobanRpcClient {
@@ -133,6 +136,7 @@ impl SorobanRpcClient {
                     high_load,
                     would_succeed,
                     fee_estimated,
+                    simulated: true,
                 })
             }
             Err(_) => Ok(Self::heuristic_estimate(amount, network_load_bps)),
@@ -344,51 +348,6 @@ impl SorobanRpcClient {
         }))
     }
 
-    fn decode_string_vec_xdr(xdr: &str) -> Option<Vec<String>> {
-        let bytes = base64_decode(xdr)?;
-        let mut result = Vec::new();
-        if bytes.len() < 8 {
-            return Some(result);
-        }
-        let count = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
-        let mut pos = 8usize;
-        for _ in 0..count {
-            if pos + 8 > bytes.len() {
-                break;
-            }
-            // Each string element: 4-byte type discriminant + 4-byte length + data (padded to 4)
-            pos += 4; // skip type discriminant
-        // Parse a minimal XDR Vec<String>: 4-byte big-endian length, then null-terminated strings.
-        if bytes.len() < 4 {
-            return Some(Vec::new());
-        }
-        let count = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
-        let mut result = Vec::with_capacity(count);
-        let mut pos = 4;
-        for _ in 0..count {
-            if pos + 4 > bytes.len() {
-                break;
-            }
-            let len =
-                u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
-                    as usize;
-            pos += 4;
-            if pos + len > bytes.len() {
-                break;
-            }
-            if let Ok(s) = std::str::from_utf8(&bytes[pos..pos + len]) {
-                result.push(s.to_string());
-            }
-            // Advance past padding to next 4-byte boundary
-            let padded = (len + 3) & !3;
-            pos += padded;
-                result.push(s.trim_end_matches('\0').to_string());
-            }
-            pos += (len + 3) & !3;
-        }
-        Some(result)
-    }
-
     async fn call_simulate_rpc(
         &self,
         target: &str,
@@ -415,6 +374,9 @@ impl SorobanRpcClient {
         resp.result.ok_or_else(|| anyhow!("empty RPC result"))
     }
 
+    /// Decodes a minimal XDR-encoded `Vec<String>`:
+    /// 4-byte big-endian element count, then for each element:
+    /// 4-byte big-endian byte length + UTF-8 bytes padded to the next 4-byte boundary.
     fn decode_string_vec_xdr(xdr: &str) -> Option<Vec<String>> {
         let bytes = base64_decode(xdr)?;
         if bytes.len() < 4 {
@@ -437,6 +399,7 @@ impl SorobanRpcClient {
             if let Ok(s) = std::str::from_utf8(&bytes[pos..pos + len]) {
                 result.push(s.trim_end_matches('\0').to_string());
             }
+            // Advance past padding to the next 4-byte boundary.
             pos += (len + 3) & !3;
         }
         Some(result)
@@ -464,8 +427,11 @@ impl SorobanRpcClient {
             total_fee,
             surge_multiplier,
             high_load,
-            would_succeed: true,
+            // No simulation was performed — cannot assert the transaction will succeed.
+            would_succeed: false,
+            // Fees are a heuristic guess, not an RPC-derived measurement.
             fee_estimated: false,
+            simulated: false,
         }
     }
 }
@@ -522,4 +488,51 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
         _ => return None,
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heuristic_estimate_does_not_assert_success() {
+        let result = SorobanRpcClient::heuristic_estimate(1_000_000, 5_000);
+        assert!(
+            !result.would_succeed,
+            "heuristic path must not claim the transaction will succeed"
+        );
+        assert!(
+            !result.simulated,
+            "heuristic path must report simulated = false"
+        );
+        assert!(
+            !result.fee_estimated,
+            "heuristic path must report fee_estimated = false"
+        );
+    }
+
+    #[test]
+    fn heuristic_estimate_high_load_surge() {
+        let result = SorobanRpcClient::heuristic_estimate(500_000, 9_000);
+        assert!(result.high_load);
+        assert_eq!(result.surge_multiplier, 200);
+        assert!(!result.would_succeed);
+        assert!(!result.simulated);
+    }
+
+    #[test]
+    fn heuristic_estimate_minimum_resource_fee() {
+        // amount / 1_000 = 0, which is below the 100 floor
+        let result = SorobanRpcClient::heuristic_estimate(50, 0);
+        assert_eq!(result.resource_fee, 100);
+    }
+
+    #[test]
+    fn decode_string_vec_xdr_empty_input() {
+        // Less than 4 bytes → empty vec, not None
+        assert_eq!(
+            SorobanRpcClient::decode_string_vec_xdr(""),
+            Some(Vec::<String>::new())
+        );
+    }
 }

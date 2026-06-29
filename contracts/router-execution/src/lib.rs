@@ -32,6 +32,9 @@ const FIXED_POINT_SCALE: u32 = 100;
 /// Minimum valid backoff multiplier: 100 = 1.0× (no growth, constant delay).
 const MIN_BACKOFF_MULTIPLIER: u32 = FIXED_POINT_SCALE;
 
+/// Maximum valid backoff multiplier: 10_000 = 100.0× to prevent overflow and runaway delays.
+const MAX_BACKOFF_MULTIPLIER: u32 = 10_000;
+
 /// Default cap on the number of `ExecutionRecord`s kept in `ExecHistory`
 /// when no explicit limit has been configured via `set_max_history_size`.
 /// Bounds per-entry storage growth so the history can't grow unbounded.
@@ -47,8 +50,8 @@ pub enum DataKey {
     TotalErrors,
     BackoffBaseMs,     // base delay in milliseconds before first retry
     BackoffMultiplier, // multiplier applied each retry (stored as fixed-point *100, e.g. 200 = 2x)
-    ExecHistory,       // Vec<ExecutionRecord>
-    ExecHistory,   // Vec<ExecutionRecord>, capped at MaxHistorySize (oldest evicted first)
+    ExecHistory,       // Vec<ExecutionRecord>, capped at MaxHistorySize (oldest evicted first)
+    MaxHistorySize,    // u32 — cap on ExecHistory length
     MaxHistorySize, // u32 — cap on ExecHistory length
 }
 
@@ -201,11 +204,11 @@ impl RouterExecution {
     /// * `max_retries` - Global cap on per-request retry attempts (max 5).
     /// * `backoff_base_ms` - Base delay in milliseconds before the first retry (0 = no delay).
     /// * `backoff_multiplier` - Multiplier applied each retry, as fixed-point *100
-    ///   (e.g. 200 = 2x, 150 = 1.5x). Must be >= 100.
+    ///   (e.g. 200 = 2x, 150 = 1.5x). Must be >= 100 and <= 10000.
     ///
     /// # Errors
     /// * [`ExecutionError::AlreadyInitialized`] — called more than once.
-    /// * [`ExecutionError::InvalidConfig`] — `max_retries` exceeds 5 or `backoff_multiplier` < 100.
+    /// * [`ExecutionError::InvalidConfig`] — `max_retries` exceeds 5 or `backoff_multiplier` < 100 or > 10000.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -219,7 +222,7 @@ impl RouterExecution {
         if max_retries == 0 || max_retries > 5 {
             return Err(ExecutionError::InvalidConfig);
         }
-        if backoff_multiplier < MIN_BACKOFF_MULTIPLIER {
+        if backoff_multiplier < MIN_BACKOFF_MULTIPLIER || backoff_multiplier > MAX_BACKOFF_MULTIPLIER {
             return Err(ExecutionError::InvalidConfig);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -243,11 +246,11 @@ impl RouterExecution {
     ///
     /// # Arguments
     /// * `backoff_base_ms` - Base delay in milliseconds before the first retry.
-    /// * `backoff_multiplier` - Multiplier per retry as fixed-point *100 (min 100).
+    /// * `backoff_multiplier` - Multiplier per retry as fixed-point *100 (min 100, max 10000).
     ///
     /// # Errors
     /// * [`ExecutionError::Unauthorized`] — caller is not the admin.
-    /// * [`ExecutionError::InvalidConfig`] — `backoff_multiplier` < 100.
+    /// * [`ExecutionError::InvalidConfig`] — `backoff_multiplier` < 100 or > 10000.
     /// * [`ExecutionError::NotInitialized`] — contract not initialized.
     pub fn set_backoff_config(
         env: Env,
@@ -257,7 +260,7 @@ impl RouterExecution {
     ) -> Result<(), ExecutionError> {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, ExecutionError)?;
-        if backoff_multiplier < MIN_BACKOFF_MULTIPLIER {
+        if backoff_multiplier < MIN_BACKOFF_MULTIPLIER || backoff_multiplier > MAX_BACKOFF_MULTIPLIER {
             return Err(ExecutionError::InvalidConfig);
         }
         env.storage()
@@ -376,7 +379,7 @@ impl RouterExecution {
                         simulated: request.simulate_first,
                     };
                     env.events().publish(
-                        (Symbol::new(&env, "execution_result"),),
+                        (Symbol::new(&env, router_common::EVENT_EXECUTION_RESULT),),
                         (&request.target, &request.function, true, attempts),
                     );
                     return Ok(exec_result);
@@ -392,7 +395,7 @@ impl RouterExecution {
                             attempts - 1,
                         );
                         env.events().publish(
-                            (Symbol::new(&env, "execution_retry"),),
+                            (Symbol::new(&env, router_common::EVENT_EXECUTION_RETRY),),
                             (&request.target, &request.function, attempts, delay_ms),
                         );
                         // Retry
@@ -468,7 +471,7 @@ impl RouterExecution {
             (base_fee + resource_fee) * surge_multiplier as i128 / FIXED_POINT_SCALE as i128;
 
         env.events().publish(
-            (Symbol::new(&env, "fee_estimated"),),
+            (Symbol::new(&env, router_common::EVENT_FEE_ESTIMATED),),
             (total_fee, high_load),
         );
 
@@ -524,7 +527,7 @@ impl RouterExecution {
         };
 
         env.events().publish(
-            (Symbol::new(&env, "simulation_result"),),
+            (Symbol::new(&env, router_common::EVENT_SIMULATION_RESULT),),
             (&target, &function, sim_ok),
         );
 
@@ -722,7 +725,7 @@ impl RouterExecution {
         // Emit a structured error event; does not leak internal details beyond
         // the error code and attempt count.
         env.events().publish(
-            (Symbol::new(env, "execution_error"),),
+            (Symbol::new(env, router_common::EVENT_EXECUTION_ERROR),),
             (target, function, error as u32, attempts),
         );
     }
@@ -1090,5 +1093,135 @@ mod tests {
         // multiplier=100 (1x): delay stays at base
         assert_eq!(RouterExecution::compute_backoff_ms(250, 100, 0), 250);
         assert_eq!(RouterExecution::compute_backoff_ms(250, 100, 5), 250);
+    }
+
+    // ── Backoff delay calculation: base/multiplier fixed-point math ─────────
+
+    #[test]
+    fn test_backoff_delay_base_100_multiplier_200_attempts_1_to_5() {
+        // base=100ms, multiplier=200 (2x fixed-point *100)
+        // compute_backoff_ms(base, multiplier, attempt_index)
+        // execute() uses attempt_index = attempts - 1.
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 0), 100); // attempt=1
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 1), 200); // attempt=2
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 2), 400); // attempt=3
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 3), 800); // attempt=4
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 4), 1600); // attempt=5
+    }
+
+    #[test]
+    fn test_backoff_delay_exponential_growth_attempt_index_0_to_4() {
+        // Explicitly verify growth for attempt indices 0..4.
+        // delay = base * (multiplier/100)^attempt_index
+        let base = 100u64;
+        let mult = 200u32; // 2x
+        let expected = [100u64, 200u64, 400u64, 800u64, 1600u64];
+        for (attempt_index, &exp) in expected.iter().enumerate() {
+            assert_eq!(RouterExecution::compute_backoff_ms(base, mult, attempt_index as u32), exp);
+        }
+    }
+
+    #[test]
+    fn test_backoff_delay_min_multiplier_boundary_constant_delay() {
+        // Minimum allowed multiplier: 100 => constant delay, no growth.
+        let base = 123u64;
+        let mult = 100u32;
+        for attempt_index in 0u32..=10u32 {
+            assert_eq!(RouterExecution::compute_backoff_ms(base, mult, attempt_index), base);
+        }
+    }
+
+    #[test]
+    fn test_backoff_delay_zero_base_is_zero_for_any_attempt() {
+        let mult = 300u32;
+        for attempt_index in 0u32..=10u32 {
+            assert_eq!(RouterExecution::compute_backoff_ms(0, mult, attempt_index), 0);
+        }
+    }
+
+    #[test]
+    fn test_backoff_delay_large_multiplier_saturates_safely_and_is_monotonic() {
+        // Large multiplier must not overflow due to saturating_mul.
+        // We can’t easily assert exact values far out without knowing the saturation point,
+        // but we can assert monotonic non-decreasing behavior.
+        let base = 100u64;
+        let mult = 300u32;
+
+        let mut prev = RouterExecution::compute_backoff_ms(base, mult, 0);
+        for attempt_index in 1u32..=20u32 {
+            let next = RouterExecution::compute_backoff_ms(base, mult, attempt_index);
+            assert!(next >= prev, "backoff should be monotonic: {} -> {}", prev, next);
+            prev = next;
+        }
+    }
+
+    // ── Backoff retry exhaustion behavior (max retries) ────────────────────────
+
+    #[test]
+    fn test_execute_reaches_max_retries_exhaustion() {
+        // This contract's execute() retries on any Err(_) from try_invoke_contract.
+        // In the test environment, calling an unregistered contract/function should
+        // cause try_invoke_contract to Err consistently, so execute() should exhaust.
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &2, &100, &200).unwrap();
+
+        let caller = Address::generate(&env);
+        env.as_contract(&client.address, || {
+            // Build a request with max_retries=1, but global max_retries=2.
+            // effective_retries = min(1, 2) = 1.
+            // That means: attempts 1 (initial) and attempt 2 (retry) are allowed,
+            // and failure after attempt 2 returns ContractRejected.
+
+            let target = Address::generate(&env);
+            let function = Symbol::new(&env, "transfer");
+
+            // execute() is called as a contract call to bypass caller.require_auth
+            // signature complexity in tests; env.mock_all_auths() makes auth pass.
+            let request = ExecutionRequest {
+                target,
+                function,
+                simulate_first: false,
+                max_retries: 1,
+            };
+
+            let result = RouterExecution::execute(env.clone(), caller.clone(), request);
+            assert_eq!(result, Err(ExecutionError::ContractRejected));
+        });
+    }
+
+    // ── Issue #633: backoff_multiplier upper bound validation ────────────────
+
+    #[test]
+    fn test_initialize_invalid_multiplier_too_high_fails() {
+        let env = Env::default();
+
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        // multiplier > 10000 (100x) is invalid
+        let result = client.try_initialize(&admin, &2, &500, &10_001);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_set_backoff_config_invalid_multiplier_too_high_fails() {
+        let (_, admin, client) = setup();
+        let result = client.try_set_backoff_config(&admin, &500, &10_001);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_set_backoff_config_max_multiplier_succeeds() {
+        let (_, admin, client) = setup();
+        // Exactly 10000 (100x) is valid
+        assert!(client.try_set_backoff_config(&admin, &500, &10_000).is_ok());
+        let (_, mult) = client.backoff_config();
+        assert_eq!(mult, 10_000);
     }
 }

@@ -20,6 +20,7 @@
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, Symbol, Val, Vec,
 };
+use router_common;
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -244,14 +245,14 @@ impl RouterMulticall {
             }
 
             env.events().publish(
-                (Symbol::new(&env, "call_result"),),
+                (Symbol::new(&env, router_common::EVENT_CALL_RESULT),),
                 (&caller, &call.target, &call.function, success, call_index),
             );
 
             if !success {
                 if call.required {
                     env.events().publish(
-                        (Symbol::new(&env, "call_failed"),),
+                        (Symbol::new(&env, router_common::EVENT_CALL_FAILED),),
                         (call_index, &call.target, &call.function),
                     );
                     env.storage().instance().remove(&DataKey::Executing);
@@ -313,7 +314,7 @@ impl RouterMulticall {
             .instance()
             .set(&DataKey::MaxBatchSize, &max_batch_size);
         env.events().publish(
-            (Symbol::new(&env, "max_batch_size_updated"),),
+            (Symbol::new(&env, router_common::EVENT_MAX_BATCH_SIZE_UPDATED),),
             (old_max, max_batch_size),
         );
         Ok(())
@@ -373,6 +374,99 @@ impl RouterMulticall {
             .instance()
             .get(&DataKey::Admin)
             .ok_or(MulticallError::NotInitialized)
+    }
+
+    /// Retrieve a single stored batch result.
+    ///
+    /// Returns the [`CallResult`] for a specific call within a batch, if it was
+    /// stored (i.e., if `store_results` was `true` during `execute_batch`).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `batch_id` - The ID of the batch (assigned sequentially on each successful execution).
+    /// * `call_index` - The zero-based index of the call within the batch.
+    ///
+    /// # Returns
+    /// * `Ok(Some(CallResult))` — if the result is stored at that location.
+    /// * `Ok(None)` — if no result is stored (either the call was never executed
+    ///   with `store_results: true`, or the indices are out of range).
+    ///
+    /// # Errors
+    /// Currently returns `Ok(...)`, never errors. Reserved for future error conditions.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let result = RouterMulticall::get_batch_result(&env, 0u64, 0u32)?;
+    /// if let Some(call_result) = result {
+    ///     println!("Call succeeded: {}", call_result.success);
+    /// }
+    /// ```
+    pub fn get_batch_result(
+        env: Env,
+        batch_id: u64,
+        call_index: u32,
+    ) -> Result<Option<router_common::CallResult>, MulticallError> {
+        Ok(env
+            .storage()
+            .instance()
+            .get(&DataKey::BatchResult(batch_id, call_index)))
+    }
+
+    /// Retrieve all stored results for a batch.
+    ///
+    /// Iterates through stored [`CallResult`]s for the given batch, starting from
+    /// `call_index = 0`, and returns all results found. The iteration stops when
+    /// a missing result is encountered (i.e., when `DataKey::BatchResult(batch_id, call_index)`
+    /// is not found in storage).
+    ///
+    /// This is useful for:
+    /// - Async inspection: submit a batch, return later to check results
+    /// - Audit trail: verify what calls were made and their outcomes
+    /// - Debugging: inspect multiple call results when a batch partially fails
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `batch_id` - The ID of the batch to retrieve results for.
+    ///
+    /// # Returns
+    /// A [`Vec`] of [`CallResult`]s in order. Empty if no results are stored,
+    /// or if `store_results` was not enabled during execution.
+    ///
+    /// # Errors
+    /// Currently returns `Ok(...)`, never errors. Reserved for future error conditions.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let results = RouterMulticall::get_batch_results(&env, 0u64)?;
+    /// for (idx, call_result) in results.iter().enumerate() {
+    ///     println!("Call {}: {}", idx, if call_result.success { "OK" } else { "FAIL" });
+    /// }
+    /// ```
+    pub fn get_batch_results(
+        env: Env,
+        batch_id: u64,
+    ) -> Result<Vec<router_common::CallResult>, MulticallError> {
+        let mut results = Vec::new(&env);
+        let mut call_index = 0u32;
+
+        // Iterate until we don't find a result at this index.
+        // Results are stored consecutively from call_index = 0, so the first
+        // missing result indicates the end of the batch.
+        loop {
+            match env
+                .storage()
+                .instance()
+                .get::<DataKey, router_common::CallResult>(&DataKey::BatchResult(batch_id, call_index))
+            {
+                Some(result) => {
+                    results.push_back(result);
+                    call_index += 1;
+                }
+                None => break,
+            }
+        }
+
+        Ok(results)
     }
 
     /// Transfer admin to a new address.
@@ -703,6 +797,174 @@ mod tests {
         // new admin should be able to update config
         assert!(client.try_set_max_batch_size(&new_admin, &5).is_ok());
         assert_eq!(client.max_batch_size(), 5);
+    }
+
+    #[test]
+    fn test_get_batch_result_single_result() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: false,
+            instruction_budget: None,
+            args: Vec::new(&env),
+        });
+
+        let summary = client.execute_batch(&caller, &calls, &false, &true, &false);
+        assert_eq!(summary.successes.len(), 1);
+
+        let result = client.get_batch_result(&0u64, &0u32);
+        assert!(result.is_ok());
+        let call_result = result.unwrap();
+        assert!(call_result.is_some());
+        let cr = call_result.unwrap();
+        assert_eq!(cr.target, mock_id);
+        assert_eq!(cr.function, Symbol::new(&env, "success"));
+        assert!(cr.success);
+    }
+
+    #[test]
+    fn test_get_batch_result_not_stored() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: false,
+            instruction_budget: None,
+            args: Vec::new(&env),
+        });
+
+        // Execute WITHOUT store_results
+        let summary = client.execute_batch(&caller, &calls, &false, &false, &false);
+        assert_eq!(summary.successes.len(), 1);
+
+        // Attempt to retrieve — should return None
+        let result = client.get_batch_result(&0u64, &0u32);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_get_batch_result_out_of_range() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: false,
+            instruction_budget: None,
+            args: Vec::new(&env),
+        });
+
+        let summary = client.execute_batch(&caller, &calls, &false, &true, &false);
+        assert_eq!(summary.successes.len(), 1);
+
+        // Try to get an index that doesn't exist
+        let result = client.get_batch_result(&0u64, &5u32);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_get_batch_results_multiple_calls() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        // Call 0: success
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: false,
+            instruction_budget: None,
+            args: Vec::new(&env),
+        });
+        // Call 1: fail
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "fail"),
+            required: false,
+            instruction_budget: None,
+            args: Vec::new(&env),
+        });
+        // Call 2: success
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: false,
+            instruction_budget: None,
+            args: Vec::new(&env),
+        });
+
+        let summary = client.execute_batch(&caller, &calls, &false, &true, &false);
+        assert_eq!(summary.successes.len(), 2);
+        assert_eq!(summary.failures.len(), 1);
+
+        let results = client.get_batch_results(&0u64);
+        assert!(results.is_ok());
+        let results_vec = results.unwrap();
+        assert_eq!(results_vec.len(), 3);
+
+        // Verify call 0
+        assert_eq!(results_vec.get(0).unwrap().target, mock_id);
+        assert!(results_vec.get(0).unwrap().success);
+
+        // Verify call 1
+        assert_eq!(results_vec.get(1).unwrap().target, mock_id);
+        assert!(!results_vec.get(1).unwrap().success);
+
+        // Verify call 2
+        assert_eq!(results_vec.get(2).unwrap().target, mock_id);
+        assert!(results_vec.get(2).unwrap().success);
+    }
+
+    #[test]
+    fn test_get_batch_results_empty_when_not_stored() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        for _ in 0..3 {
+            calls.push_back(CallDescriptor {
+                target: mock_id.clone(),
+                function: Symbol::new(&env, "success"),
+                required: false,
+                instruction_budget: None,
+                args: Vec::new(&env),
+            });
+        }
+
+        // Execute WITHOUT store_results
+        let summary = client.execute_batch(&caller, &calls, &false, &false, &false);
+        assert_eq!(summary.successes.len(), 3);
+
+        // Retrieve results — should be empty
+        let results = client.get_batch_results(&0u64);
+        assert!(results.is_ok());
+        assert_eq!(results.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_get_batch_results_nonexistent_batch() {
+        let (env, _admin, client) = setup();
+
+        // Try to get results for a batch that was never executed
+        let results = client.get_batch_results(&99u64);
+        assert!(results.is_ok());
+        assert_eq!(results.unwrap().len(), 0);
     }
 
     #[test]

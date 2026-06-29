@@ -7,6 +7,7 @@
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
 };
+use router_common;
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -16,7 +17,10 @@ pub enum DataKey {
     HasRole(String, Address), // (role, address) -> bool
     RoleAdmin(String),        // role -> Address who manages it
     Blacklisted(Address),
-    RoleMembers(String),   // role -> Vec<Address>
+
+    RoleMembers(String), // role -> Vec<Address>
+    RoleMemberCount(String), // role -> u32 (active members)
+
     AddressRoles(Address), // address -> Vec<String>
     RoleExpiry(String, Address),
     AllRoles, // Vec<String> — all roles ever defined in the system
@@ -112,7 +116,25 @@ impl RouterAccess {
             return Err(AccessError::RoleNotFound);
         }
 
+        // Decrement active-member counter only if this grant was currently active.
+        // (If the role is expired, it may still exist in HasRole but shouldn't be
+        // counted as an active member.)
+        let was_active = Self::has_role_internal(&env, &target, &role);
+
         env.storage().instance().remove(&key);
+
+        if was_active {
+            let current: u32 = env
+                .storage()
+                .instance()
+                .get::<DataKey, u32>(&DataKey::RoleMemberCount(role.clone()))
+                .unwrap_or(0u32);
+            let new_count = current.saturating_sub(1);
+            env.storage()
+                .instance()
+                .set(&DataKey::RoleMemberCount(role.clone()), &new_count);
+        }
+
 
         let mut members: Vec<Address> = env
             .storage()
@@ -142,8 +164,21 @@ impl RouterAccess {
             .instance()
             .remove(&DataKey::RoleExpiry(role.clone(), target.clone()));
 
+        // Keep RoleMemberCount consistent for expiry-based removal.
+        if Self::has_role_internal(&env, &target, &role) {
+            let current: u32 = env
+                .storage()
+                .instance()
+                .get::<DataKey, u32>(&DataKey::RoleMemberCount(role.clone()))
+                .unwrap_or(0u32);
+            let new_count = current.saturating_sub(1);
+            env.storage()
+                .instance()
+                .set(&DataKey::RoleMemberCount(role.clone()), &new_count);
+        }
+
         env.events()
-            .publish((Symbol::new(&env, "role_revoked"),), (role, target));
+            .publish((Symbol::new(&env, router_common::EVENT_ROLE_REVOKED),), (role, target));
         Ok(())
     }
 
@@ -154,6 +189,9 @@ impl RouterAccess {
 
     /// Check if a role has expired for an address.
     pub fn is_role_expired(env: Env, role: String, target: Address) -> bool {
+        // View helper: counter is maintained for active members, but expiry still
+        // uses RoleExpiry storage.
+
         if let Some(expires_at) = env
             .storage()
             .instance()
@@ -175,6 +213,13 @@ impl RouterAccess {
     ///
     /// # Returns
     /// `Some(timestamp)` if an expiry exists, `None` otherwise.
+    pub fn get_role_member_count(env: Env, role: String) -> u32 {
+        env.storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::RoleMemberCount(role))
+            .unwrap_or(0u32)
+    }
+
     pub fn get_role_expiry(env: Env, role: String, target: Address) -> Option<u64> {
         env.storage()
             .instance()
@@ -199,7 +244,7 @@ impl RouterAccess {
             .instance()
             .set(&DataKey::RoleAdmin(role.clone()), &admin);
         env.events()
-            .publish((Symbol::new(&env, "role_admin_set"),), (role, admin));
+            .publish((Symbol::new(&env, router_common::EVENT_ROLE_ADMIN_SET),), (role, admin));
         Ok(())
     }
 
@@ -248,7 +293,7 @@ impl RouterAccess {
             .instance()
             .set(&DataKey::Blacklisted(target.clone()), &true);
         env.events()
-            .publish((Symbol::new(&env, "address_blacklisted"),), target);
+            .publish((Symbol::new(&env, router_common::EVENT_ADDRESS_BLACKLISTED),), target);
         Ok(())
     }
 
@@ -260,7 +305,7 @@ impl RouterAccess {
             .instance()
             .remove(&DataKey::Blacklisted(target.clone()));
         env.events()
-            .publish((Symbol::new(&env, "address_unblacklisted"),), target);
+            .publish((Symbol::new(&env, router_common::EVENT_ADDRESS_UNBLACKLISTED),), target);
         Ok(())
     }
 
@@ -310,7 +355,7 @@ impl RouterAccess {
             .instance()
             .set(&DataKey::SuperAdmin, &new_admin);
         env.events().publish(
-            (Symbol::new(&env, "admin_transferred"),),
+            (Symbol::new(&env, router_common::EVENT_ADMIN_TRANSFERRED),),
             (current, new_admin),
         );
         Ok(())
@@ -338,7 +383,7 @@ impl RouterAccess {
             .instance()
             .remove(&DataKey::HasRole(role.clone(), target.clone()));
         env.events()
-            .publish((Symbol::new(&env, "role_expired"),), (role, target));
+            .publish((Symbol::new(&env, router_common::EVENT_ROLE_EXPIRED),), (role, target));
         Ok(())
     }
 
@@ -375,6 +420,9 @@ impl RouterAccess {
         role: &String,
         expires_in: Option<u64>,
     ) -> Result<(), AccessError> {
+        // Grant can transition an (role, account) pair from inactive to active.
+        // Maintain RoleMemberCount without iterating RoleMembers.
+
         if Self::is_blacklisted_internal(env, account) {
             return Err(AccessError::Blacklisted);
         }
@@ -422,7 +470,7 @@ impl RouterAccess {
         env.storage().instance().set(&key, &expiry_timestamp);
 
         env.events().publish(
-            (Symbol::new(env, "role_grant"),),
+            (Symbol::new(env, router_common::EVENT_ROLE_GRANT),),
             (account.clone(), role.clone(), expiry_timestamp),
         );
         Ok(())
