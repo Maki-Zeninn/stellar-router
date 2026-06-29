@@ -257,12 +257,26 @@ pub struct BatchCallSuccess {
     pub result: CallResult,
 }
 
+/// Structured error variants for batch item failures.
+///
+/// Clients can match on these variants instead of string-comparing error messages,
+/// enabling reliable programmatic error handling across contract versions.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum BatchItemError {
+    AlreadyExists,
+    InvalidName,
+    Unauthorized,
+    InvalidMetadata,
+    Custom(String),
+}
+
 /// Indexed failure entry for batch operations.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct BatchFailure {
     pub index: u32,
-    pub message: String,
+    pub error: BatchItemError,
 }
 
 /// Standardized per-index batch operation result for void operations (`T = BatchUnit`).
@@ -293,11 +307,8 @@ impl BatchResult {
         self.successes.push_back(BatchSuccess { index });
     }
 
-    pub fn record_failure(&mut self, env: &Env, index: u32, message: &str) {
-        self.failures.push_back(BatchFailure {
-            index,
-            message: String::from_str(env, message),
-        });
+    pub fn record_failure(&mut self, index: u32, error: BatchItemError) {
+        self.failures.push_back(BatchFailure { index, error });
     }
 
     pub fn has_failures(&self) -> bool {
@@ -320,11 +331,8 @@ impl BatchCallResult {
         });
     }
 
-    pub fn record_failure(&mut self, env: &Env, index: u32, message: &str) {
-        self.failures.push_back(BatchFailure {
-            index,
-            message: String::from_str(env, message),
-        });
+    pub fn record_failure(&mut self, index: u32, error: BatchItemError) {
+        self.failures.push_back(BatchFailure { index, error });
     }
 
     pub fn has_failures(&self) -> bool {
