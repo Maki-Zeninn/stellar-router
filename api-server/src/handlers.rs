@@ -1,25 +1,59 @@
-use axum::{extract::{Path, State}, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
 use serde_json::json;
 use tracing::{error, info};
+use utoipa::ToSchema;
 
 use crate::{
     state::AppState,
     types::{
-        ErrorResponse,
-        FeeEstimate,
-        RouteBreakdown,
-        RouteDetails,
-        SimulateRequest,
-        SimulateResponse,
-        SimulationDetail,
+        ErrorCode, ErrorResponse, FeeEstimate, HealthResponse, RouteListResponse, RouteEntryResponse,
+        SimulateRequest, SimulateResponse, SimulationDetail,
     },
 };
 
+#[utoipa::path(
+    get,
+    path = "/health",
+    responses(
+        (status = 200, description = "Service is healthy", body = HealthResponse),
+        (status = 503, description = "RPC is unavailable", body = HealthResponse),
+    )
+)]
 /// GET /health
-pub async fn health() -> impl IntoResponse {
-    (StatusCode::OK, Json(json!({"status": "ok"})))
+pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
+    match state.rpc.health_check().await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(HealthResponse {
+                status: "ok".to_string(),
+                rpc: "up".to_string(),
+            }),
+        ),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(HealthResponse {
+                status: "degraded".to_string(),
+                rpc: "down".to_string(),
+            }),
+        ),
+    }
 }
 
+#[utoipa::path(
+    post,
+    path = "/simulate",
+    request_body = SimulateRequest,
+    responses(
+        (status = 200, description = "Simulation completed", body = SimulateResponse),
+        (status = 400, description = "Validation failed", body = ErrorResponse),
+        (status = 500, description = "RPC or simulation error", body = ErrorResponse),
+    )
+)]
 /// POST /simulate
 ///
 /// Calls the Soroban RPC `simulateTransaction` endpoint to get real fee
@@ -31,16 +65,22 @@ pub async fn simulate(
     if req.target.is_empty() || req.function.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse { error: "target and function are required".to_string() }),
+            Json(ErrorResponse::with_field(
+                ErrorCode::ValidationError,
+                "target and function are required",
+                "target",
+            )),
         ));
     }
 
     if req.target.len() != 56 || !req.target.starts_with('C') {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "target must be a 56-character Stellar contract ID starting with C".to_string(),
-            }),
+            Json(ErrorResponse::with_field(
+                ErrorCode::ValidationError,
+                "target must be a 56-character Stellar contract ID starting with C",
+                "target",
+            )),
         ));
     }
 
@@ -50,7 +90,12 @@ pub async fn simulate(
         .rpc
         .simulate(&req.target, &req.function, req.amount, req.network_load_bps)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(ErrorCode::RpcError, e.to_string())),
+            )
+        })?;
 
     Ok(Json(SimulateResponse {
         success: breakdown.would_succeed,
@@ -60,6 +105,7 @@ pub async fn simulate(
             total_fee: breakdown.total_fee,
             surge_multiplier: breakdown.surge_multiplier,
             high_load: breakdown.high_load,
+            fee_estimated: breakdown.fee_estimated,
         },
         simulation: SimulationDetail {
             target: req.target,
@@ -74,6 +120,16 @@ pub async fn simulate(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/routes/{name}",
+    params(("name" = String, Path, description = "Route name")),
+    responses(
+        (status = 200, description = "Route entry returned", body = RouteEntryResponse),
+        (status = 404, description = "Route not found", body = ErrorResponse),
+        (status = 500, description = "RPC error", body = ErrorResponse),
+    )
+)]
 /// GET /routes/:name
 ///
 /// Calls router-core::get_route(name) via the Soroban RPC and returns the
@@ -88,26 +144,44 @@ pub async fn get_route(
         Ok(Some(entry)) => Ok((StatusCode::OK, Json(entry))),
         Ok(None) => Err((
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse { error: format!("route '{}' not found", name) }),
+            Json(ErrorResponse::new(
+                ErrorCode::NotFound,
+                format!("route '{}' not found", name),
+            )),
+            Json(ErrorResponse {
+                error: format!("route '{}' not found", name),
+            }),
         )),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e.to_string() }),
+            Json(ErrorResponse::new(ErrorCode::RpcError, e.to_string())),
         )),
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/routes",
+    responses(
+        (status = 200, description = "List of routes", body = RouteListResponse),
+        (status = 503, description = "Router core contract not configured", body = ErrorResponse),
+        (status = 500, description = "RPC error", body = ErrorResponse),
+    )
+)]
 /// GET /routes
 ///
 /// Calls `get_all_routes` on the router-core contract via Soroban RPC and
 /// returns the list of registered route names as JSON.
 pub async fn list_routes(
     State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<RouteListResponse>, (StatusCode, Json<ErrorResponse>)> {
     if state.router_core_contract_id.is_empty() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
-            "ROUTER_CORE_CONTRACT_ID not configured".to_string(),
+            Json(ErrorResponse::new(
+                ErrorCode::InternalError,
+                "ROUTER_CORE_CONTRACT_ID not configured",
+            )),
         ));
     }
 
@@ -117,9 +191,12 @@ pub async fn list_routes(
         .await
         .map_err(|e| {
             error!("Failed to fetch routes: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(ErrorCode::RpcError, e.to_string())),
+            )
         })?;
 
     info!("Returning {} routes", routes.len());
-    Ok(Json(json!({ "routes": routes })))
+    Ok(Json(RouteListResponse { routes }))
 }

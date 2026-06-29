@@ -1,5 +1,3 @@
-version: "3.9"
-
 # ── stellar-router local development stack ────────────────────────────────────
 #
 # Usage:
@@ -11,6 +9,26 @@ version: "3.9"
 # metrics/docker-compose.yml but wires the exporter to the local build.
 
 services:
+  # ── API server ───────────────────────────────────────────────────────────────
+  api-server:
+    build:
+      context: ./api-server
+      dockerfile: Dockerfile
+    environment:
+      LISTEN_ADDR: 0.0.0.0:8080
+      SOROBAN_RPC_URL: ${SOROBAN_RPC_URL:-https://soroban-testnet.stellar.org}
+      ROUTER_EXECUTION_CONTRACT_ID: ${ROUTER_EXECUTION_CONTRACT_ID:-}
+      ROUTER_CORE_CONTRACT_ID: ${ROUTER_CORE_CONTRACT_ID:-}
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    profiles: ["api"]
+
   # ── Unit tests ──────────────────────────────────────────────────────────────
   tests:
     build:
@@ -45,6 +63,12 @@ services:
       ROUTER_SCRAPE_INTERVAL_SECS: ${ROUTER_SCRAPE_INTERVAL_SECS:-15}
     ports:
       - "9090:9090"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     depends_on:
       - prometheus
 
@@ -68,6 +92,8 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - grafana-data:/var/lib/grafana
+      - ./metrics/dashboards:/var/lib/grafana/dashboards:ro
+      - ./metrics/provisioning:/etc/grafana/provisioning:ro
     ports:
       - "3000:3000"
     depends_on:
@@ -78,4 +104,3 @@ volumes:
   target-cache:
   prometheus-data:
   grafana-data:
-  artifacts:

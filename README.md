@@ -38,20 +38,20 @@ graph TD
     RPC <--> Core
     
     %% Internal Dependency/Flow
-    Core --> Registry : lookup address
-    Core --> Access : verify permissions
-    Core --> Middleware : pre/post call hooks
-    Core --> Timelock : queue sensitive changes
+    Core -->|lookup address| Registry
+    Core -->|verify permissions| Access
+    Core -->|pre/post call hooks| Middleware
+    Core -->|queue sensitive changes| Timelock
     
-    Execution --> Core : resolve routes
-    Quote --> Execution : simulate flow
+    Execution -->|resolve routes| Core
+    Quote -->|simulate flow| Execution
     
-    Multicall --> Core : batch resolution
+    Multicall -->|batch resolution| Core
     
     %% Monitoring Flow
-    Metrics --> RPC : poll contract state
-    Metrics --> Prometheus : expose metrics
-    API -.-> Prometheus : query for dashboards
+    Metrics -->|poll contract state| RPC
+    Metrics -->|expose metrics| Prometheus
+    API -.->|query for dashboards| Prometheus
     
     %% Styling
     style Core fill:#f9f,stroke:#333,stroke-width:4px

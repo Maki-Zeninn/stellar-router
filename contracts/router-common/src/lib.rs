@@ -10,6 +10,16 @@
 //! - [`require_admin_simple!`] — convenience macro for standard DataKey::Admin and error variants
 //! - [`admin_transfer_complete!`] — shared admin transfer pattern (storage set + event emit)
 //!
+//! ## Storage Helpers
+//!
+//! Shared instance-storage patterns are consolidated to remove per-contract
+//! boilerplate while keeping each contract's own `DataKey` enum:
+//! - [`CommonDataKey`] — shared `Admin` storage key
+//! - [`get_admin`] / [`set_admin`] — admin address accessors
+//! - [`is_initialized`] / [`require_initialized`] / [`require_uninitialized`] — initialization guards
+//! - [`extend_instance_ttl`] — instance-storage TTL extension wrapper
+//! - [`StorageHelper`] — trait with default implementations of the above
+//!
 //! ## Event Topic Naming Convention
 //!
 //! All event topics across stellar-router contracts follow these rules:
@@ -69,6 +79,36 @@ pub const EVENT_METADATA_UPDATED: &str = "metadata_updated";
 /// Standard event topic for alias additions
 pub const EVENT_ALIAS_ADDED: &str = "alias_added";
 
+/// Standard event topic for alias removals
+pub const EVENT_ALIAS_REMOVED: &str = "alias_removed";
+
+/// Standard event topic for alias resolution (emitted when resolve goes through an alias)
+pub const EVENT_ALIAS_RESOLVED: &str = "alias_resolved";
+
+/// Standard event topic for route removals
+pub const EVENT_ROUTE_REMOVED: &str = "route_removed";
+
+/// Standard event topic for route pause state changes
+pub const EVENT_ROUTE_PAUSED: &str = "route_paused";
+
+/// Standard event topic for router global pause state changes
+pub const EVENT_ROUTER_PAUSED: &str = "router_paused";
+
+/// Standard event topic for route tag additions
+pub const EVENT_ROUTE_TAG_ADDED: &str = "route_tag_added";
+
+/// Standard event topic for route tag removals
+pub const EVENT_ROUTE_TAG_REMOVED: &str = "route_tag_removed";
+
+/// Standard event topic for route TTL being set at registration
+pub const EVENT_ROUTE_TTL_SET: &str = "route_ttl_set";
+
+/// Standard event topic for route TTL extensions
+pub const EVENT_ROUTE_TTL_EXTENDED: &str = "route_ttl_extended";
+
+/// Standard event topic for resolution attempts on an expired route
+pub const EVENT_ROUTE_RESOLVE_EXPIRED: &str = "route_resolve_expired";
+
 /// Standard event topic for role grants
 pub const EVENT_ROLE_GRANTED: &str = "role_granted";
 
@@ -111,11 +151,29 @@ pub const EVENT_POST_CALL: &str = "post_call";
 /// Standard event topic for circuit breaker opening
 pub const EVENT_CIRCUIT_OPENED: &str = "circuit_opened";
 
+/// Standard event topic for circuit breaker closing
+pub const EVENT_CIRCUIT_CLOSED: &str = "circuit_closed";
+
+/// Standard event topic for middleware enable/disable
+pub const EVENT_MIDDLEWARE_ENABLED: &str = "middleware_enabled";
+
+/// Standard event topic for rate limit throttling
+pub const EVENT_RATE_LIMIT_THROTTLED: &str = "rate_limit_throttled";
+
+/// Standard event topic for rate limit exceeded
+pub const EVENT_RATE_LIMIT_EXCEEDED: &str = "rate_limit_exceeded";
+
 /// Standard event topic for call log clearing
 pub const EVENT_CALL_LOG_CLEARED: &str = "call_log_cleared";
 
 /// Standard event topic for multicall results
 pub const EVENT_CALL_RESULT: &str = "call_result";
+
+/// Standard event topic for a required call failure in multicall (includes index + contract context)
+pub const EVENT_CALL_FAILED: &str = "call_failed";
+
+/// Standard event topic for batch execution completion
+pub const EVENT_BATCH_EXECUTED: &str = "batch_executed";
 
 /// Standard event topic for max batch size updates
 pub const EVENT_MAX_BATCH_SIZE_UPDATED: &str = "max_batch_size_updated";
@@ -123,11 +181,156 @@ pub const EVENT_MAX_BATCH_SIZE_UPDATED: &str = "max_batch_size_updated";
 /// Standard event topic for timelock operation queueing
 pub const EVENT_OP_QUEUED: &str = "op_queued";
 
+/// Standard event topic for timelock operation execution
+pub const EVENT_OP_EXECUTED: &str = "op_executed";
+
+/// Standard event topic for timelock operation cancellation
+pub const EVENT_OP_CANCELLED: &str = "op_cancelled";
+
+/// Standard event topic for timelock operation description updates
+pub const EVENT_OP_DESCRIPTION_UPDATED: &str = "op_description_updated";
+
+/// Standard event topic for timelock minimum delay updates
+pub const EVENT_MIN_DELAY_UPDATED: &str = "min_delay_updated";
+
 /// Standard event topic for contract registration in registry
 pub const EVENT_CONTRACT_REGISTERED: &str = "contract_registered";
 
 /// Standard event topic for contract deprecation in registry
 pub const EVENT_CONTRACT_DEPRECATED: &str = "contract_deprecated";
+
+/// Standard event topic for contract/module initialisation
+pub const EVENT_INITIALIZED: &str = "initialized";
+
+/// Standard event topic for per-route fee configuration
+pub const EVENT_ROUTE_FEE_SET: &str = "route_fee_set";
+
+/// Standard event topic for a quote being calculated
+pub const EVENT_QUOTE_CALCULATED: &str = "quote_calculated";
+
+/// Standard event topic for the best quote being selected
+pub const EVENT_BEST_QUOTE_SELECTED: &str = "best_quote_selected";
+
+/// Standard event topic for the default fee being updated
+pub const EVENT_DEFAULT_FEE_UPDATED: &str = "default_fee_updated";
+
+/// Standard event topic for a role admin being set
+pub const EVENT_ROLE_ADMIN_SET: &str = "role_admin_set";
+
+/// Standard event topic for an address being un-blacklisted
+pub const EVENT_ADDRESS_UNBLACKLISTED: &str = "address_unblacklisted";
+
+/// Standard event topic for a role grant (pending or direct)
+pub const EVENT_ROLE_GRANT: &str = "role_grant";
+
+/// Standard event topic for a role expiring
+pub const EVENT_ROLE_EXPIRED: &str = "role_expired";
+
+/// Standard event topic for cleaning up completed/cancelled timelock ops
+pub const EVENT_OPS_CLEANED: &str = "ops_cleaned";
+
+// ── Batch types ───────────────────────────────────────────────────────────────
+
+use soroban_sdk::{contracttype, Address, Env, IntoVal, String, Symbol, Val, Vec};
+
+/// Per-call result payload used by multicall batch operations.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CallResult {
+    pub target: Address,
+    pub function: Symbol,
+    pub success: bool,
+}
+
+/// Indexed success entry for void batch operations.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BatchSuccess {
+    pub index: u32,
+}
+
+/// Indexed success entry for call batch operations.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BatchCallSuccess {
+    pub index: u32,
+    pub result: CallResult,
+}
+
+/// Indexed failure entry for batch operations.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BatchFailure {
+    pub index: u32,
+    pub message: String,
+}
+
+/// Standardized per-index batch operation result for void operations (`T = BatchUnit`).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BatchResult {
+    pub successes: Vec<BatchSuccess>,
+    pub failures: Vec<BatchFailure>,
+}
+
+/// Standardized per-index batch operation result for call operations (`T = CallResult`).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BatchCallResult {
+    pub successes: Vec<BatchCallSuccess>,
+    pub failures: Vec<BatchFailure>,
+}
+
+impl BatchResult {
+    pub fn new(env: &Env) -> Self {
+        Self {
+            successes: Vec::new(env),
+            failures: Vec::new(env),
+        }
+    }
+
+    pub fn record_success(&mut self, index: u32) {
+        self.successes.push_back(BatchSuccess { index });
+    }
+
+    pub fn record_failure(&mut self, env: &Env, index: u32, message: &str) {
+        self.failures.push_back(BatchFailure {
+            index,
+            message: String::from_str(env, message),
+        });
+    }
+
+    pub fn has_failures(&self) -> bool {
+        !self.failures.is_empty()
+    }
+}
+
+impl BatchCallResult {
+    pub fn new(env: &Env) -> Self {
+        Self {
+            successes: Vec::new(env),
+            failures: Vec::new(env),
+        }
+    }
+
+    pub fn record_success(&mut self, index: u32, value: CallResult) {
+        self.successes.push_back(BatchCallSuccess {
+            index,
+            result: value,
+        });
+    }
+
+    pub fn record_failure(&mut self, env: &Env, index: u32, message: &str) {
+        self.failures.push_back(BatchFailure {
+            index,
+            message: String::from_str(env, message),
+        });
+    }
+
+    pub fn has_failures(&self) -> bool {
+        !self.failures.is_empty()
+    }
+}
 
 /// Checks that `caller` matches the admin address stored under `key`.
 ///
@@ -150,11 +353,8 @@ pub const EVENT_CONTRACT_DEPRECATED: &str = "contract_deprecated";
 #[macro_export]
 macro_rules! require_admin {
     ($env:expr, $caller:expr, $key:expr, $not_init_err:expr, $unauth_err:expr) => {{
-        let admin: soroban_sdk::Address = $env
-            .storage()
-            .instance()
-            .get($key)
-            .ok_or($not_init_err)?;
+        let admin: soroban_sdk::Address =
+            $env.storage().instance().get($key).ok_or($not_init_err)?;
         if &admin != $caller {
             return Err($unauth_err);
         }
@@ -273,13 +473,264 @@ mod tests {
 /// ```
 #[macro_export]
 macro_rules! admin_transfer_complete {
-    ($env:expr, $current:expr, $new_admin:expr, $data_key_expr:expr) => {
-        {
-            $env.storage().instance().set($data_key_expr, $new_admin);
-            $env.events().publish(
-                (soroban_sdk::Symbol::new($env, $crate::EVENT_ADMIN_TRANSFERRED),),
-                ($current, $new_admin),
-            );
+    ($env:expr, $current:expr, $new_admin:expr, $data_key_expr:expr) => {{
+        $env.storage().instance().set($data_key_expr, $new_admin);
+        $env.events().publish(
+            (soroban_sdk::Symbol::new(
+                $env,
+                $crate::EVENT_ADMIN_TRANSFERRED,
+            ),),
+            ($current, $new_admin),
+        );
+    }};
+}
+
+// ── Shared storage keys & helpers ───────────────────────────────────────────────
+
+/// Shared storage key for the admin address.
+///
+/// Each contract still owns its contract-specific `DataKey` enum, but the common
+/// `Admin` key is consolidated here so the admin get/set/initialization helpers
+/// below can be reused without redefining the variant in every contract.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum CommonDataKey {
+    /// Address of the contract administrator.
+    Admin,
+}
+
+/// Reads the admin address stored under `key`, or `None` if it has not been set.
+///
+/// `key` is generic so callers can pass their own `DataKey::Admin`, the shared
+/// [`CommonDataKey::Admin`], or any equivalent storage key.
+pub fn get_admin<K>(env: &Env, key: &K) -> Option<Address>
+where
+    K: IntoVal<Env, Val>,
+{
+    env.storage().instance().get(key)
+}
+
+/// Stores `admin` as the admin address under `key`.
+pub fn set_admin<K>(env: &Env, key: &K, admin: &Address)
+where
+    K: IntoVal<Env, Val>,
+{
+    env.storage().instance().set(key, admin);
+}
+
+/// Returns `true` if a value is present under `key` (used as the initialization guard).
+pub fn is_initialized<K>(env: &Env, key: &K) -> bool
+where
+    K: IntoVal<Env, Val>,
+{
+    env.storage().instance().has(key)
+}
+
+/// Returns `Ok(())` when a value exists under `key`, otherwise `Err(not_init_err)`.
+///
+/// Use this to guard operations that require the contract to already be initialized.
+pub fn require_initialized<K, E>(env: &Env, key: &K, not_init_err: E) -> Result<(), E>
+where
+    K: IntoVal<Env, Val>,
+{
+    if env.storage().instance().has(key) {
+        Ok(())
+    } else {
+        Err(not_init_err)
+    }
+}
+
+/// Returns `Ok(())` when no value exists under `key`, otherwise `Err(already_init_err)`.
+///
+/// Use this in `initialize` to reject double initialization.
+pub fn require_uninitialized<K, E>(env: &Env, key: &K, already_init_err: E) -> Result<(), E>
+where
+    K: IntoVal<Env, Val>,
+{
+    if env.storage().instance().has(key) {
+        Err(already_init_err)
+    } else {
+        Ok(())
+    }
+}
+
+/// Extends the time-to-live of the contract's instance storage.
+///
+/// Thin wrapper over `env.storage().instance().extend_ttl` so the common
+/// `(threshold, extend_to)` pattern is expressed once.
+pub fn extend_instance_ttl(env: &Env, threshold: u32, extend_to: u32) {
+    env.storage().instance().extend_ttl(threshold, extend_to);
+}
+
+/// Default implementations for the admin and initialization storage patterns
+/// shared across router contracts.
+///
+/// A contract opts in by implementing the three associated items — the admin
+/// storage key plus its two initialization-related error variants — and gains
+/// the admin get/set and initialization-guard helpers for free.
+///
+/// # Example
+///
+/// ```ignore
+/// struct MyContractStorage;
+///
+/// impl router_common::StorageHelper for MyContractStorage {
+///     type Key = DataKey;
+///     type Error = MyError;
+///
+///     fn admin_key(_env: &Env) -> DataKey { DataKey::Admin }
+///     fn not_initialized_error() -> MyError { MyError::NotInitialized }
+///     fn already_initialized_error() -> MyError { MyError::AlreadyInitialized }
+/// }
+///
+/// // later:
+/// MyContractStorage::require_uninitialized(&env)?;
+/// MyContractStorage::set_admin(&env, &admin);
+/// ```
+pub trait StorageHelper {
+    /// Storage key type for this contract (typically its own `DataKey`).
+    type Key: IntoVal<Env, Val>;
+    /// Error type returned by the initialization guard helpers.
+    type Error;
+
+    /// The storage key under which the admin address is stored.
+    fn admin_key(env: &Env) -> Self::Key;
+    /// Error variant returned when the contract has not been initialized.
+    fn not_initialized_error() -> Self::Error;
+    /// Error variant returned when the contract is already initialized.
+    fn already_initialized_error() -> Self::Error;
+
+    /// Reads the admin address, or `None` if unset.
+    fn get_admin(env: &Env) -> Option<Address> {
+        crate::get_admin(env, &Self::admin_key(env))
+    }
+
+    /// Stores `admin` as the admin address.
+    fn set_admin(env: &Env, admin: &Address) {
+        crate::set_admin(env, &Self::admin_key(env), admin);
+    }
+
+    /// Returns `true` if the admin address is set.
+    fn is_initialized(env: &Env) -> bool {
+        crate::is_initialized(env, &Self::admin_key(env))
+    }
+
+    /// Errors with `not_initialized_error()` unless the contract is initialized.
+    fn require_initialized(env: &Env) -> Result<(), Self::Error> {
+        crate::require_initialized(env, &Self::admin_key(env), Self::not_initialized_error())
+    }
+
+    /// Errors with `already_initialized_error()` if the contract is already initialized.
+    fn require_uninitialized(env: &Env) -> Result<(), Self::Error> {
+        crate::require_uninitialized(
+            env,
+            &Self::admin_key(env),
+            Self::already_initialized_error(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod storage_helper_tests {
+    use super::*;
+    use soroban_sdk::{contract, contracterror, testutils::Address as _};
+
+    #[contract]
+    struct TestContract;
+
+    #[contracterror]
+    #[derive(Copy, Clone, Debug, PartialEq)]
+    enum TestError {
+        NotInitialized = 1,
+        AlreadyInitialized = 2,
+    }
+
+    struct TestStorage;
+
+    impl StorageHelper for TestStorage {
+        type Key = CommonDataKey;
+        type Error = TestError;
+
+        fn admin_key(_env: &Env) -> CommonDataKey {
+            CommonDataKey::Admin
         }
-    };
+        fn not_initialized_error() -> TestError {
+            TestError::NotInitialized
+        }
+        fn already_initialized_error() -> TestError {
+            TestError::AlreadyInitialized
+        }
+    }
+
+    #[test]
+    fn admin_round_trips_through_helpers() {
+        let env = Env::default();
+        let id = env.register_contract(None, TestContract);
+        env.as_contract(&id, || {
+            let admin = Address::generate(&env);
+            assert!(get_admin(&env, &CommonDataKey::Admin).is_none());
+            set_admin(&env, &CommonDataKey::Admin, &admin);
+            assert_eq!(get_admin(&env, &CommonDataKey::Admin), Some(admin));
+        });
+    }
+
+    #[test]
+    fn initialization_guards_behave() {
+        let env = Env::default();
+        let id = env.register_contract(None, TestContract);
+        env.as_contract(&id, || {
+            assert!(!is_initialized(&env, &CommonDataKey::Admin));
+            assert_eq!(
+                require_initialized(&env, &CommonDataKey::Admin, TestError::NotInitialized),
+                Err(TestError::NotInitialized)
+            );
+            assert_eq!(
+                require_uninitialized(&env, &CommonDataKey::Admin, TestError::AlreadyInitialized),
+                Ok(())
+            );
+
+            set_admin(&env, &CommonDataKey::Admin, &Address::generate(&env));
+
+            assert!(is_initialized(&env, &CommonDataKey::Admin));
+            assert_eq!(
+                require_initialized(&env, &CommonDataKey::Admin, TestError::NotInitialized),
+                Ok(())
+            );
+            assert_eq!(
+                require_uninitialized(&env, &CommonDataKey::Admin, TestError::AlreadyInitialized),
+                Err(TestError::AlreadyInitialized)
+            );
+        });
+    }
+
+    #[test]
+    fn trait_defaults_delegate_to_free_functions() {
+        let env = Env::default();
+        let id = env.register_contract(None, TestContract);
+        env.as_contract(&id, || {
+            assert!(!TestStorage::is_initialized(&env));
+            assert_eq!(TestStorage::require_uninitialized(&env), Ok(()));
+
+            let admin = Address::generate(&env);
+            TestStorage::set_admin(&env, &admin);
+
+            assert_eq!(TestStorage::get_admin(&env), Some(admin));
+            assert!(TestStorage::is_initialized(&env));
+            assert_eq!(TestStorage::require_initialized(&env), Ok(()));
+            assert_eq!(
+                TestStorage::require_uninitialized(&env),
+                Err(TestError::AlreadyInitialized)
+            );
+        });
+    }
+
+    #[test]
+    fn extend_instance_ttl_does_not_panic() {
+        let env = Env::default();
+        let id = env.register_contract(None, TestContract);
+        env.as_contract(&id, || {
+            set_admin(&env, &CommonDataKey::Admin, &Address::generate(&env));
+            extend_instance_ttl(&env, 100, 1000);
+        });
+    }
 }

@@ -1,0 +1,9 @@
+# Storage Baseline for stellar-router contracts
+# Format: contract_name storage_key_count max_entry_bytes
+# Update this file when storage usage intentionally changes.
+router-core 4 256
+router-registry 3 512
+router-access 4 128
+router-middleware 5 256
+router-timelock 4 512
+router-multicall 3 128

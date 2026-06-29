@@ -11,6 +11,8 @@
 //! - Retry logic for transient (network) failures
 //! - Centralized error event logging
 //! - Fee estimation endpoint with edge-case handling
+//! - Bounded execution history: capped at `max_history_size` records (default
+//!   1000), oldest entries evicted first, to prevent unbounded storage growth
 //!
 //! ## Events (following naming convention: past tense verbs in snake_case)
 //! - `execution_result` — Execution result logged (target, function, success, attempts)
@@ -21,6 +23,23 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
 };
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+/// Fixed-point scale factor used for multiplier arithmetic (100 = 1.0×).
+/// e.g. backoff_multiplier=200 means 2.0×, 150 means 1.5×.
+const FIXED_POINT_SCALE: u32 = 100;
+
+/// Minimum valid backoff multiplier: 100 = 1.0× (no growth, constant delay).
+const MIN_BACKOFF_MULTIPLIER: u32 = FIXED_POINT_SCALE;
+
+/// Maximum valid backoff multiplier: 10_000 = 100.0× to prevent overflow and runaway delays.
+const MAX_BACKOFF_MULTIPLIER: u32 = 10_000;
+
+/// Default cap on the number of `ExecutionRecord`s kept in `ExecHistory`
+/// when no explicit limit has been configured via `set_max_history_size`.
+/// Bounds per-entry storage growth so the history can't grow unbounded.
+const DEFAULT_MAX_HISTORY_SIZE: u32 = 1000;
+
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -29,9 +48,11 @@ pub enum DataKey {
     MaxRetries,
     TotalExecutions,
     TotalErrors,
-    BackoffBaseMs,    // base delay in milliseconds before first retry
+    BackoffBaseMs,     // base delay in milliseconds before first retry
     BackoffMultiplier, // multiplier applied each retry (stored as fixed-point *100, e.g. 200 = 2x)
-    ExecHistory,   // Vec<ExecutionRecord>
+    ExecHistory,       // Vec<ExecutionRecord>, capped at MaxHistorySize (oldest evicted first)
+    MaxHistorySize,    // u32 — cap on ExecHistory length
+    MaxHistorySize, // u32 — cap on ExecHistory length
 }
 
 // ── Error Types ───────────────────────────────────────────────────────────────
@@ -145,6 +166,30 @@ pub struct FeeEstimate {
     pub high_load: bool,
 }
 
+// ── Fee estimation constants ──────────────────────────────────────────────────
+
+/// Minimum base fee in stroops (Stellar network minimum transaction fee).
+const BASE_FEE_STROOPS: i128 = 100;
+
+/// Scaling divisor for resource fee: amount / FEE_SCALE_DIVISOR gives the
+/// proportional resource fee (0.1% of amount).
+const FEE_SCALE_DIVISOR: i128 = 1000;
+
+/// Minimum resource fee in stroops; applies when the scaled amount is below
+/// this floor.
+const MIN_RESOURCE_FEE_STROOPS: i128 = 100;
+
+/// Network utilization basis-point threshold above which surge (2×) pricing
+/// is applied (8000 bps = 80%).
+const HIGH_LOAD_THRESHOLD_BPS: u32 = 8000;
+
+/// Surge pricing multiplier applied when the network is under high load
+/// (stored as a percentage: 200 = 2×).
+const SURGE_MULTIPLIER: u32 = 200;
+
+/// Normal (no-surge) pricing multiplier (100 = 1×).
+const NORMAL_MULTIPLIER: u32 = 100;
+
 // ── Contract ──────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -159,11 +204,11 @@ impl RouterExecution {
     /// * `max_retries` - Global cap on per-request retry attempts (max 5).
     /// * `backoff_base_ms` - Base delay in milliseconds before the first retry (0 = no delay).
     /// * `backoff_multiplier` - Multiplier applied each retry, as fixed-point *100
-    ///   (e.g. 200 = 2x, 150 = 1.5x). Must be >= 100.
+    ///   (e.g. 200 = 2x, 150 = 1.5x). Must be >= 100 and <= 10000.
     ///
     /// # Errors
     /// * [`ExecutionError::AlreadyInitialized`] — called more than once.
-    /// * [`ExecutionError::InvalidConfig`] — `max_retries` exceeds 5 or `backoff_multiplier` < 100.
+    /// * [`ExecutionError::InvalidConfig`] — `max_retries` exceeds 5 or `backoff_multiplier` < 100 or > 10000.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -174,17 +219,25 @@ impl RouterExecution {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(ExecutionError::AlreadyInitialized);
         }
-        if max_retries > 5 {
+        if max_retries == 0 || max_retries > 5 {
             return Err(ExecutionError::InvalidConfig);
         }
-        if backoff_multiplier < 100 {
+        if backoff_multiplier < MIN_BACKOFF_MULTIPLIER || backoff_multiplier > MAX_BACKOFF_MULTIPLIER {
             return Err(ExecutionError::InvalidConfig);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::MaxRetries, &max_retries);
-        env.storage().instance().set(&DataKey::BackoffBaseMs, &backoff_base_ms);
-        env.storage().instance().set(&DataKey::BackoffMultiplier, &backoff_multiplier);
-        env.storage().instance().set(&DataKey::TotalExecutions, &0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxRetries, &max_retries);
+        env.storage()
+            .instance()
+            .set(&DataKey::BackoffBaseMs, &backoff_base_ms);
+        env.storage()
+            .instance()
+            .set(&DataKey::BackoffMultiplier, &backoff_multiplier);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalExecutions, &0u64);
         env.storage().instance().set(&DataKey::TotalErrors, &0u64);
         Ok(())
     }
@@ -193,11 +246,11 @@ impl RouterExecution {
     ///
     /// # Arguments
     /// * `backoff_base_ms` - Base delay in milliseconds before the first retry.
-    /// * `backoff_multiplier` - Multiplier per retry as fixed-point *100 (min 100).
+    /// * `backoff_multiplier` - Multiplier per retry as fixed-point *100 (min 100, max 10000).
     ///
     /// # Errors
     /// * [`ExecutionError::Unauthorized`] — caller is not the admin.
-    /// * [`ExecutionError::InvalidConfig`] — `backoff_multiplier` < 100.
+    /// * [`ExecutionError::InvalidConfig`] — `backoff_multiplier` < 100 or > 10000.
     /// * [`ExecutionError::NotInitialized`] — contract not initialized.
     pub fn set_backoff_config(
         env: Env,
@@ -207,11 +260,15 @@ impl RouterExecution {
     ) -> Result<(), ExecutionError> {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, ExecutionError)?;
-        if backoff_multiplier < 100 {
+        if backoff_multiplier < MIN_BACKOFF_MULTIPLIER || backoff_multiplier > MAX_BACKOFF_MULTIPLIER {
             return Err(ExecutionError::InvalidConfig);
         }
-        env.storage().instance().set(&DataKey::BackoffBaseMs, &backoff_base_ms);
-        env.storage().instance().set(&DataKey::BackoffMultiplier, &backoff_multiplier);
+        env.storage()
+            .instance()
+            .set(&DataKey::BackoffBaseMs, &backoff_base_ms);
+        env.storage()
+            .instance()
+            .set(&DataKey::BackoffMultiplier, &backoff_multiplier);
         Ok(())
     }
 
@@ -219,8 +276,16 @@ impl RouterExecution {
     ///
     /// Returns `(backoff_base_ms, backoff_multiplier)`.
     pub fn backoff_config(env: Env) -> (u64, u32) {
-        let base: u64 = env.storage().instance().get(&DataKey::BackoffBaseMs).unwrap_or(0);
-        let mult: u32 = env.storage().instance().get(&DataKey::BackoffMultiplier).unwrap_or(100);
+        let base: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::BackoffBaseMs)
+            .unwrap_or(0);
+        let mult: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::BackoffMultiplier)
+            .unwrap_or(FIXED_POINT_SCALE);
         (base, mult)
     }
 
@@ -269,7 +334,13 @@ impl RouterExecution {
                 args,
             );
             if sim_result.is_err() {
-                Self::log_error(&env, &request.target, &request.function, ExecutionError::SimulationFailed, 0);
+                Self::log_error(
+                    &env,
+                    &request.target,
+                    &request.function,
+                    ExecutionError::SimulationFailed,
+                    0,
+                );
                 return Err(ExecutionError::SimulationFailed);
             }
         }
@@ -308,7 +379,7 @@ impl RouterExecution {
                         simulated: request.simulate_first,
                     };
                     env.events().publish(
-                        (Symbol::new(&env, "execution_result"),),
+                        (Symbol::new(&env, router_common::EVENT_EXECUTION_RESULT),),
                         (&request.target, &request.function, true, attempts),
                     );
                     return Ok(exec_result);
@@ -324,13 +395,19 @@ impl RouterExecution {
                             attempts - 1,
                         );
                         env.events().publish(
-                            (Symbol::new(&env, "execution_retry"),),
+                            (Symbol::new(&env, router_common::EVENT_EXECUTION_RETRY),),
                             (&request.target, &request.function, attempts, delay_ms),
                         );
                         // Retry
                         continue;
                     }
-                    Self::log_error(&env, &request.target, &request.function, ExecutionError::ContractRejected, attempts);
+                    Self::log_error(
+                        &env,
+                        &request.target,
+                        &request.function,
+                        ExecutionError::ContractRejected,
+                        attempts,
+                    );
                     Self::append_history(&env, &request.target, &request.function, false, 0);
                     return Err(ExecutionError::ContractRejected);
                 }
@@ -370,26 +447,31 @@ impl RouterExecution {
             return Err(ExecutionError::InvalidAmount);
         }
 
-        // Base fee: 100 stroops minimum (Stellar network minimum)
-        let base_fee: i128 = 100;
+        // Base fee: minimum Stellar network transaction fee
+        let base_fee: i128 = BASE_FEE_STROOPS;
 
-        // Resource fee scales with amount (0.1% of amount, min 100 stroops)
+        // Resource fee scales with amount (0.1% of amount, min MIN_RESOURCE_FEE_STROOPS)
         let resource_fee: i128 = {
-            let scaled = amount / 1000;
-            if scaled < 100 { 100 } else { scaled }
+            let scaled = amount / FEE_SCALE_DIVISOR;
+            if scaled < MIN_RESOURCE_FEE_STROOPS {
+                MIN_RESOURCE_FEE_STROOPS
+            } else {
+                scaled
+            }
         };
 
-        // Surge pricing: if high_load_threshold >= 8000 bps (80%), apply 2x multiplier
-        let (surge_multiplier, high_load) = if high_load_threshold >= 8000 {
-            (200u32, true)
+        // Surge pricing: apply 2x multiplier above HIGH_LOAD_THRESHOLD_BPS
+        let (surge_multiplier, high_load) = if high_load_threshold >= HIGH_LOAD_THRESHOLD_BPS {
+            (SURGE_MULTIPLIER, true)
         } else {
-            (100u32, false)
+            (NORMAL_MULTIPLIER, false)
         };
 
-        let total_fee = (base_fee + resource_fee) * surge_multiplier as i128 / 100;
+        let total_fee =
+            (base_fee + resource_fee) * surge_multiplier as i128 / FIXED_POINT_SCALE as i128;
 
         env.events().publish(
-            (Symbol::new(&env, "fee_estimated"),),
+            (Symbol::new(&env, router_common::EVENT_FEE_ESTIMATED),),
             (total_fee, high_load),
         );
 
@@ -445,7 +527,7 @@ impl RouterExecution {
         };
 
         env.events().publish(
-            (Symbol::new(&env, "simulation_result"),),
+            (Symbol::new(&env, router_common::EVENT_SIMULATION_RESULT),),
             (&target, &function, sim_ok),
         );
 
@@ -487,7 +569,32 @@ impl RouterExecution {
     /// * [`ExecutionError::Unauthorized`] — if `caller` is not the admin.
     /// * [`ExecutionError::NotInitialized`] — if the contract is not initialized.
     /// * [`ExecutionError::InvalidConfig`] — if `new_max` > 5.
-    pub fn set_max_retries(
+    pub fn set_max_retries(env: Env, caller: Address, new_max: u32) -> Result<(), ExecutionError> {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ExecutionError::NotInitialized)?;
+        if admin != caller {
+            return Err(ExecutionError::Unauthorized);
+        }
+        if new_max == 0 || new_max > 5 {
+            return Err(ExecutionError::InvalidConfig);
+        }
+        env.storage().instance().set(&DataKey::MaxRetries, &new_max);
+        Ok(())
+    }
+
+    /// Update the cap on the number of execution history records retained
+    /// (admin only). If the history currently holds more than `new_max`
+    /// records, the oldest excess records are evicted immediately.
+    ///
+    /// # Errors
+    /// * [`ExecutionError::Unauthorized`] — if `caller` is not the admin.
+    /// * [`ExecutionError::NotInitialized`] — if the contract is not initialized.
+    /// * [`ExecutionError::InvalidConfig`] — if `new_max` is zero.
+    pub fn set_max_history_size(
         env: Env,
         caller: Address,
         new_max: u32,
@@ -501,11 +608,32 @@ impl RouterExecution {
         if admin != caller {
             return Err(ExecutionError::Unauthorized);
         }
-        if new_max > 5 {
+        if new_max == 0 {
             return Err(ExecutionError::InvalidConfig);
         }
-        env.storage().instance().set(&DataKey::MaxRetries, &new_max);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxHistorySize, &new_max);
+
+        let mut history: Vec<ExecutionRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExecHistory)
+            .unwrap_or(Vec::new(&env));
+        while history.len() > new_max {
+            history.remove(0);
+        }
+        env.storage().instance().set(&DataKey::ExecHistory, &history);
+
         Ok(())
+    }
+
+    /// Get the current cap on the number of execution history records retained.
+    pub fn max_history_size(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxHistorySize)
+            .unwrap_or(DEFAULT_MAX_HISTORY_SIZE)
     }
 
     /// Return up to `limit` most-recent execution history records (newest first).
@@ -525,7 +653,11 @@ impl RouterExecution {
             .get(&DataKey::ExecHistory)
             .unwrap_or(Vec::new(&env));
         let len = history.len();
-        let take = if limit as u32 > len { len } else { limit as u32 };
+        let take = if limit as u32 > len {
+            len
+        } else {
+            limit as u32
+        };
         let mut result = Vec::new(&env);
         // Return newest-first: iterate from the end
         let mut i = len;
@@ -553,8 +685,16 @@ impl RouterExecution {
     ///
     /// Returns `(total_executions, total_errors)`.
     pub fn stats(env: Env) -> (u64, u64) {
-        let execs: u64 = env.storage().instance().get(&DataKey::TotalExecutions).unwrap_or(0);
-        let errors: u64 = env.storage().instance().get(&DataKey::TotalErrors).unwrap_or(0);
+        let execs: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalExecutions)
+            .unwrap_or(0);
+        let errors: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalErrors)
+            .unwrap_or(0);
         (execs, errors)
     }
 
@@ -569,17 +709,23 @@ impl RouterExecution {
     pub(crate) fn compute_backoff_ms(base_ms: u64, multiplier: u32, attempt_index: u32) -> u64 {
         let mut delay = base_ms;
         for _ in 0..attempt_index {
-            delay = delay.saturating_mul(multiplier as u64) / 100;
+            delay = delay.saturating_mul(multiplier as u64) / FIXED_POINT_SCALE as u64;
         }
         delay
     }
 
-    fn log_error(env: &Env, target: &Address, function: &Symbol, error: ExecutionError, attempts: u32) {
+    fn log_error(
+        env: &Env,
+        target: &Address,
+        function: &Symbol,
+        error: ExecutionError,
+        attempts: u32,
+    ) {
         Self::increment_counter(env, &DataKey::TotalErrors);
         // Emit a structured error event; does not leak internal details beyond
         // the error code and attempt count.
         env.events().publish(
-            (Symbol::new(env, "execution_error"),),
+            (Symbol::new(env, router_common::EVENT_EXECUTION_ERROR),),
             (target, function, error as u32, attempts),
         );
     }
@@ -589,7 +735,13 @@ impl RouterExecution {
         env.storage().instance().set(key, &(val + 1));
     }
 
-    fn append_history(env: &Env, target: &Address, function: &Symbol, success: bool, fee_paid: i128) {
+    fn append_history(
+        env: &Env,
+        target: &Address,
+        function: &Symbol,
+        success: bool,
+        fee_paid: i128,
+    ) {
         let mut history: Vec<ExecutionRecord> = env
             .storage()
             .instance()
@@ -602,6 +754,20 @@ impl RouterExecution {
             success,
             fee_paid,
         });
+        env.storage()
+            .instance()
+            .set(&DataKey::ExecHistory, &history);
+
+        // Cap storage growth: evict the oldest record(s) once over the limit.
+        let max_history: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxHistorySize)
+            .unwrap_or(DEFAULT_MAX_HISTORY_SIZE);
+        while history.len() > max_history {
+            history.remove(0);
+        }
+
         env.storage().instance().set(&DataKey::ExecHistory, &history);
     }
 }
@@ -611,7 +777,10 @@ impl RouterExecution {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::{Address as _, Events as _}, Env, IntoVal};
+    use soroban_sdk::{
+        testutils::{Address as _, Events as _},
+        Env, IntoVal,
+    };
 
     fn setup() -> (Env, Address, RouterExecutionClient<'static>) {
         let env = Env::default();
@@ -628,6 +797,24 @@ mod tests {
         let (_, admin, client) = setup();
         let result = client.try_initialize(&admin, &1, &0, &100);
         assert_eq!(result, Err(Ok(ExecutionError::AlreadyInitialized)));
+    }
+
+    #[test]
+    fn test_initialize_max_retries_zero_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let result = client.try_initialize(&admin, &0, &0, &100);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_set_max_retries_zero_fails() {
+        let (_, admin, client) = setup();
+        let result = client.try_set_max_retries(&admin, &0);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
     }
 
     #[test]
@@ -669,7 +856,10 @@ mod tests {
         assert!(!estimate.high_load);
         assert_eq!(estimate.surge_multiplier, 100);
         assert_eq!(estimate.base_fee, 100);
-        assert_eq!(estimate.total_fee, estimate.base_fee + estimate.resource_fee);
+        assert_eq!(
+            estimate.total_fee,
+            estimate.base_fee + estimate.resource_fee
+        );
     }
 
     #[test]
@@ -681,7 +871,10 @@ mod tests {
         assert!(estimate.high_load);
         assert_eq!(estimate.surge_multiplier, 200);
         // total = (base + resource) * 2
-        assert_eq!(estimate.total_fee, (estimate.base_fee + estimate.resource_fee) * 2);
+        assert_eq!(
+            estimate.total_fee,
+            (estimate.base_fee + estimate.resource_fee) * 2
+        );
     }
 
     #[test]
@@ -757,6 +950,71 @@ mod tests {
         let attacker = Address::generate(&env);
         let result = client.try_set_max_retries(&attacker, &2);
         assert_eq!(result, Err(Ok(ExecutionError::Unauthorized)));
+    }
+
+    // ── Execution history size limit (#664) ───────────────────────────────────
+
+    #[test]
+    fn test_max_history_size_default() {
+        let (_, _, client) = setup();
+        assert_eq!(client.max_history_size(), 1000);
+    }
+
+    #[test]
+    fn test_set_max_history_size_updates_value() {
+        let (_, admin, client) = setup();
+        client.set_max_history_size(&admin, &5);
+        assert_eq!(client.max_history_size(), 5);
+    }
+
+    #[test]
+    fn test_set_max_history_size_zero_fails() {
+        let (_, admin, client) = setup();
+        let result = client.try_set_max_history_size(&admin, &0);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_set_max_history_size_unauthorized_fails() {
+        let (env, _, client) = setup();
+        let attacker = Address::generate(&env);
+        let result = client.try_set_max_history_size(&attacker, &5);
+        assert_eq!(result, Err(Ok(ExecutionError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_append_history_evicts_oldest_when_over_limit() {
+        let (env, admin, client) = setup();
+        client.set_max_history_size(&admin, &3);
+
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        env.as_contract(&client.address, || {
+            for _ in 0..5u32 {
+                RouterExecution::append_history(&env, &target, &function, true, 0);
+            }
+        });
+
+        let history = client.get_execution_history(&10);
+        // Capped at 3 despite 5 appends — oldest entries were evicted.
+        assert_eq!(history.len(), 3);
+    }
+
+    #[test]
+    fn test_set_max_history_size_trims_existing_history() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        env.as_contract(&client.address, || {
+            for _ in 0..5u32 {
+                RouterExecution::append_history(&env, &target, &function, true, 0);
+            }
+        });
+        assert_eq!(client.get_execution_history(&10).len(), 5);
+
+        // Shrinking the cap below the current length trims immediately.
+        client.set_max_history_size(&admin, &2);
+        assert_eq!(client.get_execution_history(&10).len(), 2);
     }
 
     #[test]
@@ -835,5 +1093,135 @@ mod tests {
         // multiplier=100 (1x): delay stays at base
         assert_eq!(RouterExecution::compute_backoff_ms(250, 100, 0), 250);
         assert_eq!(RouterExecution::compute_backoff_ms(250, 100, 5), 250);
+    }
+
+    // ── Backoff delay calculation: base/multiplier fixed-point math ─────────
+
+    #[test]
+    fn test_backoff_delay_base_100_multiplier_200_attempts_1_to_5() {
+        // base=100ms, multiplier=200 (2x fixed-point *100)
+        // compute_backoff_ms(base, multiplier, attempt_index)
+        // execute() uses attempt_index = attempts - 1.
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 0), 100); // attempt=1
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 1), 200); // attempt=2
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 2), 400); // attempt=3
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 3), 800); // attempt=4
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 4), 1600); // attempt=5
+    }
+
+    #[test]
+    fn test_backoff_delay_exponential_growth_attempt_index_0_to_4() {
+        // Explicitly verify growth for attempt indices 0..4.
+        // delay = base * (multiplier/100)^attempt_index
+        let base = 100u64;
+        let mult = 200u32; // 2x
+        let expected = [100u64, 200u64, 400u64, 800u64, 1600u64];
+        for (attempt_index, &exp) in expected.iter().enumerate() {
+            assert_eq!(RouterExecution::compute_backoff_ms(base, mult, attempt_index as u32), exp);
+        }
+    }
+
+    #[test]
+    fn test_backoff_delay_min_multiplier_boundary_constant_delay() {
+        // Minimum allowed multiplier: 100 => constant delay, no growth.
+        let base = 123u64;
+        let mult = 100u32;
+        for attempt_index in 0u32..=10u32 {
+            assert_eq!(RouterExecution::compute_backoff_ms(base, mult, attempt_index), base);
+        }
+    }
+
+    #[test]
+    fn test_backoff_delay_zero_base_is_zero_for_any_attempt() {
+        let mult = 300u32;
+        for attempt_index in 0u32..=10u32 {
+            assert_eq!(RouterExecution::compute_backoff_ms(0, mult, attempt_index), 0);
+        }
+    }
+
+    #[test]
+    fn test_backoff_delay_large_multiplier_saturates_safely_and_is_monotonic() {
+        // Large multiplier must not overflow due to saturating_mul.
+        // We can’t easily assert exact values far out without knowing the saturation point,
+        // but we can assert monotonic non-decreasing behavior.
+        let base = 100u64;
+        let mult = 300u32;
+
+        let mut prev = RouterExecution::compute_backoff_ms(base, mult, 0);
+        for attempt_index in 1u32..=20u32 {
+            let next = RouterExecution::compute_backoff_ms(base, mult, attempt_index);
+            assert!(next >= prev, "backoff should be monotonic: {} -> {}", prev, next);
+            prev = next;
+        }
+    }
+
+    // ── Backoff retry exhaustion behavior (max retries) ────────────────────────
+
+    #[test]
+    fn test_execute_reaches_max_retries_exhaustion() {
+        // This contract's execute() retries on any Err(_) from try_invoke_contract.
+        // In the test environment, calling an unregistered contract/function should
+        // cause try_invoke_contract to Err consistently, so execute() should exhaust.
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &2, &100, &200).unwrap();
+
+        let caller = Address::generate(&env);
+        env.as_contract(&client.address, || {
+            // Build a request with max_retries=1, but global max_retries=2.
+            // effective_retries = min(1, 2) = 1.
+            // That means: attempts 1 (initial) and attempt 2 (retry) are allowed,
+            // and failure after attempt 2 returns ContractRejected.
+
+            let target = Address::generate(&env);
+            let function = Symbol::new(&env, "transfer");
+
+            // execute() is called as a contract call to bypass caller.require_auth
+            // signature complexity in tests; env.mock_all_auths() makes auth pass.
+            let request = ExecutionRequest {
+                target,
+                function,
+                simulate_first: false,
+                max_retries: 1,
+            };
+
+            let result = RouterExecution::execute(env.clone(), caller.clone(), request);
+            assert_eq!(result, Err(ExecutionError::ContractRejected));
+        });
+    }
+
+    // ── Issue #633: backoff_multiplier upper bound validation ────────────────
+
+    #[test]
+    fn test_initialize_invalid_multiplier_too_high_fails() {
+        let env = Env::default();
+
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        // multiplier > 10000 (100x) is invalid
+        let result = client.try_initialize(&admin, &2, &500, &10_001);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_set_backoff_config_invalid_multiplier_too_high_fails() {
+        let (_, admin, client) = setup();
+        let result = client.try_set_backoff_config(&admin, &500, &10_001);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_set_backoff_config_max_multiplier_succeeds() {
+        let (_, admin, client) = setup();
+        // Exactly 10000 (100x) is valid
+        assert!(client.try_set_backoff_config(&admin, &500, &10_000).is_ok());
+        let (_, mult) = client.backoff_config();
+        assert_eq!(mult, 10_000);
     }
 }

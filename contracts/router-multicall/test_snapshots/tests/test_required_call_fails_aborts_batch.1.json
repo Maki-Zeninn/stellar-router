@@ -226,11 +226,25 @@
                       "map": [
                         {
                           "key": {
+                            "symbol": "args"
+                          },
+                          "val": {
+                            "vec": []
+                          }
+                        },
+                        {
+                          "key": {
                             "symbol": "function"
                           },
                           "val": {
                             "symbol": "success"
                           }
+                        },
+                        {
+                          "key": {
+                            "symbol": "instruction_budget"
+                          },
+                          "val": "void"
                         },
                         {
                           "key": {
@@ -254,11 +268,25 @@
                       "map": [
                         {
                           "key": {
+                            "symbol": "args"
+                          },
+                          "val": {
+                            "vec": []
+                          }
+                        },
+                        {
+                          "key": {
                             "symbol": "function"
                           },
                           "val": {
                             "symbol": "fail"
                           }
+                        },
+                        {
+                          "key": {
+                            "symbol": "instruction_budget"
+                          },
+                          "val": "void"
                         },
                         {
                           "key": {
@@ -282,11 +310,25 @@
                       "map": [
                         {
                           "key": {
+                            "symbol": "args"
+                          },
+                          "val": {
+                            "vec": []
+                          }
+                        },
+                        {
+                          "key": {
                             "symbol": "function"
                           },
                           "val": {
                             "symbol": "success"
                           }
+                        },
+                        {
+                          "key": {
+                            "symbol": "instruction_budget"
+                          },
+                          "val": "void"
                         },
                         {
                           "key": {
@@ -307,6 +349,15 @@
                       ]
                     }
                   ]
+                },
+                {
+                  "bool": false
+                },
+                {
+                  "bool": false
+                },
+                {
+                  "bool": false
                 }
               ]
             }
@@ -375,6 +426,9 @@
             "data": {
               "vec": [
                 {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                },
+                {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
@@ -382,6 +436,9 @@
                 },
                 {
                   "bool": true
+                },
+                {
+                  "u32": 0
                 }
               ]
             }
@@ -498,6 +555,72 @@
       "event": {
         "ext": "v0",
         "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "call_result"
+              }
+            ],
+            "data": {
+              "vec": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                },
+                {
+                  "symbol": "fail"
+                },
+                {
+                  "bool": false
+                },
+                {
+                  "u32": 1
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": true
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "call_failed"
+              }
+            ],
+            "data": {
+              "vec": [
+                {
+                  "u32": 1
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                },
+                {
+                  "symbol": "fail"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": true
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
         "type_": "diagnostic",
         "body": {
           "v0": {
@@ -580,11 +703,25 @@
                           "map": [
                             {
                               "key": {
+                                "symbol": "args"
+                              },
+                              "val": {
+                                "vec": []
+                              }
+                            },
+                            {
+                              "key": {
                                 "symbol": "function"
                               },
                               "val": {
                                 "symbol": "success"
                               }
+                            },
+                            {
+                              "key": {
+                                "symbol": "instruction_budget"
+                              },
+                              "val": "void"
                             },
                             {
                               "key": {
@@ -608,11 +745,25 @@
                           "map": [
                             {
                               "key": {
+                                "symbol": "args"
+                              },
+                              "val": {
+                                "vec": []
+                              }
+                            },
+                            {
+                              "key": {
                                 "symbol": "function"
                               },
                               "val": {
                                 "symbol": "fail"
                               }
+                            },
+                            {
+                              "key": {
+                                "symbol": "instruction_budget"
+                              },
+                              "val": "void"
                             },
                             {
                               "key": {
@@ -636,11 +787,25 @@
                           "map": [
                             {
                               "key": {
+                                "symbol": "args"
+                              },
+                              "val": {
+                                "vec": []
+                              }
+                            },
+                            {
+                              "key": {
                                 "symbol": "function"
                               },
                               "val": {
                                 "symbol": "success"
                               }
+                            },
+                            {
+                              "key": {
+                                "symbol": "instruction_budget"
+                              },
+                              "val": "void"
                             },
                             {
                               "key": {
@@ -661,6 +826,15 @@
                           ]
                         }
                       ]
+                    },
+                    {
+                      "bool": false
+                    },
+                    {
+                      "bool": false
+                    },
+                    {
+                      "bool": false
                     }
                   ]
                 }

@@ -2,6 +2,7 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracing::warn;
 
 use crate::types::{RouteEntryResponse, RouteMetadataResponse};
 
@@ -36,12 +37,14 @@ pub struct SimulateTransactionResult {
     #[serde(rename = "minResourceFee", default)]
     pub min_resource_fee: String,
     pub error: Option<String>,
+    #[allow(dead_code)]
     #[serde(default)]
     pub events: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize, Debug)]
 struct SimulateTransactionResultWithReturnValue {
+    #[allow(dead_code)]
     #[serde(rename = "minResourceFee", default)]
     pub min_resource_fee: String,
     pub error: Option<String>,
@@ -62,6 +65,10 @@ pub struct FeeBreakdown {
     pub surge_multiplier: u32,
     pub high_load: bool,
     pub would_succeed: bool,
+    pub fee_estimated: bool,
+    /// `true` only when fees were derived from a live RPC simulation.
+    /// `false` when the heuristic fallback was used (RPC unreachable).
+    pub simulated: bool,
 }
 
 impl SorobanRpcClient {
@@ -71,6 +78,27 @@ impl SorobanRpcClient {
             router_core_contract_id,
             http: reqwest::Client::new(),
         }
+    }
+
+    /// Ping the RPC node via `getLatestLedger`. Returns `Ok(())` if reachable.
+    pub async fn health_check(&self) -> Result<()> {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: 1,
+            method: "getLatestLedger",
+            params: serde_json::json!({}),
+        };
+        let resp = self
+            .http
+            .post(&self.rpc_url)
+            .json(&req)
+            .send()
+            .await
+            .map_err(|e| anyhow!("RPC unreachable: {}", e))?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("RPC returned status {}", resp.status()));
+        }
+        Ok(())
     }
 
     pub async fn simulate(
@@ -83,7 +111,16 @@ impl SorobanRpcClient {
         match self.call_simulate_rpc(target, function).await {
             Ok(result) => {
                 let would_succeed = result.error.is_none();
-                let resource_fee: i64 = result.min_resource_fee.parse().unwrap_or(1_000);
+                let (resource_fee, fee_estimated) = match result.min_resource_fee.parse::<i64>() {
+                    Ok(v) => (v, true),
+                    Err(_) => {
+                        warn!(
+                            raw = %result.min_resource_fee,
+                            "failed to parse min_resource_fee from RPC response; using fallback 1000 stroops"
+                        );
+                        (1_000, false)
+                    }
+                };
                 let base_fee: i64 = 100;
                 let (surge_multiplier, high_load) = if network_load_bps >= 8_000 {
                     (200u32, true)
@@ -98,6 +135,8 @@ impl SorobanRpcClient {
                     surge_multiplier,
                     high_load,
                     would_succeed,
+                    fee_estimated,
+                    simulated: true,
                 })
             }
             Err(_) => Ok(Self::heuristic_estimate(amount, network_load_bps)),
@@ -219,16 +258,28 @@ impl SorobanRpcClient {
             let val = &item["val"];
             match key {
                 "address" => {
-                    address = val.get("address").and_then(|a| a.as_str()).unwrap_or("").to_string();
+                    address = val
+                        .get("address")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("")
+                        .to_string();
                 }
                 "name" => {
-                    route_name = val.get("str").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    route_name = val
+                        .get("str")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
                 }
                 "paused" => {
                     paused = val.get("b").and_then(|b| b.as_bool()).unwrap_or(false);
                 }
                 "updated_by" => {
-                    updated_by = val.get("address").and_then(|a| a.as_str()).unwrap_or("").to_string();
+                    updated_by = val
+                        .get("address")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("")
+                        .to_string();
                 }
                 "metadata" => {
                     if let Some(meta_map) = val.get("map").and_then(|m| m.as_array()) {
@@ -244,23 +295,40 @@ impl SorobanRpcClient {
                             let mv = &meta_item["val"];
                             match mk {
                                 "description" => {
-                                    description = mv.get("str").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                                    description = mv
+                                        .get("str")
+                                        .and_then(|s| s.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
                                 }
                                 "owner" => {
-                                    owner = mv.get("address").and_then(|a| a.as_str()).unwrap_or("").to_string();
+                                    owner = mv
+                                        .get("address")
+                                        .and_then(|a| a.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
                                 }
                                 "tags" => {
-                                    if let Some(tag_vec) = mv.get("vec").and_then(|v| v.as_array()) {
+                                    if let Some(tag_vec) = mv.get("vec").and_then(|v| v.as_array())
+                                    {
                                         tags = tag_vec
                                             .iter()
-                                            .filter_map(|t| t.get("str").and_then(|s| s.as_str()).map(|s| s.to_string()))
+                                            .filter_map(|t| {
+                                                t.get("str")
+                                                    .and_then(|s| s.as_str())
+                                                    .map(|s| s.to_string())
+                                            })
                                             .collect();
                                     }
                                 }
                                 _ => {}
                             }
                         }
-                        metadata = Some(RouteMetadataResponse { description, tags, owner });
+                        metadata = Some(RouteMetadataResponse {
+                            description,
+                            tags,
+                            owner,
+                        });
                     }
                 }
                 _ => {}
@@ -280,7 +348,11 @@ impl SorobanRpcClient {
         }))
     }
 
-    async fn call_simulate_rpc(&self, target: &str, function: &str) -> Result<SimulateTransactionResult> {
+    async fn call_simulate_rpc(
+        &self,
+        target: &str,
+        function: &str,
+    ) -> Result<SimulateTransactionResult> {
         let placeholder_xdr = format!("AAAAAgAAAAEAAAAA{}{}AAAAAAAAAAA=", target, function);
         let req = JsonRpcRequest {
             jsonrpc: "2.0",
@@ -302,11 +374,46 @@ impl SorobanRpcClient {
         resp.result.ok_or_else(|| anyhow!("empty RPC result"))
     }
 
+    /// Decodes a minimal XDR-encoded `Vec<String>`:
+    /// 4-byte big-endian element count, then for each element:
+    /// 4-byte big-endian byte length + UTF-8 bytes padded to the next 4-byte boundary.
+    fn decode_string_vec_xdr(xdr: &str) -> Option<Vec<String>> {
+        let bytes = base64_decode(xdr)?;
+        if bytes.len() < 4 {
+            return Some(Vec::new());
+        }
+        let count = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let mut result = Vec::with_capacity(count);
+        let mut pos = 4;
+        for _ in 0..count {
+            if pos + 4 > bytes.len() {
+                break;
+            }
+            let len =
+                u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
+                    as usize;
+            pos += 4;
+            if pos + len > bytes.len() {
+                break;
+            }
+            if let Ok(s) = std::str::from_utf8(&bytes[pos..pos + len]) {
+                result.push(s.trim_end_matches('\0').to_string());
+            }
+            // Advance past padding to the next 4-byte boundary.
+            pos += (len + 3) & !3;
+        }
+        Some(result)
+    }
+
     fn heuristic_estimate(amount: i64, network_load_bps: u32) -> FeeBreakdown {
         let base_fee: i64 = 100;
         let resource_fee: i64 = {
             let scaled = amount / 1_000;
-            if scaled < 100 { 100 } else { scaled }
+            if scaled < 100 {
+                100
+            } else {
+                scaled
+            }
         };
         let (surge_multiplier, high_load) = if network_load_bps >= 8_000 {
             (200u32, true)
@@ -320,7 +427,11 @@ impl SorobanRpcClient {
             total_fee,
             surge_multiplier,
             high_load,
-            would_succeed: true,
+            // No simulation was performed — cannot assert the transaction will succeed.
+            would_succeed: false,
+            // Fees are a heuristic guess, not an RPC-derived measurement.
+            fee_estimated: false,
+            simulated: false,
         }
     }
 }
@@ -377,4 +488,51 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
         _ => return None,
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heuristic_estimate_does_not_assert_success() {
+        let result = SorobanRpcClient::heuristic_estimate(1_000_000, 5_000);
+        assert!(
+            !result.would_succeed,
+            "heuristic path must not claim the transaction will succeed"
+        );
+        assert!(
+            !result.simulated,
+            "heuristic path must report simulated = false"
+        );
+        assert!(
+            !result.fee_estimated,
+            "heuristic path must report fee_estimated = false"
+        );
+    }
+
+    #[test]
+    fn heuristic_estimate_high_load_surge() {
+        let result = SorobanRpcClient::heuristic_estimate(500_000, 9_000);
+        assert!(result.high_load);
+        assert_eq!(result.surge_multiplier, 200);
+        assert!(!result.would_succeed);
+        assert!(!result.simulated);
+    }
+
+    #[test]
+    fn heuristic_estimate_minimum_resource_fee() {
+        // amount / 1_000 = 0, which is below the 100 floor
+        let result = SorobanRpcClient::heuristic_estimate(50, 0);
+        assert_eq!(result.resource_fee, 100);
+    }
+
+    #[test]
+    fn decode_string_vec_xdr_empty_input() {
+        // Less than 4 bytes → empty vec, not None
+        assert_eq!(
+            SorobanRpcClient::decode_string_vec_xdr(""),
+            Some(Vec::<String>::new())
+        );
+    }
 }
