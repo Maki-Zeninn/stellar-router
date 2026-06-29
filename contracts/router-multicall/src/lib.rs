@@ -559,6 +559,23 @@ mod tests {
         assert_eq!(result, Err(Ok(MulticallError::EmptyBatch)));
     }
 
+    /// Verifies that the reentrancy guard is cleared after an empty batch failure (closes #725).
+    /// A second call to execute_batch must not return Reentrancy.
+    #[test]
+    fn test_empty_batch_clears_reentrancy_guard() {
+        let (env, _admin, client) = setup();
+        let caller = Address::generate(&env);
+        let calls: Vec<CallDescriptor> = Vec::new(&env);
+
+        // First call: must fail with EmptyBatch
+        let first = client.try_execute_batch(&caller, &calls, &false, &false, &false);
+        assert_eq!(first, Err(Ok(MulticallError::EmptyBatch)));
+
+        // Second call: must also fail with EmptyBatch, not Reentrancy
+        let second = client.try_execute_batch(&caller, &calls, &false, &false, &false);
+        assert_eq!(second, Err(Ok(MulticallError::EmptyBatch)));
+    }
+
     #[test]
     fn test_batch_too_large_fails() {
         let (env, admin, client) = setup();
