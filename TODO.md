@@ -1,10 +1,16 @@
 # TODO
 
-- [ ] Update `contracts/router-access/src/lib.rs` storage: add `DataKey::RoleMemberCount(String)`.
-- [ ] Add view function `get_role_member_count(role: String) -> u32`.
-- [ ] Maintain counter in `grant_role_internal`.
-- [ ] Maintain counter in `revoke_role`.
-- [ ] Maintain counter in `expire_role`.
-- [ ] Add/extend unit tests for member count behavior.
-- [ ] Run `cargo test` to verify compilation + passing tests.
+- [ ] Inspect router-access role/expiry logic and existing tests for `grant_role`.
+- [x] Implement behavior change in `contracts/router-access/src/lib.rs`:
+  - [x] If role assignment exists and is unexpired:
+    - [x] Return `AlreadyHasRole` only if requested expiry timestamp matches existing.
+    - [x] Otherwise update `RoleExpiry` to the new expiry timestamp and return `Ok`.
+- [x] Add new tests covering:
+  - [x] Duplicate grant without expiry: AlreadyHasRole
+  - [x] Extend expiry: update works
+  - [x] Shorten expiry: update works
+  - [x] Grant after expiry: succeeds
+  - [x] Grant with None expiry over existing expiry: updates to permanent
+- [x] Run `cargo test -p router-access` to confirm.
+
 

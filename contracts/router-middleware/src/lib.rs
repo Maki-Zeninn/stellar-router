@@ -83,6 +83,8 @@ pub struct RouteConfig {
     pub recovery_window_seconds: u64,
     /// Max call log entries to keep (0 = disabled)
     pub log_retention: u32,
+    /// Extra calls allowed above max_calls_per_window before rejection (0 = no burst)
+    pub burst_allowance: u32,
 }
 
 #[contracttype]
@@ -209,6 +211,7 @@ impl RouterMiddleware {
         failure_threshold: u32,
         recovery_window_seconds: u64,
         log_retention: u32,
+        burst_allowance: u32,
     ) -> Result<(), MiddlewareError> {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, MiddlewareError)?;
@@ -228,6 +231,7 @@ impl RouterMiddleware {
             failure_threshold,
             recovery_window_seconds,
             log_retention,
+            burst_allowance,
         };
         env.storage()
             .instance()
@@ -1080,7 +1084,8 @@ mod tests {
     fn test_rate_limit_state_not_written_when_route_disabled_before_commit() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0);
+        // Enable route with a rate limit of 5 calls per window
+        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0, &0);
 
         let caller = Address::generate(&env);
 
@@ -1088,7 +1093,8 @@ mod tests {
         let state_after_first = client.rate_limit_state(&route, &caller).unwrap();
         assert_eq!(state_after_first.calls_in_window, 1);
 
-        client.configure_route(&admin, &route, &5, &60, &false, &0, &0, &0);
+        // Disable the route
+        client.configure_route(&admin, &route, &5, &60, &false, &0, &0, &0, &0);
 
         assert_eq!(
             client.try_pre_call(&caller, &route),
@@ -1100,7 +1106,8 @@ mod tests {
 
         assert_eq!(client.total_calls(), 1);
 
-        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0);
+        // Re-enable the route — no stale state should affect the next call
+        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0, &0);
         assert!(client.try_pre_call(&caller, &route).is_ok());
         let state_after_reenable = client.rate_limit_state(&route, &caller).unwrap();
         assert_eq!(state_after_reenable.calls_in_window, 2);
@@ -1110,7 +1117,7 @@ mod tests {
     fn test_global_disable_does_not_write_rate_limit_state() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0);
+        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0, &0);
 
         let caller = Address::generate(&env);
         client.pre_call(&caller, &route);
@@ -1141,7 +1148,8 @@ mod tests {
     fn test_rate_limit_enforced() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &2, &60, &true, &0, &0, &0);
+        // max 2 calls per 60s window
+        client.configure_route(&admin, &route, &2, &60, &true, &0, &0, &0, &0);
 
         let caller = Address::generate(&env);
         client.pre_call(&caller, &route);
@@ -1154,7 +1162,7 @@ mod tests {
     fn test_rate_limit_resets_after_window() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0, &0);
 
         let caller = Address::generate(&env);
         client.pre_call(&caller, &route);
@@ -1167,7 +1175,7 @@ mod tests {
     fn test_disabled_route_blocked() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &false, &0, &0, &0);
+        client.configure_route(&admin, &route, &0, &0, &false, &0, &0, &0, &0);
         let caller = Address::generate(&env);
         let result = client.try_pre_call(&caller, &route);
         assert_eq!(result, Err(Ok(MiddlewareError::RouteDisabled)));
@@ -1188,7 +1196,7 @@ mod tests {
         let (env, _admin, client) = setup();
         let attacker = Address::generate(&env);
         let route = String::from_str(&env, "oracle/get_price");
-        let result = client.try_configure_route(&attacker, &route, &10, &60, &true, &0, &0, &0);
+        let result = client.try_configure_route(&attacker, &route, &10, &60, &true, &0, &0, &0, &0);
         assert_eq!(result, Err(Ok(MiddlewareError::Unauthorized)));
     }
 
@@ -1206,7 +1214,7 @@ mod tests {
     fn test_get_call_log_length_zero_before_calls() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &3);
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &3, &0);
 
         assert_eq!(client.get_call_log_length(&route), 0);
     }
@@ -1216,7 +1224,7 @@ mod tests {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
         let caller = Address::generate(&env);
-        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &5);
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &5, &0);
 
         client.post_call(&caller, &route, &true);
         client.post_call(&caller, &route, &false);
@@ -1232,7 +1240,7 @@ mod tests {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
         let caller = Address::generate(&env);
-        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &2);
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &2, &0);
 
         client.post_call(&caller, &route, &true);
         client.post_call(&caller, &route, &false);
@@ -1247,8 +1255,9 @@ mod tests {
         let (env, admin, client) = setup();
         let route_a = String::from_str(&env, "oracle/price");
         let route_b = String::from_str(&env, "vault/deposit");
-        client.configure_route(&admin, &route_a, &10, &60, &true, &0, &0, &0);
-        client.configure_route(&admin, &route_b, &5, &60, &true, &0, &0, &0);
+        // route_a: 10 calls per minute, route_b: 5 calls per minute
+        client.configure_route(&admin, &route_a, &10, &60, &true, &0, &0, &0, &0);
+        client.configure_route(&admin, &route_b, &5, &60, &true, &0, &0, &0, &0);
 
         let caller = Address::generate(&env);
         for _ in 0..4 {
@@ -1269,7 +1278,7 @@ mod tests {
     fn test_total_calls_not_incremented_on_rejected_pre_call() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0, &0);
 
         let caller = Address::generate(&env);
         client.pre_call(&caller, &route);
@@ -1307,7 +1316,8 @@ mod tests {
     fn test_circuit_breaker_blocks_calls() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &true, &1, &0, &0);
+        // Configure route with failure_threshold = 1, no recovery window for simplicity
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &0, &0, &0);
 
         let caller = Address::generate(&env);
         assert!(client.try_pre_call(&caller, &route).is_ok());
@@ -1320,7 +1330,7 @@ mod tests {
     fn test_reset_circuit_breaker() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &true, &1, &0, &0);
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &0, &0, &0);
 
         let caller = Address::generate(&env);
         client.pre_call(&caller, &route);
@@ -1374,7 +1384,8 @@ mod tests {
     fn test_success_resets_failure_count() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &true, &3, &0, &0);
+        // threshold=3, so 2 failures then a success then 2 more should NOT trip
+        client.configure_route(&admin, &route, &0, &0, &true, &3, &0, &0, &0);
         let caller = Address::generate(&env);
 
         client.post_call(&caller, &route, &false);
@@ -1391,7 +1402,7 @@ mod tests {
     fn test_open_circuit_not_reset_by_success() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &true, &1, &0, &0);
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &0, &0, &0);
         let caller = Address::generate(&env);
 
         client.post_call(&caller, &route, &false);
@@ -1415,8 +1426,8 @@ mod tests {
         let (env, admin, client) = setup();
         let route_a = String::from_str(&env, "oracle/price");
         let route_b = String::from_str(&env, "vault/deposit");
-        client.configure_route(&admin, &route_a, &0, &0, &true, &0, &0, &0);
-        client.configure_route(&admin, &route_b, &0, &0, &true, &0, &0, &0);
+        client.configure_route(&admin, &route_a, &0, &0, &true, &0, &0, &0, &0);
+        client.configure_route(&admin, &route_b, &0, &0, &true, &0, &0, &0, &0);
         let routes = client.get_configured_routes();
         assert_eq!(routes.len(), 2);
         assert!(routes.contains(&route_a));
@@ -1427,8 +1438,8 @@ mod tests {
     fn test_get_configured_routes_no_duplicates() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/price");
-        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &0);
-        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0);
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &0, &0);
+        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0, &0);
         let routes = client.get_configured_routes();
         assert_eq!(routes.len(), 1);
     }
@@ -1437,7 +1448,7 @@ mod tests {
     fn test_circuit_breaker_state_none_before_failures() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &true, &3, &0, &0);
+        client.configure_route(&admin, &route, &0, &0, &true, &3, &0, &0, &0);
         assert_eq!(client.circuit_breaker_state(&route), None);
     }
 
@@ -1445,7 +1456,7 @@ mod tests {
     fn test_circuit_breaker_state_reflects_failures() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &true, &3, &0, &0);
+        client.configure_route(&admin, &route, &0, &0, &true, &3, &0, &0, &0);
         let caller = Address::generate(&env);
         client.post_call(&caller, &route, &false);
         let state = client.circuit_breaker_state(&route).unwrap();
@@ -1457,7 +1468,7 @@ mod tests {
     fn test_circuit_breaker_state_open_after_threshold() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &true, &2, &0, &0);
+        client.configure_route(&admin, &route, &0, &0, &true, &2, &0, &0, &0);
         let caller = Address::generate(&env);
         client.post_call(&caller, &route, &false);
         client.post_call(&caller, &route, &false);
@@ -1470,7 +1481,7 @@ mod tests {
     fn test_circuit_breaker_state_clears_after_reset() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &true, &1, &0, &0);
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &0, &0, &0);
         let caller = Address::generate(&env);
         client.post_call(&caller, &route, &false);
         assert!(client.circuit_breaker_state(&route).unwrap().is_open);
@@ -1483,7 +1494,7 @@ mod tests {
     fn test_call_log_never_exceeds_retention() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &3);
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &3, &0);
 
         let caller = Address::generate(&env);
         for _ in 0..10 {
@@ -1498,7 +1509,7 @@ mod tests {
     fn test_call_log_retains_most_recent() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &3);
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &3, &0);
 
         let caller = Address::generate(&env);
         for i in 0..5u64 {
@@ -1517,7 +1528,8 @@ mod tests {
     fn test_rate_limit_state_resets_after_window() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0);
+        // Configure route with 60 second window and max 5 calls
+        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0, &0);
 
         let caller = Address::generate(&env);
 
@@ -1542,7 +1554,8 @@ mod tests {
     fn test_rate_limit_state_within_window_accurate() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0);
+        // Configure route with 60 second window
+        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0, &0);
 
         let caller = Address::generate(&env);
 
@@ -1566,7 +1579,8 @@ mod tests {
     fn test_circuit_breaker_auto_recovers_after_window() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &true, &1, &60, &0);
+        // failure_threshold=1, recovery_window=60s
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &60, &0, &0);
 
         let caller = Address::generate(&env);
 
@@ -1585,7 +1599,7 @@ mod tests {
     fn test_circuit_not_recovered_before_window_elapses() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &true, &1, &60, &0);
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &60, &0, &0);
 
         let caller = Address::generate(&env);
         client.post_call(&caller, &route, &false);
@@ -1601,7 +1615,8 @@ mod tests {
     fn test_circuit_breaker_state_reset_after_recovery() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &true, &1, &60, &0);
+        // failure_threshold=1, recovery_window=60s
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &60, &0, &0);
 
         let caller = Address::generate(&env);
 
@@ -1631,7 +1646,8 @@ mod tests {
     fn test_rate_limit_call_at_exact_window_boundary_resets() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/price");
-        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
+        // max 1 call per 60s window
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0, &0);
 
         let caller = Address::generate(&env);
         let t0 = env.ledger().timestamp();
@@ -1651,7 +1667,7 @@ mod tests {
     fn test_rate_limit_window_jump_multiple_windows() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/price");
-        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0, &0);
 
         let caller = Address::generate(&env);
         let t0 = env.ledger().timestamp();
@@ -1670,7 +1686,7 @@ mod tests {
     fn test_configure_route_window_zero_max_zero_is_unlimited() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/price");
-        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &0);
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &0, &0);
 
         let caller = Address::generate(&env);
         for _ in 0..20 {
@@ -1697,7 +1713,7 @@ mod tests {
     fn test_get_call_log_filtered_empty_when_no_calls() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &10);
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &10, &0);
 
         assert!(client.get_call_log_filtered(&route, &true).is_empty());
         assert!(client.get_call_log_filtered(&route, &false).is_empty());
@@ -1708,7 +1724,7 @@ mod tests {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
         let caller = Address::generate(&env);
-        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &10);
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &10, &0);
 
         client.post_call(&caller, &route, &true);
         client.post_call(&caller, &route, &false);
@@ -1725,7 +1741,7 @@ mod tests {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
         let caller = Address::generate(&env);
-        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &10);
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &10, &0);
 
         client.post_call(&caller, &route, &true);
         client.post_call(&caller, &route, &false);
@@ -1742,7 +1758,7 @@ mod tests {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
         let caller = Address::generate(&env);
-        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &5);
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &5, &0);
 
         client.post_call(&caller, &route, &true);
         client.post_call(&caller, &route, &true);
@@ -1756,7 +1772,8 @@ mod tests {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
         let caller = Address::generate(&env);
-        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &3);
+        // retention=3, make 5 calls so ring buffer wraps
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &3, &0);
 
         client.post_call(&caller, &route, &true);
         client.post_call(&caller, &route, &false);
@@ -1774,7 +1791,7 @@ mod tests {
     fn test_get_call_log_summary_none_before_calls() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &5);
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &5, &0);
         assert_eq!(client.get_call_log_summary(&route), None);
     }
 
@@ -1783,7 +1800,7 @@ mod tests {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
         let caller = Address::generate(&env);
-        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &10);
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &10, &0);
 
         client.post_call(&caller, &route, &true);
         client.post_call(&caller, &route, &true);
@@ -1800,7 +1817,7 @@ mod tests {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
         let caller = Address::generate(&env);
-        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &10);
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &10, &0);
 
         env.ledger().set_timestamp(1000);
         client.post_call(&caller, &route, &true);
@@ -1816,7 +1833,7 @@ mod tests {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
         let caller = Address::generate(&env);
-        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &2);
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &2, &0); // retain only 2
 
         for _ in 0..5 {
             client.post_call(&caller, &route, &true);
@@ -1833,7 +1850,8 @@ mod tests {
         let route = String::from_str(&env, "oracle/get_price");
         let caller = Address::generate(&env);
 
-        client.configure_route(&admin, &route, &0, &0, &true, &3, &60, &0);
+        // Configure with failure_threshold=3
+        client.configure_route(&admin, &route, &0, &0, &true, &3, &60, &0, &0);
 
         client.post_call(&caller, &route, &false);
         client.post_call(&caller, &route, &false);
@@ -1849,7 +1867,8 @@ mod tests {
         let route = String::from_str(&env, "oracle/get_price");
         let caller = Address::generate(&env);
 
-        client.configure_route(&admin, &route, &0, &0, &true, &1, &60, &0);
+        // Configure with failure_threshold=1, recovery_window=60s
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &60, &0, &0);
 
         client.post_call(&caller, &route, &false);
 
@@ -1874,7 +1893,8 @@ mod tests {
         let route = String::from_str(&env, "oracle/get_price");
         let caller = Address::generate(&env);
 
-        client.configure_route(&admin, &route, &0, &0, &true, &2, &100, &0);
+        // Configure with failure_threshold=2, recovery_window=100s
+        client.configure_route(&admin, &route, &0, &0, &true, &2, &100, &0, &0);
 
         client.post_call(&caller, &route, &false);
         client.post_call(&caller, &route, &false);
@@ -1899,7 +1919,8 @@ mod tests {
         let route = String::from_str(&env, "oracle/get_price");
         let caller = Address::generate(&env);
 
-        client.configure_route(&admin, &route, &0, &0, &true, &2, &60, &0);
+        // Configure with failure_threshold=2, recovery_window=60s
+        client.configure_route(&admin, &route, &0, &0, &true, &2, &60, &0, &0);
 
         client.post_call(&caller, &route, &false);
         client.post_call(&caller, &route, &false);
@@ -1925,7 +1946,8 @@ mod tests {
         let route = String::from_str(&env, "oracle/get_price");
         let caller = Address::generate(&env);
 
-        client.configure_route(&admin, &route, &0, &0, &true, &1, &50, &0);
+        // Configure with failure_threshold=1, recovery_window=50s
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &50, &0, &0);
 
         client.post_call(&caller, &route, &false);
 
@@ -1954,7 +1976,8 @@ mod tests {
         let route = String::from_str(&env, "oracle/get_price");
         let caller = Address::generate(&env);
 
-        client.configure_route(&admin, &route, &0, &0, &true, &1, &60, &0);
+        // failure_threshold=1, recovery_window=60s
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &60, &0, &0);
 
         client.post_call(&caller, &route, &false);
         assert_eq!(
@@ -1989,10 +2012,40 @@ mod tests {
     }
 
     #[test]
+    fn test_circuit_not_recovered_before_window_expires() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        let caller = Address::generate(&env);
+
+        // Configure with failure_threshold=1, recovery_window=100s
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &100, &0, &0);
+
+        // Trip the circuit
+        client.post_call(&caller, &route, &false);
+
+        // Advance time but not enough (only 50 seconds, need 100)
+        env.ledger().with_mut(|l| l.timestamp += 50);
+
+        // Circuit should still be open
+        assert_eq!(
+            client.try_pre_call(&caller, &route),
+            Err(Ok(MiddlewareError::CircuitOpen))
+        );
+
+        // Advance to exactly the recovery time (not past it)
+        env.ledger().with_mut(|l| l.timestamp += 50);
+
+        // Should now succeed (at exactly recovery_window_seconds)
+        assert!(client.try_pre_call(&caller, &route).is_ok());
+    }
+
+    // ── Issue #577: RateLimitStrategy (Reject/Throttle/LogOnly) ───────────────
+
+    #[test]
     fn test_rate_limit_strategy_default_is_reject() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0, &0);
 
         let caller = Address::generate(&env);
         client.pre_call(&caller, &route);
@@ -2033,8 +2086,9 @@ mod tests {
     fn test_throttle_strategy_allows_call_after_rate_limit_exceeded() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
-        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::Throttle).unwrap();
+        // max 1 call per 60s window
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0, &0);
+        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::Throttle);
 
         let caller = Address::generate(&env);
         assert!(client.try_pre_call(&caller, &route).is_ok());
@@ -2046,8 +2100,8 @@ mod tests {
     fn test_throttle_strategy_emits_event() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
-        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::Throttle).unwrap();
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0, &0);
+        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::Throttle);
 
         let caller = Address::generate(&env);
         client.pre_call(&caller, &route);
@@ -2073,8 +2127,9 @@ mod tests {
     fn test_log_only_strategy_allows_call_after_rate_limit_exceeded() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
-        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::LogOnly).unwrap();
+        // max 1 call per 60s window
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0, &0);
+        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::LogOnly);
 
         let caller = Address::generate(&env);
         assert!(client.try_pre_call(&caller, &route).is_ok());
@@ -2087,8 +2142,8 @@ mod tests {
     fn test_log_only_strategy_emits_event() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
-        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::LogOnly).unwrap();
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0, &0);
+        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::LogOnly);
 
         let caller = Address::generate(&env);
         client.pre_call(&caller, &route);
@@ -2116,8 +2171,9 @@ mod tests {
         let route_a = String::from_str(&env, "oracle/price");
         let route_b = String::from_str(&env, "vault/deposit");
 
-        client.configure_route(&admin, &route_a, &1, &60, &true, &0, &0, &0);
-        client.configure_route(&admin, &route_b, &1, &60, &true, &0, &0, &0);
+        // Both routes have max 1 call per window
+        client.configure_route(&admin, &route_a, &1, &60, &true, &0, &0, &0, &0);
+        client.configure_route(&admin, &route_b, &1, &60, &true, &0, &0, &0, &0);
 
         client.set_rate_limit_strategy(&admin, &route_a, &RateLimitStrategy::Throttle).unwrap();
 
@@ -2160,7 +2216,7 @@ mod tests {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
         env.ledger().set_timestamp(100);
-        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0, &0);
 
         let caller = Address::generate(&env);
         client.pre_call(&caller, &route);
@@ -2182,7 +2238,7 @@ mod tests {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
         let t0 = env.ledger().timestamp();
-        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0, &0);
 
         let caller = Address::generate(&env);
         client.pre_call(&caller, &route);
@@ -2203,7 +2259,7 @@ mod tests {
     fn test_rate_limit_multiple_calls_same_ledger_timestamp() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &3, &60, &true, &0, &0, &0);
+        client.configure_route(&admin, &route, &3, &60, &true, &0, &0, &0, &0);
 
         let caller = Address::generate(&env);
         let ts = env.ledger().timestamp();
@@ -2227,7 +2283,7 @@ mod tests {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
         let t0 = env.ledger().timestamp();
-        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0, &0);
 
         let caller_a = Address::generate(&env);
         let caller_b = Address::generate(&env);
@@ -2251,7 +2307,7 @@ mod tests {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
         env.ledger().set_timestamp(10000);
-        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0);
+        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0, &0);
 
         let caller = Address::generate(&env);
         client.pre_call(&caller, &route);
@@ -2262,5 +2318,63 @@ mod tests {
         let state = client.rate_limit_state(&route, &caller).unwrap();
         assert_eq!(state.calls_in_window, 2);
         assert_eq!(state.window_start, 10000);
+    }
+
+    // ── Issue #634: get_call_log modulo by zero panic ─────────────────────────
+
+    #[test]
+    fn test_get_call_log_with_log_retention_zero_returns_empty() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        let caller = Address::generate(&env);
+
+        // Configure with retention=5, make some calls
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &5, &0);
+        client.post_call(&caller, &route, &true);
+        client.post_call(&caller, &route, &false);
+
+        // Reconfigure with retention=0 (logging disabled)
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &0, &0);
+
+        // get_call_log must not panic; should return empty
+        let log = client.get_call_log(&route);
+        assert_eq!(log.len(), 0);
+    }
+
+    #[test]
+    fn test_get_call_log_filtered_with_log_retention_zero_returns_empty() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        let caller = Address::generate(&env);
+
+        // Configure with retention=5, make some calls
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &5, &0);
+        client.post_call(&caller, &route, &true);
+        client.post_call(&caller, &route, &false);
+
+        // Reconfigure with retention=0 (logging disabled)
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &0, &0);
+
+        // get_call_log_filtered must not panic; should return empty
+        let log = client.get_call_log_filtered(&route, &true);
+        assert_eq!(log.len(), 0);
+        let log = client.get_call_log_filtered(&route, &false);
+        assert_eq!(log.len(), 0);
+    }
+
+    #[test]
+    fn test_burst_allowance_permits_extra_calls() {
+        let (env, admin, client) = setup();
+        let caller = Address::generate(&env);
+        let route = String::from_str(&env, "oracle/get_price");
+
+        // max=2, burst=1 → 3 calls allowed before rejection
+        client.configure_route(&admin, &route, &2, &60, &true, &0, &0, &0, &1);
+
+        client.pre_call(&caller, &route); // call 1
+        client.pre_call(&caller, &route); // call 2 (at max)
+        client.pre_call(&caller, &route); // call 3 (burst)
+        let result = client.try_pre_call(&caller, &route); // call 4 → rejected
+        assert_eq!(result, Err(Ok(MiddlewareError::RateLimitExceeded)));
     }
 }

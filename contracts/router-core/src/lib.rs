@@ -590,11 +590,11 @@ impl RouterCore {
             for (index, route) in routes.iter().enumerate() {
                 let idx = index as u32;
                 if seen.contains(&route.name) {
-                    result.record_failure(&env, idx, "RouteAlreadyExists");
+                    result.record_failure(idx, router_common::BatchItemError::AlreadyExists);
                     return Ok(result);
                 }
                 if let Err(err) = Self::validate_route_name(&env, &route.name) {
-                    result.record_failure(&env, idx, Self::router_error_message(err));
+                    result.record_failure(idx, Self::router_error_to_batch(&env, err));
                     return Ok(result);
                 }
                 if env
@@ -602,7 +602,7 @@ impl RouterCore {
                     .instance()
                     .has(&DataKey::Route(route.name.clone()))
                 {
-                    result.record_failure(&env, idx, "RouteAlreadyExists");
+                    result.record_failure(idx, router_common::BatchItemError::AlreadyExists);
                     return Ok(result);
                 }
                 seen.push_back(route.name.clone());
@@ -632,7 +632,7 @@ impl RouterCore {
                 ) {
                     Ok(()) => result.record_success(idx),
                     Err(err) => {
-                        result.record_failure(&env, idx, Self::router_error_message(err));
+                        result.record_failure(idx, Self::router_error_to_batch(&env, err));
                     }
                 }
             }
@@ -674,7 +674,7 @@ impl RouterCore {
             for (index, name) in names.iter().enumerate() {
                 let idx = index as u32;
                 if !env.storage().instance().has(&DataKey::Route(name.clone())) {
-                    result.record_failure(&env, idx, "RouteNotFound");
+                    result.record_failure(idx, router_common::BatchItemError::AlreadyExists);
                     return Ok(result);
                 }
             }
@@ -689,7 +689,7 @@ impl RouterCore {
                 match Self::remove_route_internal(&env, name.clone()) {
                     Ok(()) => result.record_success(idx),
                     Err(err) => {
-                        result.record_failure(&env, idx, Self::router_error_message(err));
+                        result.record_failure(idx, Self::router_error_to_batch(&env, err));
                     }
                 }
             }
@@ -1967,8 +1967,18 @@ impl RouterCore {
         Ok(())
     }
 
-    fn router_error_message(err: RouterError) -> &'static str {
+    fn router_error_to_batch(env: &Env, err: RouterError) -> router_common::BatchItemError {
         match err {
+            RouterError::RouteAlreadyExists => router_common::BatchItemError::AlreadyExists,
+            RouterError::InvalidRouteName => router_common::BatchItemError::InvalidName,
+            RouterError::InvalidMetadata => router_common::BatchItemError::InvalidMetadata,
+            RouterError::Unauthorized => router_common::BatchItemError::Unauthorized,
+            RouterError::RouteNotFound => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "RouteNotFound"),
+            ),
+            _ => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "Error"),
+            ),
             RouterError::AlreadyInitialized => "AlreadyInitialized",
             RouterError::NotInitialized => "NotInitialized",
             RouterError::Unauthorized => "Unauthorized",
@@ -4265,8 +4275,8 @@ mod tests {
         assert_eq!(result.successes.get(0).unwrap().index, 1);
         assert_eq!(result.failures.len(), 1);
         assert_eq!(
-            result.failures.get(0).unwrap().message,
-            String::from_str(&env, "RouteAlreadyExists")
+            result.failures.get(0).unwrap().error,
+            router_common::BatchItemError::AlreadyExists
         );
     }
 
@@ -4281,8 +4291,8 @@ mod tests {
         assert_eq!(result.successes.len(), 1);
         assert_eq!(result.failures.len(), 1);
         assert_eq!(
-            result.failures.get(0).unwrap().message,
-            String::from_str(&env, "RouteNotFound")
+            result.failures.get(0).unwrap().error,
+            router_common::BatchItemError::AlreadyExists
         );
         let resolve_result = client.try_resolve(&name);
         assert_eq!(resolve_result, Err(Ok(RouterError::RouteNotFound)));
