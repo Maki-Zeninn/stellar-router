@@ -21,7 +21,6 @@ use clap::Parser;
 use std::net::SocketAddr;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{info, info_span, warn, Instrument};
-use axum::http::HeaderValue;
 
 
 use utoipa::OpenApi;
@@ -140,15 +139,13 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/health", get(handlers::health))
-        .route(
-            "/simulate",
-            post(handlers::simulate).layer(middleware::from_fn(rate_limit::rate_limit_middleware)),
-        )
+        .route("/simulate", post(handlers::simulate))
         .route("/routes", get(handlers::list_routes))
         .route("/routes/:name", get(handlers::get_route))
         .route("/ws", get(websocket::ws_handler))
         .route("/openapi.json", get(openapi_json))
         .merge(docs)
+        .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
         .layer(middleware::from_fn(request_id_middleware))
         .layer(cors)
         .layer(DefaultBodyLimit::max(1024 * 1024))
