@@ -30,12 +30,10 @@ fn test_app() -> Router {
     );
 
     Router::new()
-        .route(
-            "/simulate",
-            post(handlers::simulate).layer(middleware::from_fn(crate::rate_limit::rate_limit_middleware)),
-        )
+        .route("/simulate", post(handlers::simulate))
         .route("/health", get(handlers::health))
         .route("/routes/:name", get(handlers::get_route))
+        .layer(middleware::from_fn(crate::rate_limit::rate_limit_middleware))
         .with_state(state)
 }
 
