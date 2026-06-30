@@ -4,17 +4,23 @@
 - [x] Run `cargo test -p router-multicall` and ensure tests pass
 # TODO
 
-- [ ] Inspect router-access role/expiry logic and existing tests for `grant_role`.
-- [x] Implement behavior change in `contracts/router-access/src/lib.rs`:
-  - [x] If role assignment exists and is unexpired:
-    - [x] Return `AlreadyHasRole` only if requested expiry timestamp matches existing.
-    - [x] Otherwise update `RoleExpiry` to the new expiry timestamp and return `Ok`.
-- [x] Add new tests covering:
-  - [x] Duplicate grant without expiry: AlreadyHasRole
-  - [x] Extend expiry: update works
-  - [x] Shorten expiry: update works
-  - [x] Grant after expiry: succeeds
-  - [x] Grant with None expiry over existing expiry: updates to permanent
-- [x] Run `cargo test -p router-access` to confirm.
-
+## Role membership transfer between addresses (router-access)
+- [ ] Add new contract API to transfer role membership from `from` to `to`.
+- [ ] Enforce authorization: caller must be role manager for the role (or super admin if designed that way).
+- [ ] Semantics: transfer only if `from` currently has the role **active** (expired source must error).
+- [ ] Preserve expiry: destination receives the same expiry timestamp as source.
+- [ ] Keep storage consistent:
+  - [ ] Update `HasRole`, `RoleExpiry`
+  - [ ] Update `RoleMembers(role)`
+  - [ ] Update `AddressRoles(from)` and `AddressRoles(to)`
+  - [ ] Update `RoleMemberCount(role)` correctly only when active.
+- [ ] Add events (either new event topic or emit existing grant/revoke events consistently).
+- [ ] Add tests:
+  - [ ] permanent grant transfer
+  - [ ] expiring grant transfer (expiry preserved)
+  - [ ] expired source transfer fails
+  - [ ] destination blacklisting prevents transfer
+  - [ ] role not present on source fails
+  - [ ] `from == to` behavior
+- [ ] Run `cargo test` for the affected contract/package(s).
 
