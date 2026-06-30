@@ -29,12 +29,11 @@ impl AppState {
         execution_contract_id: String,
         router_core_contract_id: String,
         rate_limiter: RateLimiter,
+        rpc_timeout_secs: u64,
     ) -> Self {
         let (tx_status_tx, _) = broadcast::channel(1000);
-        // NOTE: rpc timeout is configured by SorobanRpcClient::with_timeout.
-        // Currently `AppState::new` uses SorobanRpcClient::new, which defaults to 10s.
         Self {
-            rpc: SorobanRpcClient::new(rpc_url, Some(router_core_contract_id.clone())),
+            rpc: SorobanRpcClient::with_timeout(rpc_url, Some(router_core_contract_id.clone()), rpc_timeout_secs),
 
             execution_contract_id,
             router_core_contract_id,
