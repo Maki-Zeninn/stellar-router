@@ -27,6 +27,7 @@ fn test_app() -> Router {
         "".to_string(),
         "".to_string(),
         rate_limiter,
+        10,
     );
 
     Router::new()
@@ -437,6 +438,7 @@ fn ws_app_state() -> AppState {
         "".to_string(),
         "".to_string(),
         rate_limiter,
+        10,
     )
 }
 

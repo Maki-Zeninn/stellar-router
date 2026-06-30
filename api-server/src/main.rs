@@ -94,9 +94,7 @@ struct Args {
     #[arg(long, env = "SHUTDOWN_TIMEOUT_SECS", default_value = "30")]
     shutdown_timeout_secs: u64,
 
-    // Soroban RPC request timeout in seconds.
-    // Used by SorobanRpcClient::new via its default (10s) currently.
-    // TODO: wire through once AppState::new accepts rpc timeout.
+    /// Soroban RPC request timeout in seconds. Wired through to SorobanRpcClient::with_timeout.
     #[arg(long, env = "RPC_TIMEOUT_SECS", default_value = "10")]
     rpc_timeout_secs: u64,
 }
@@ -129,6 +127,7 @@ async fn main() -> Result<()> {
         args.execution_contract_id,
         args.router_core_contract_id,
         rate_limiter,
+        args.rpc_timeout_secs,
     );
 
 
