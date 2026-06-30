@@ -140,6 +140,28 @@ pub enum BatchResolveResult {
     Err(ResolveError),
 }
 
+/// Aggregate statistics about the current router state.
+///
+/// Returned by [`RouterCore::get_stats`]. All counters are computed in a
+/// single O(n) pass over the registered route set so callers get a consistent
+/// snapshot without needing to iterate routes themselves.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RouterStats {
+    /// Total number of routes currently registered (including paused and expired).
+    pub total_routes: u32,
+    /// Routes that are neither paused nor past their TTL.
+    pub active_routes: u32,
+    /// Routes that are explicitly paused (paused flag set to true).
+    pub paused_routes: u32,
+    /// Routes whose TTL has lapsed (expires_at < current ledger sequence).
+    pub expired_routes: u32,
+    /// Number of registered aliases.
+    pub alias_count: u32,
+    /// Number of routes that have a score assigned.
+    pub scored_routes: u32,
+}
+
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 #[contracterror]
@@ -1437,6 +1459,71 @@ impl RouterCore {
             }
         }
         routes
+    }
+
+    /// Return aggregate statistics about the current router state.
+    ///
+    /// Performs a single O(n) pass over all registered routes and aliases to
+    /// compute the counts. No authentication is required — this is a
+    /// read-only query intended for operators and monitoring dashboards.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// A [`RouterStats`] snapshot with counts for total, active, paused,
+    /// expired, aliased, and scored routes.
+    pub fn get_stats(env: Env) -> RouterStats {
+        let names = Self::get_route_names(&env);
+        let mut total_routes: u32 = 0;
+        let mut active_routes: u32 = 0;
+        let mut paused_routes: u32 = 0;
+        let mut expired_routes: u32 = 0;
+        let mut scored_routes: u32 = 0;
+
+        for name in names.iter() {
+            total_routes += 1;
+
+            let entry: Option<RouteEntry> = env
+                .storage()
+                .instance()
+                .get(&DataKey::Route(name.clone()));
+
+            match entry {
+                Some(e) => {
+                    let expired = is_route_expired(&env, &e);
+                    if expired {
+                        expired_routes += 1;
+                    } else if e.paused {
+                        paused_routes += 1;
+                    } else {
+                        active_routes += 1;
+                    }
+                }
+                None => {
+                    // Entry missing; treat as non-active to avoid false counts.
+                }
+            }
+
+            if env
+                .storage()
+                .instance()
+                .has(&DataKey::Score(name.clone()))
+            {
+                scored_routes += 1;
+            }
+        }
+
+        let alias_count = Self::get_aliases(&env).len();
+
+        RouterStats {
+            total_routes,
+            active_routes,
+            paused_routes,
+            expired_routes,
+            alias_count,
+            scored_routes,
+        }
     }
 
     /// Returns a page of registered route names.
@@ -5007,6 +5094,339 @@ mod tests {
         // unrelated routes: this call should fall back to the requested route.
         env.ledger().with_mut(|li| li.sequence_number += 6);
         assert_eq!(client.resolve(&other), addr2);
+    }
+
+    // ── Issue #590: concurrent alias and route removal interactions ───────────
+
+    /// Remove a route that has multiple aliases: verifies that all aliases are
+    /// cleaned up atomically and that resolving any of them returns RouteNotFound.
+    /// Also verifies that `get_alias_target` returns None for all removed aliases.
+    #[test]
+    fn test_remove_route_with_multiple_aliases_cleans_all() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let alias_a = String::from_str(&env, "oracle-v1");
+        let alias_b = String::from_str(&env, "price-feed");
+        let alias_c = String::from_str(&env, "oracle-latest");
+        let addr = Address::generate(&env);
+
+        client.register_route(&admin, &oracle, &addr, &None);
+        client.add_alias(&admin, &oracle, &alias_a);
+        client.add_alias(&admin, &oracle, &alias_b);
+        client.add_alias(&admin, &oracle, &alias_c);
+
+        // All three aliases resolve before removal
+        assert_eq!(client.resolve(&alias_a), addr);
+        assert_eq!(client.resolve(&alias_b), addr);
+        assert_eq!(client.resolve(&alias_c), addr);
+
+        // Remove the underlying route
+        client.remove_route(&admin, &oracle);
+
+        // All aliases must be cleaned up — no dangling state
+        assert_eq!(
+            client.try_resolve(&alias_a),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(
+            client.try_resolve(&alias_b),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(
+            client.try_resolve(&alias_c),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        // get_alias_target must also reflect the cleanup
+        assert_eq!(client.get_alias_target(&alias_a), None);
+        assert_eq!(client.get_alias_target(&alias_b), None);
+        assert_eq!(client.get_alias_target(&alias_c), None);
+    }
+
+    /// Remove the alias first, then remove the route. Verifies there is no
+    /// dangling state: the alias is gone before route removal, so
+    /// remove_aliases_for_route finds nothing extra to clean up, and both
+    /// the alias and the route are fully absent afterwards.
+    #[test]
+    fn test_remove_alias_then_remove_route_no_dangling_state() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let alias = String::from_str(&env, "oracle-v1");
+        let addr = Address::generate(&env);
+
+        client.register_route(&admin, &oracle, &addr, &None);
+        client.add_alias(&admin, &oracle, &alias);
+
+        // Verify both work initially
+        assert_eq!(client.resolve(&oracle), addr);
+        assert_eq!(client.resolve(&alias), addr);
+
+        // Remove the alias first
+        client.remove_alias(&admin, &alias);
+        assert_eq!(
+            client.try_resolve(&alias),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(client.get_alias_target(&alias), None);
+
+        // Route still resolves after alias removal
+        assert_eq!(client.resolve(&oracle), addr);
+
+        // Now remove the route — should succeed cleanly with no dangling alias
+        client.remove_route(&admin, &oracle);
+        assert_eq!(
+            client.try_resolve(&oracle),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+
+        // Alias was already gone; adding it again must fail because the target
+        // route no longer exists
+        assert_eq!(
+            client.try_add_alias(&admin, &oracle, &alias),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+    }
+
+    /// Re-register a route under the same name after removal. Old aliases that
+    /// were created before the removal must NOT auto-reconnect to the new route
+    /// instance; they were deleted as part of remove_route and stay gone.
+    #[test]
+    fn test_reregister_route_after_removal_old_aliases_do_not_reconnect() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let alias = String::from_str(&env, "oracle-legacy");
+        let addr_v1 = Address::generate(&env);
+        let addr_v2 = Address::generate(&env);
+
+        // Register route v1 and create an alias for it
+        client.register_route(&admin, &oracle, &addr_v1, &None);
+        client.add_alias(&admin, &oracle, &alias);
+        assert_eq!(client.resolve(&alias), addr_v1);
+
+        // Remove the route (which also removes the alias)
+        client.remove_route(&admin, &oracle);
+
+        // Re-register under the same name with a new address
+        client.register_route(&admin, &oracle, &addr_v2, &None);
+        assert_eq!(client.resolve(&oracle), addr_v2);
+
+        // The old alias must NOT have been automatically re-attached to the new
+        // route; it was deleted and must remain gone
+        assert_eq!(
+            client.try_resolve(&alias),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(client.get_alias_target(&alias), None);
+
+        // The alias name is now free to be re-created pointing to the new route
+        client.add_alias(&admin, &oracle, &alias);
+        assert_eq!(client.resolve(&alias), addr_v2);
+    }
+
+    /// "Rename" a route by removing it (and its aliases) and re-registering
+    /// under a new name. Aliases pointed to the old name must be gone; the new
+    /// name has no aliases until they are explicitly re-created.
+    #[test]
+    fn test_rename_route_via_remove_and_register_aliases_follow_name() {
+        let (env, admin, client) = setup();
+        let old_name = String::from_str(&env, "oracle-old");
+        let new_name = String::from_str(&env, "oracle-new");
+        let alias = String::from_str(&env, "oracle-alias");
+        let addr = Address::generate(&env);
+
+        // Register the original route and create an alias
+        client.register_route(&admin, &old_name, &addr, &None);
+        client.add_alias(&admin, &old_name, &alias);
+        assert_eq!(client.resolve(&alias), addr);
+
+        // Simulate a rename: remove the old route, register under new name
+        client.remove_route(&admin, &old_name);
+        client.register_route(&admin, &new_name, &addr, &None);
+
+        // Old alias was removed with the old route; it must not resolve
+        assert_eq!(
+            client.try_resolve(&alias),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        // Old name is also gone
+        assert_eq!(
+            client.try_resolve(&old_name),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+
+        // New name resolves correctly
+        assert_eq!(client.resolve(&new_name), addr);
+
+        // Can now create the alias pointing to the new name
+        client.add_alias(&admin, &new_name, &alias);
+        assert_eq!(client.resolve(&alias), addr);
+    }
+
+    /// Batch-remove multiple routes that each have aliases. Verifies that alias
+    /// cleanup happens for every route in the batch, leaving no dangling aliases.
+    #[test]
+    fn test_batch_remove_routes_with_aliases_cleans_all_aliases() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let vault = String::from_str(&env, "vault");
+        let dex = String::from_str(&env, "dex");
+        let oracle_alias = String::from_str(&env, "price-feed");
+        let vault_alias = String::from_str(&env, "savings");
+        let dex_alias = String::from_str(&env, "swap");
+        let addr = Address::generate(&env);
+
+        // Register three routes, each with one alias
+        client.register_route(&admin, &oracle, &addr, &None);
+        client.register_route(&admin, &vault, &addr, &None);
+        client.register_route(&admin, &dex, &addr, &None);
+        client.add_alias(&admin, &oracle, &oracle_alias);
+        client.add_alias(&admin, &vault, &vault_alias);
+        client.add_alias(&admin, &dex, &dex_alias);
+
+        // Confirm all aliases resolve before batch removal
+        assert_eq!(client.resolve(&oracle_alias), addr);
+        assert_eq!(client.resolve(&vault_alias), addr);
+        assert_eq!(client.resolve(&dex_alias), addr);
+
+        // Batch-remove all three routes (fail_fast = false)
+        let names = vec![&env, oracle.clone(), vault.clone(), dex.clone()];
+        let result = client.remove_routes_batch(&admin, &names, &false);
+
+        // All three should succeed
+        assert_eq!(result.successes.len(), 3);
+        assert_eq!(result.failures.len(), 0);
+
+        // All routes must be gone
+        assert_eq!(
+            client.try_resolve(&oracle),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(
+            client.try_resolve(&vault),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(
+            client.try_resolve(&dex),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+
+        // All aliases must also be cleaned up — no dangling state
+        assert_eq!(
+            client.try_resolve(&oracle_alias),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(
+            client.try_resolve(&vault_alias),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(
+            client.try_resolve(&dex_alias),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(client.get_alias_target(&oracle_alias), None);
+        assert_eq!(client.get_alias_target(&vault_alias), None);
+        assert_eq!(client.get_alias_target(&dex_alias), None);
+    }
+
+    /// Batch-remove in fail_fast mode stops at the first pre-validation error.
+    /// Routes that pass pre-validation but come after a failed route are NOT
+    /// removed. Their aliases must remain intact.
+    #[test]
+    fn test_batch_remove_fail_fast_aborts_on_error_aliases_remain_for_unprocessed() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let ghost = String::from_str(&env, "ghost"); // does not exist
+        let vault = String::from_str(&env, "vault");
+        let oracle_alias = String::from_str(&env, "price-feed");
+        let vault_alias = String::from_str(&env, "savings");
+        let addr = Address::generate(&env);
+
+        client.register_route(&admin, &oracle, &addr, &None);
+        client.register_route(&admin, &vault, &addr, &None);
+        client.add_alias(&admin, &oracle, &oracle_alias);
+        client.add_alias(&admin, &vault, &vault_alias);
+
+        // Batch: [oracle (exists), ghost (missing), vault (exists)]
+        // fail_fast pre-validation finds "ghost" missing and aborts before
+        // removing anything — oracle and vault survive with their aliases intact
+        let names = vec![&env, oracle.clone(), ghost.clone(), vault.clone()];
+        let result = client.remove_routes_batch(&admin, &names, &true);
+
+        // At least one failure was recorded (the missing "ghost" route)
+        assert!(result.failures.len() >= 1);
+
+        // oracle and vault must still be present with their aliases intact
+        assert_eq!(client.resolve(&oracle), addr);
+        assert_eq!(client.resolve(&oracle_alias), addr);
+        assert_eq!(client.resolve(&vault), addr);
+        assert_eq!(client.resolve(&vault_alias), addr);
+    // ── Issue #728: get_stats returns correct aggregate counts ───────────────
+
+    /// Verify that get_stats correctly counts total, active, paused, and
+    /// alias entries across a mixed-state router.
+    #[test]
+    fn test_get_stats_counts_correctly() {
+        let (env, admin, client) = setup();
+
+        // Initially all zeros (no routes registered yet)
+        let stats = client.get_stats();
+        assert_eq!(stats.total_routes, 0);
+        assert_eq!(stats.active_routes, 0);
+        assert_eq!(stats.paused_routes, 0);
+        assert_eq!(stats.expired_routes, 0);
+        assert_eq!(stats.alias_count, 0);
+        assert_eq!(stats.scored_routes, 0);
+
+        let addr = Address::generate(&env);
+        let name1 = String::from_str(&env, "route-one");
+        let name2 = String::from_str(&env, "route-two");
+        let name3 = String::from_str(&env, "route-three");
+
+        client.register_route(&admin, &name1, &addr, &None);
+        client.register_route(&admin, &name2, &addr, &None);
+        client.register_route(&admin, &name3, &addr, &None);
+
+        // 3 active routes, no paused, no aliases, no scores yet
+        let stats = client.get_stats();
+        assert_eq!(stats.total_routes, 3);
+        assert_eq!(stats.active_routes, 3);
+        assert_eq!(stats.paused_routes, 0);
+        assert_eq!(stats.alias_count, 0);
+        assert_eq!(stats.scored_routes, 0);
+
+        // Pause one route
+        client.set_route_paused(&admin, &name1, &true);
+        let stats = client.get_stats();
+        assert_eq!(stats.active_routes, 2);
+        assert_eq!(stats.paused_routes, 1);
+
+        // Add an alias
+        let alias = String::from_str(&env, "alias-one");
+        client.add_alias(&admin, &alias, &name2);
+        let stats = client.get_stats();
+        assert_eq!(stats.alias_count, 1);
+
+        // Score a route
+        client.set_route_score(
+            &admin,
+            &name2,
+            &RouteScore {
+                liquidity_score: 80,
+                fee_bps: 20,
+                reliability_score: 90,
+            },
+        );
+        let stats = client.get_stats();
+        assert_eq!(stats.scored_routes, 1);
+
+        // Expire a route via TTL
+        let expired_name = String::from_str(&env, "route-expiring");
+        client.register_route_with_ttl(&admin, &expired_name, &addr, &Some(5u32));
+        // Advance ledger past expiry
+        env.ledger().with_mut(|li| li.sequence_number += 10);
+        let stats = client.get_stats();
+        assert_eq!(stats.expired_routes, 1);
+        // total_routes still counts it (it's still registered)
+        assert_eq!(stats.total_routes, 4);
     }
 }
 

@@ -343,11 +343,23 @@ impl RouterMiddleware {
                         total_violations: 0,
                     });
 
-                let window_elapsed = now >= state.window_start + config.window_seconds;
+                // Resolve effective limit: per-caller override takes precedence over
+                // the route-level default when a CallerRateLimit entry is present.
+                let (effective_limit, effective_window) = env
+                    .storage()
+                    .instance()
+                    .get::<DataKey, CallerRateLimitConfig>(&DataKey::CallerRateLimit(
+                        route.clone(),
+                        caller.clone(),
+                    ))
+                    .map(|c| (c.max_calls, c.window_secs))
+                    .unwrap_or((config.max_calls_per_window, config.window_seconds));
+
+                let window_elapsed = now >= state.window_start + effective_window;
                 let calls = if window_elapsed { 0 } else { state.calls_in_window };
                 let window_start = if window_elapsed { now } else { state.window_start };
 
-                if calls >= config.max_calls_per_window {
+                if calls >= effective_limit {
                     route_call_state.rate_limits.set(
                         caller.clone(),
                         RateLimitState {
@@ -1009,7 +1021,67 @@ impl RouterMiddleware {
                 window_secs,
             },
         );
+        env.events().publish(
+            (Symbol::new(&env, "caller_rate_limit_set"),),
+            (route, target_caller, max_calls, window_secs),
+        );
         Ok(())
+    }
+
+    /// Set a per-caller rate limit override for a specific route.
+    ///
+    /// When a `CallerRateLimit` entry is present for `(route, target_caller)`,
+    /// `pre_call` uses `max_calls` / `window_secs` instead of the route-level
+    /// `max_calls_per_window` / `window_seconds` for that caller only. This
+    /// allows privileged callers to receive higher limits and suspicious
+    /// addresses to receive tighter limits without touching the global config.
+    ///
+    /// Admin only. Emits a `caller_rate_limit_set` event.
+    pub fn set_caller_rate_limit(
+        env: Env,
+        caller: Address,
+        route: String,
+        target_caller: Address,
+        max_calls: u32,
+        window_secs: u64,
+    ) -> Result<(), MiddlewareError> {
+        // Delegate to configure_caller_rate_limit for DRY implementation.
+        Self::configure_caller_rate_limit(env, caller, route, target_caller, max_calls, window_secs)
+    }
+
+    /// Remove a per-caller rate limit override, restoring the route-level default.
+    ///
+    /// After removal `pre_call` falls back to `RouteConfig::max_calls_per_window`
+    /// for the caller. Admin only. Emits a `caller_rate_limit_removed` event.
+    pub fn remove_caller_rate_limit(
+        env: Env,
+        caller: Address,
+        route: String,
+        target_caller: Address,
+    ) -> Result<(), MiddlewareError> {
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, MiddlewareError)?;
+
+        let key = DataKey::CallerRateLimit(route.clone(), target_caller.clone());
+        env.storage().instance().remove(&key);
+        env.events().publish(
+            (Symbol::new(&env, "caller_rate_limit_removed"),),
+            (route, target_caller),
+        );
+        Ok(())
+    }
+
+    /// Get the per-caller rate limit override for a specific route and caller.
+    ///
+    /// Returns `None` if no override has been set (the route-level default applies).
+    pub fn get_caller_rate_limit(
+        env: Env,
+        route: String,
+        target_caller: Address,
+    ) -> Option<CallerRateLimitConfig> {
+        env.storage()
+            .instance()
+            .get(&DataKey::CallerRateLimit(route, target_caller))
     }
 
     /// Check whether a specific caller has exceeded their per-caller rate limit.
@@ -2376,5 +2448,147 @@ mod tests {
         client.pre_call(&caller, &route); // call 3 (burst)
         let result = client.try_pre_call(&caller, &route); // call 4 → rejected
         assert_eq!(result, Err(Ok(MiddlewareError::RateLimitExceeded)));
+    }
+
+    // ── Per-caller rate limit override tests ────────────────────────────────
+
+    #[test]
+    fn test_caller_override_higher_limit_allows_more_calls() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+
+        // Global limit: 2 calls per 60 s
+        client.configure_route(&admin, &route, &2, &60, &true, &0, &0, &0, &0);
+
+        let privileged = Address::generate(&env);
+
+        // Grant privileged caller 10 calls per window
+        client.set_caller_rate_limit(&admin, &route, &privileged, &10, &60);
+
+        // Verify override is stored
+        let cfg = client.get_caller_rate_limit(&route, &privileged).unwrap();
+        assert_eq!(cfg.max_calls, 10);
+        assert_eq!(cfg.window_secs, 60);
+
+        // Privileged caller can make 5 calls — well above the global limit of 2
+        for _ in 0..5 {
+            assert!(client.try_pre_call(&privileged, &route).is_ok());
+        }
+
+        // A normal caller is still capped at 2
+        let normal = Address::generate(&env);
+        assert!(client.try_pre_call(&normal, &route).is_ok());
+        assert!(client.try_pre_call(&normal, &route).is_ok());
+        assert_eq!(
+            client.try_pre_call(&normal, &route),
+            Err(Ok(MiddlewareError::RateLimitExceeded))
+        );
+    }
+
+    #[test]
+    fn test_caller_override_lower_limit_throttles_caller() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+
+        // Global limit: 10 calls per 60 s
+        client.configure_route(&admin, &route, &10, &60, &true, &0, &0, &0, &0);
+
+        let restricted = Address::generate(&env);
+
+        // Restrict suspicious caller to 1 call per window
+        client.set_caller_rate_limit(&admin, &route, &restricted, &1, &60);
+
+        // First call succeeds
+        assert!(client.try_pre_call(&restricted, &route).is_ok());
+
+        // Second call must be rejected even though global limit is 10
+        assert_eq!(
+            client.try_pre_call(&restricted, &route),
+            Err(Ok(MiddlewareError::RateLimitExceeded))
+        );
+
+        // Other callers are unaffected — still get 10 calls
+        let other = Address::generate(&env);
+        for _ in 0..5 {
+            assert!(client.try_pre_call(&other, &route).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_remove_caller_rate_limit_restores_default() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+
+        // Global limit: 2 calls per 60 s
+        client.configure_route(&admin, &route, &2, &60, &true, &0, &0, &0, &0);
+
+        let privileged = Address::generate(&env);
+
+        // Grant 10-call override, then remove it
+        client.set_caller_rate_limit(&admin, &route, &privileged, &10, &60);
+        client.remove_caller_rate_limit(&admin, &route, &privileged);
+
+        // Override must be gone
+        assert!(client.get_caller_rate_limit(&route, &privileged).is_none());
+
+        // Caller is now subject to the global limit of 2
+        assert!(client.try_pre_call(&privileged, &route).is_ok());
+        assert!(client.try_pre_call(&privileged, &route).is_ok());
+        assert_eq!(
+            client.try_pre_call(&privileged, &route),
+            Err(Ok(MiddlewareError::RateLimitExceeded))
+        );
+    }
+
+    #[test]
+    fn test_set_caller_rate_limit_emits_event() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0, &0);
+
+        let target = Address::generate(&env);
+        client.set_caller_rate_limit(&admin, &route, &target, &20, &120);
+
+        let events = env.events().all();
+        let topic = Symbol::new(&env, "caller_rate_limit_set");
+        let found = events.iter().any(|e| {
+            e.1.get(0)
+                .map(|t| Symbol::from_val(&env, &t) == topic)
+                .unwrap_or(false)
+        });
+        assert!(found, "caller_rate_limit_set event must be emitted");
+    }
+
+    #[test]
+    fn test_remove_caller_rate_limit_emits_event() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0, &0);
+
+        let target = Address::generate(&env);
+        client.set_caller_rate_limit(&admin, &route, &target, &20, &120);
+        client.remove_caller_rate_limit(&admin, &route, &target);
+
+        let events = env.events().all();
+        let topic = Symbol::new(&env, "caller_rate_limit_removed");
+        let found = events.iter().any(|e| {
+            e.1.get(0)
+                .map(|t| Symbol::from_val(&env, &t) == topic)
+                .unwrap_or(false)
+        });
+        assert!(found, "caller_rate_limit_removed event must be emitted");
+    }
+
+    #[test]
+    fn test_get_caller_rate_limit_returns_none_when_not_set() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0, &0);
+
+        let caller = Address::generate(&env);
+        assert!(
+            client.get_caller_rate_limit(&route, &caller).is_none(),
+            "no override should return None"
+        );
     }
 }

@@ -9,6 +9,8 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
 };
 
+const MAX_HIERARCHY_DEPTH: u32 = 16;
+
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -23,6 +25,7 @@ pub enum DataKey {
 
     AddressRoles(Address), // address -> Vec<String>
     RoleExpiry(String, Address),
+    RoleParent(String), // child role -> parent role
     AllRoles, // Vec<String> — all roles ever defined in the system
 }
 
@@ -39,6 +42,7 @@ pub enum AccessError {
     Blacklisted = 6,
     CannotBlacklistAdmin = 7,
     DestinationAlreadyHasRole = 8,
+    HierarchyCycle = 8,
 }
 
 
@@ -258,6 +262,37 @@ impl RouterAccess {
         env.storage()
             .instance()
             .get::<DataKey, Address>(&DataKey::RoleAdmin(role))
+    }
+
+    /// Set a parent role for inheritance.
+    pub fn set_role_parent(
+        env: Env,
+        caller: Address,
+        role: String,
+        parent_role: String,
+    ) -> Result<(), AccessError> {
+        caller.require_auth();
+        Self::require_super_admin(&env, &caller)?;
+        Self::ensure_no_role_parent_cycle(&env, &role, &parent_role)?;
+
+        Self::track_role_in_all_roles(&env, &role);
+        Self::track_role_in_all_roles(&env, &parent_role);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::RoleParent(role.clone()), &parent_role);
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROLE_PARENT_SET),),
+            (role, parent_role),
+        );
+        Ok(())
+    }
+
+    /// Returns the parent role for the given role, or None if none is set.
+    pub fn get_role_parent(env: Env, role: String) -> Option<String> {
+        env.storage()
+            .instance()
+            .get::<DataKey, String>(&DataKey::RoleParent(role))
     }
 
     /// List all roles that have ever been defined in the system.
@@ -580,6 +615,29 @@ impl RouterAccess {
         }
     }
 
+    fn ensure_no_role_parent_cycle(
+        env: &Env,
+        role: &String,
+        parent_role: &String,
+    ) -> Result<(), AccessError> {
+        let mut current = parent_role.clone();
+
+        loop {
+            if &current == role {
+                return Err(AccessError::HierarchyCycle);
+            }
+
+            match env
+                .storage()
+                .instance()
+                .get::<DataKey, String>(&DataKey::RoleParent(current.clone()))
+            {
+                Some(parent) => current = parent,
+                None => return Ok(()),
+            }
+        }
+    }
+
     fn grant_role_internal(
         env: &Env,
         account: &Address,
@@ -706,6 +764,31 @@ impl RouterAccess {
             return false;
         }
 
+        let mut current_role = role.clone();
+        let mut depth = 0u32;
+
+        loop {
+            if Self::has_direct_role_internal(env, account, &current_role) {
+                return true;
+            }
+
+            depth += 1;
+            if depth >= MAX_HIERARCHY_DEPTH {
+                return false;
+            }
+
+            match env
+                .storage()
+                .instance()
+                .get::<DataKey, String>(&DataKey::RoleParent(current_role.clone()))
+            {
+                Some(parent_role) => current_role = parent_role,
+                None => return false,
+            }
+        }
+    }
+
+    fn has_direct_role_internal(env: &Env, account: &Address, role: &String) -> bool {
         let has_role = env
             .storage()
             .instance()
@@ -1429,5 +1512,39 @@ mod tests {
         // Role should still appear in list_all_roles even after all members are revoked
         let roles = client.list_all_roles();
         assert!(roles.contains(&role));
+    }
+
+    #[test]
+    fn test_role_hierarchy_grants_transitive_access() {
+        let (env, admin, client) = setup();
+        let viewer = String::from_str(&env, "viewer");
+        let editor = String::from_str(&env, "editor");
+        let owner = String::from_str(&env, "owner");
+        let user = Address::generate(&env);
+
+        client.set_role_parent(&admin, &viewer, &editor);
+        client.set_role_parent(&admin, &editor, &owner);
+        client.grant_role(&admin, &user, &owner, &None);
+
+        assert!(client.has_role(&user, &owner));
+        assert!(client.has_role(&user, &editor));
+        assert!(client.has_role(&user, &viewer));
+        assert_eq!(client.get_role_parent(&viewer), Some(editor));
+    }
+
+    #[test]
+    fn test_set_role_parent_rejects_transitive_cycle() {
+        let (env, admin, client) = setup();
+        let role_a = String::from_str(&env, "role-a");
+        let role_b = String::from_str(&env, "role-b");
+        let role_c = String::from_str(&env, "role-c");
+
+        client.set_role_parent(&admin, &role_a, &role_b);
+        client.set_role_parent(&admin, &role_b, &role_c);
+
+        let result = client.try_set_role_parent(&admin, &role_c, &role_a);
+
+        assert_eq!(result, Err(Ok(AccessError::HierarchyCycle)));
+        assert_eq!(client.get_role_parent(&role_c), None);
     }
 }
