@@ -140,6 +140,28 @@ pub enum BatchResolveResult {
     Err(ResolveError),
 }
 
+/// Aggregate statistics about the current router state.
+///
+/// Returned by [`RouterCore::get_stats`]. All counters are computed in a
+/// single O(n) pass over the registered route set so callers get a consistent
+/// snapshot without needing to iterate routes themselves.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RouterStats {
+    /// Total number of routes currently registered (including paused and expired).
+    pub total_routes: u32,
+    /// Routes that are neither paused nor past their TTL.
+    pub active_routes: u32,
+    /// Routes that are explicitly paused (paused flag set to true).
+    pub paused_routes: u32,
+    /// Routes whose TTL has lapsed (expires_at < current ledger sequence).
+    pub expired_routes: u32,
+    /// Number of registered aliases.
+    pub alias_count: u32,
+    /// Number of routes that have a score assigned.
+    pub scored_routes: u32,
+}
+
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 #[contracterror]
@@ -1437,6 +1459,71 @@ impl RouterCore {
             }
         }
         routes
+    }
+
+    /// Return aggregate statistics about the current router state.
+    ///
+    /// Performs a single O(n) pass over all registered routes and aliases to
+    /// compute the counts. No authentication is required — this is a
+    /// read-only query intended for operators and monitoring dashboards.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// A [`RouterStats`] snapshot with counts for total, active, paused,
+    /// expired, aliased, and scored routes.
+    pub fn get_stats(env: Env) -> RouterStats {
+        let names = Self::get_route_names(&env);
+        let mut total_routes: u32 = 0;
+        let mut active_routes: u32 = 0;
+        let mut paused_routes: u32 = 0;
+        let mut expired_routes: u32 = 0;
+        let mut scored_routes: u32 = 0;
+
+        for name in names.iter() {
+            total_routes += 1;
+
+            let entry: Option<RouteEntry> = env
+                .storage()
+                .instance()
+                .get(&DataKey::Route(name.clone()));
+
+            match entry {
+                Some(e) => {
+                    let expired = is_route_expired(&env, &e);
+                    if expired {
+                        expired_routes += 1;
+                    } else if e.paused {
+                        paused_routes += 1;
+                    } else {
+                        active_routes += 1;
+                    }
+                }
+                None => {
+                    // Entry missing; treat as non-active to avoid false counts.
+                }
+            }
+
+            if env
+                .storage()
+                .instance()
+                .has(&DataKey::Score(name.clone()))
+            {
+                scored_routes += 1;
+            }
+        }
+
+        let alias_count = Self::get_aliases(&env).len();
+
+        RouterStats {
+            total_routes,
+            active_routes,
+            paused_routes,
+            expired_routes,
+            alias_count,
+            scored_routes,
+        }
     }
 
     /// Returns a page of registered route names.
@@ -5272,6 +5359,74 @@ mod tests {
         assert_eq!(client.resolve(&oracle_alias), addr);
         assert_eq!(client.resolve(&vault), addr);
         assert_eq!(client.resolve(&vault_alias), addr);
+    // ── Issue #728: get_stats returns correct aggregate counts ───────────────
+
+    /// Verify that get_stats correctly counts total, active, paused, and
+    /// alias entries across a mixed-state router.
+    #[test]
+    fn test_get_stats_counts_correctly() {
+        let (env, admin, client) = setup();
+
+        // Initially all zeros (no routes registered yet)
+        let stats = client.get_stats();
+        assert_eq!(stats.total_routes, 0);
+        assert_eq!(stats.active_routes, 0);
+        assert_eq!(stats.paused_routes, 0);
+        assert_eq!(stats.expired_routes, 0);
+        assert_eq!(stats.alias_count, 0);
+        assert_eq!(stats.scored_routes, 0);
+
+        let addr = Address::generate(&env);
+        let name1 = String::from_str(&env, "route-one");
+        let name2 = String::from_str(&env, "route-two");
+        let name3 = String::from_str(&env, "route-three");
+
+        client.register_route(&admin, &name1, &addr, &None);
+        client.register_route(&admin, &name2, &addr, &None);
+        client.register_route(&admin, &name3, &addr, &None);
+
+        // 3 active routes, no paused, no aliases, no scores yet
+        let stats = client.get_stats();
+        assert_eq!(stats.total_routes, 3);
+        assert_eq!(stats.active_routes, 3);
+        assert_eq!(stats.paused_routes, 0);
+        assert_eq!(stats.alias_count, 0);
+        assert_eq!(stats.scored_routes, 0);
+
+        // Pause one route
+        client.set_route_paused(&admin, &name1, &true);
+        let stats = client.get_stats();
+        assert_eq!(stats.active_routes, 2);
+        assert_eq!(stats.paused_routes, 1);
+
+        // Add an alias
+        let alias = String::from_str(&env, "alias-one");
+        client.add_alias(&admin, &alias, &name2);
+        let stats = client.get_stats();
+        assert_eq!(stats.alias_count, 1);
+
+        // Score a route
+        client.set_route_score(
+            &admin,
+            &name2,
+            &RouteScore {
+                liquidity_score: 80,
+                fee_bps: 20,
+                reliability_score: 90,
+            },
+        );
+        let stats = client.get_stats();
+        assert_eq!(stats.scored_routes, 1);
+
+        // Expire a route via TTL
+        let expired_name = String::from_str(&env, "route-expiring");
+        client.register_route_with_ttl(&admin, &expired_name, &addr, &Some(5u32));
+        // Advance ledger past expiry
+        env.ledger().with_mut(|li| li.sequence_number += 10);
+        let stats = client.get_stats();
+        assert_eq!(stats.expired_routes, 1);
+        // total_routes still counts it (it's still registered)
+        assert_eq!(stats.total_routes, 4);
     }
 }
 
