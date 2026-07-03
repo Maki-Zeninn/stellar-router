@@ -4,8 +4,8 @@
 //! transitions. Logic is called from [`pre_call`] and [`post_call`]
 //! in `lib.rs`.
 
-use soroban_sdk::{Env, Map, String, Symbol};
 use router_common;
+use soroban_sdk::{Env, Map, String, Symbol};
 
 use crate::{CircuitBreakerState, DataKey, RouteCallState, RouteConfig};
 

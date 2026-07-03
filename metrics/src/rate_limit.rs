@@ -8,7 +8,7 @@
 //! is exceeded.
 
 use std::{
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -132,10 +132,7 @@ pub async fn rate_limit_middleware(
             [("retry-after", retry_after.to_string())],
             Json(RateLimitError {
                 error: "rate_limit_exceeded",
-                message: format!(
-                    "Too many requests. Retry after {} second(s).",
-                    retry_after
-                ),
+                message: format!("Too many requests. Retry after {} second(s).", retry_after),
                 retry_after_secs: retry_after,
             }),
         )

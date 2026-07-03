@@ -8,7 +8,7 @@
 //! - `ROUTER_NONCE_TTL_SECS` — Time-to-live for nonces in seconds (default: 3600)
 
 use axum::{
-    extract::Request,
+    extract::{Request, State},
     http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -17,7 +17,7 @@ use dashmap::DashMap;
 use std::env;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Replay protection configuration.
 #[derive(Clone, Debug)]
@@ -98,10 +98,8 @@ impl NonceCache {
         }
 
         // Add nonce to cache
-        self.cache.insert(
-            nonce.to_string(),
-            NonceEntry { timestamp: now },
-        );
+        self.cache
+            .insert(nonce.to_string(), NonceEntry { timestamp: now });
 
         true
     }
@@ -166,7 +164,7 @@ impl IntoResponse for ReplayError {
 
 /// Replay attack protection middleware.
 pub async fn replay_protection_middleware(
-    cache: NonceCache,
+    State(cache): State<NonceCache>,
     req: Request,
     next: Next,
 ) -> Result<Response, ReplayError> {
@@ -225,7 +223,10 @@ mod tests {
 
         assert!(cache.check_and_add("nonce-1"));
         assert!(cache.check_and_add("nonce-2"));
-        assert!(!cache.check_and_add("nonce-3")); // Cache full
+        // Cache is now full (size 2). check_and_add evicts the oldest entry
+        // rather than rejecting a legitimate new nonce (see evict_oldest).
+        assert!(cache.check_and_add("nonce-3"));
+        assert_eq!(cache.cache.len(), 2);
     }
 
     #[test]

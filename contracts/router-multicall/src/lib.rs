@@ -17,9 +17,8 @@
 //! - `max_batch_size_updated` — Max batch size updated (old_size, new_size)
 //! - `admin_transferred` — Admin transferred (old_admin, new_admin)
 
-use router_common;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, Env, Symbol, Val, Vec,
 };
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -258,13 +257,15 @@ impl RouterMulticall {
                 result.record_success(call_index, call_result);
             } else {
                 let failure_error = if call.instruction_budget.is_some() {
-                    router_common::BatchItemError::Custom(
-                        soroban_sdk::String::from_str(&env, "budget_exceeded"),
-                    )
+                    router_common::BatchItemError::Custom(soroban_sdk::String::from_str(
+                        &env,
+                        "budget_exceeded",
+                    ))
                 } else {
-                    router_common::BatchItemError::Custom(
-                        soroban_sdk::String::from_str(&env, "invoke_failed"),
-                    )
+                    router_common::BatchItemError::Custom(soroban_sdk::String::from_str(
+                        &env,
+                        "invoke_failed",
+                    ))
                 };
                 result.record_failure(call_index, failure_error);
             }
@@ -311,8 +312,8 @@ impl RouterMulticall {
 
         env.storage().instance().remove(&DataKey::Executing);
 
-        let succeeded = result.successes.len() as u32;
-        let failed = result.failures.len() as u32;
+        let succeeded = result.successes.len();
+        let failed = result.failures.len();
         env.events().publish(
             (Symbol::new(&env, router_common::EVENT_BATCH_EXECUTED),),
             (&caller, batch_id, succeeded, failed, call_index),
@@ -498,19 +499,13 @@ impl RouterMulticall {
         // Iterate until we don't find a result at this index.
         // Results are stored consecutively from call_index = 0, so the first
         // missing result indicates the end of the batch.
-        loop {
-            match env
-                .storage()
-                .instance()
-                .get::<DataKey, router_common::CallResult>(&DataKey::BatchResult(
-                    batch_id, call_index,
-                )) {
-                Some(result) => {
-                    results.push_back(result);
-                    call_index += 1;
-                }
-                None => break,
-            }
+        while let Some(result) = env
+            .storage()
+            .instance()
+            .get::<DataKey, router_common::CallResult>(&DataKey::BatchResult(batch_id, call_index))
+        {
+            results.push_back(result);
+            call_index += 1;
         }
 
         Ok(results)
@@ -566,8 +561,8 @@ mod tests {
     }
 
     fn batch_counts(result: &router_common::BatchCallResult) -> (u32, u32, u32) {
-        let succeeded = result.successes.len() as u32;
-        let failed = result.failures.len() as u32;
+        let succeeded = result.successes.len();
+        let failed = result.failures.len();
         (succeeded + failed, succeeded, failed)
     }
 
@@ -1421,7 +1416,8 @@ mod tests {
             instruction_budget: None,
             args: Vec::new(&env),
         });
-        let second_result = client.try_execute_batch(&caller, &ok_calls, &false, &false, &false, &None);
+        let second_result =
+            client.try_execute_batch(&caller, &ok_calls, &false, &false, &false, &None);
         assert!(second_result.is_ok());
     }
 
@@ -1539,7 +1535,8 @@ mod tests {
             instruction_budget: None,
             args: Vec::new(&env),
         });
-        let second_result = client.try_execute_batch(&caller, &ok_calls, &false, &false, &false, &None);
+        let second_result =
+            client.try_execute_batch(&caller, &ok_calls, &false, &false, &false, &None);
         assert!(second_result.is_ok());
     }
 
@@ -1593,14 +1590,8 @@ mod tests {
         });
 
         // Total declared budget = 900_000, limit = 1_000_000 → should pass
-        let result = client.try_execute_batch(
-            &caller,
-            &calls,
-            &false,
-            &false,
-            &false,
-            &Some(1_000_000u64),
-        );
+        let result =
+            client.try_execute_batch(&caller, &calls, &false, &false, &false, &Some(1_000_000u64));
         assert!(result.is_ok());
     }
 
@@ -1627,14 +1618,8 @@ mod tests {
         });
 
         // Total declared budget = 1_300_000, limit = 1_000_000 → should fail
-        let result = client.try_execute_batch(
-            &caller,
-            &calls,
-            &false,
-            &false,
-            &false,
-            &Some(1_000_000u64),
-        );
+        let result =
+            client.try_execute_batch(&caller, &calls, &false, &false, &false, &Some(1_000_000u64));
         assert_eq!(result, Err(Ok(MulticallError::GasLimitExceeded)));
 
         // Reentrancy guard must be cleared — second call with None should proceed
@@ -1668,7 +1653,10 @@ mod tests {
         });
 
         let result = client.try_execute_batch(&caller, &calls, &false, &false, &false, &Some(1u64));
-        assert!(result.is_ok(), "calls with no budget should not trip gas limit");
+        assert!(
+            result.is_ok(),
+            "calls with no budget should not trip gas limit"
+        );
     }
 
     #[test]
@@ -1703,6 +1691,9 @@ mod tests {
                 .map(|t| Symbol::from_val(&env, &t) == batch_exec_topic)
                 .unwrap_or(false)
         });
-        assert!(found, "batch_executed event must be emitted after execute_batch");
+        assert!(
+            found,
+            "batch_executed event must be emitted after execute_batch"
+        );
     }
 }

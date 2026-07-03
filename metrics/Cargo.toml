@@ -1,7 +1,10 @@
+[workspace]
+
 [package]
 name = "router-metrics-exporter"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "Prometheus/OpenTelemetry metrics exporter for the stellar-router suite"
 
 [[bin]]
@@ -51,3 +54,7 @@ utoipa-swagger-ui = { version = "7.1.0", features = ["axum"] }
 
 [dev-dependencies]
 tower = { version = "0.5.3" }
+
+[features]
+# Exposes MockRpcClient for use as a test helper by downstream integration tests.
+test-utils = []

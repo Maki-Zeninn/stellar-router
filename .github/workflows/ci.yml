@@ -43,7 +43,7 @@ jobs:
         run: cargo test -p router-common --verbose
 
       - name: Test router-metrics-exporter
-        run: cargo test -p router-metrics-exporter --verbose
+        run: cargo test --manifest-path metrics/Cargo.toml --verbose
 
   storage-profiling:
     name: Storage Profiling

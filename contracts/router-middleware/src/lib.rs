@@ -37,10 +37,10 @@ pub enum DataKey {
     RouteConfig(String),    // route_name -> RouteConfig
     GlobalEnabled,
     TotalCalls,
-    CallLog(String),           // route_name -> CallLogState
-    ConfiguredRoutes,          // Vec<String>
-    CallLogSummary(String),    // route_name -> CallLogSummary
-    RateLimitStrategy(String), // route_name -> RateLimitStrategy
+    CallLog(String),                  // route_name -> CallLogState
+    ConfiguredRoutes,                 // Vec<String>
+    CallLogSummary(String),           // route_name -> CallLogSummary
+    RateLimitStrategy(String),        // route_name -> RateLimitStrategy
     CallerRateLimit(String, Address), // (route, caller) -> CallerRateLimitConfig
 }
 
@@ -201,6 +201,7 @@ impl RouterMiddleware {
     }
 
     /// Configure a route's middleware settings.
+    #[allow(clippy::too_many_arguments)]
     pub fn configure_route(
         env: Env,
         caller: Address,
@@ -316,20 +317,18 @@ impl RouterMiddleware {
             }
 
             let mut state_changed = false;
-            if config.failure_threshold > 0 {
-                if route_call_state.circuit_breaker.is_open {
-                    let now = env.ledger().timestamp();
-                    let recovers = config.recovery_window_seconds > 0
-                        && now
-                            >= route_call_state.circuit_breaker.opened_at
-                                + config.recovery_window_seconds;
-                    if !recovers {
-                        return Err(MiddlewareError::CircuitOpen);
-                    }
-                    route_call_state.circuit_breaker.is_open = false;
-                    route_call_state.circuit_breaker.is_half_open = true;
-                    state_changed = true;
+            if config.failure_threshold > 0 && route_call_state.circuit_breaker.is_open {
+                let now = env.ledger().timestamp();
+                let recovers = config.recovery_window_seconds > 0
+                    && now
+                        >= route_call_state.circuit_breaker.opened_at
+                            + config.recovery_window_seconds;
+                if !recovers {
+                    return Err(MiddlewareError::CircuitOpen);
                 }
+                route_call_state.circuit_breaker.is_open = false;
+                route_call_state.circuit_breaker.is_half_open = true;
+                state_changed = true;
             }
 
             if config.max_calls_per_window > 0 {
@@ -353,11 +352,24 @@ impl RouterMiddleware {
                         caller.clone(),
                     ))
                     .map(|c| (c.max_calls, c.window_secs))
-                    .unwrap_or((config.max_calls_per_window, config.window_seconds));
+                    .unwrap_or((
+                        config
+                            .max_calls_per_window
+                            .saturating_add(config.burst_allowance),
+                        config.window_seconds,
+                    ));
 
                 let window_elapsed = now >= state.window_start + effective_window;
-                let calls = if window_elapsed { 0 } else { state.calls_in_window };
-                let window_start = if window_elapsed { now } else { state.window_start };
+                let calls = if window_elapsed {
+                    0
+                } else {
+                    state.calls_in_window
+                };
+                let window_start = if window_elapsed {
+                    now
+                } else {
+                    state.window_start
+                };
 
                 if calls >= effective_limit {
                     route_call_state.rate_limits.set(
@@ -410,7 +422,11 @@ impl RouterMiddleware {
                 }
             }
 
-            if state_changed { Some(route_call_state) } else { None }
+            if state_changed {
+                Some(route_call_state)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -698,7 +714,7 @@ impl RouterMiddleware {
             }
         } else {
             for i in 0..cap {
-                let idx = (log_state.head + i) % (cap as u32);
+                let idx = (log_state.head + i) % cap;
                 if let Some(entry) = log_state.entries.get(idx) {
                     let should_include = match success_filter {
                         None => true,
@@ -840,7 +856,11 @@ impl RouterMiddleware {
         for (_caller, state) in route_call_state.rate_limits.iter() {
             let (calls, window_start) = if let Some(ref cfg) = config {
                 let window_elapsed = now >= state.window_start + cfg.window_seconds;
-                if window_elapsed { (0, now) } else { (state.calls_in_window, state.window_start) }
+                if window_elapsed {
+                    (0, now)
+                } else {
+                    (state.calls_in_window, state.window_start)
+                }
             } else {
                 (state.calls_in_window, state.window_start)
             };
@@ -1110,18 +1130,23 @@ impl RouterMiddleware {
                     },
                 });
 
-            let state: RateLimitState = route_call_state
-                .rate_limits
-                .get(caller.clone())
-                .unwrap_or(RateLimitState {
-                    calls_in_window: 0,
-                    window_start: env.ledger().timestamp(),
-                    total_violations: 0,
-                });
+            let state: RateLimitState =
+                route_call_state
+                    .rate_limits
+                    .get(caller.clone())
+                    .unwrap_or(RateLimitState {
+                        calls_in_window: 0,
+                        window_start: env.ledger().timestamp(),
+                        total_violations: 0,
+                    });
 
             let now = env.ledger().timestamp();
             let window_elapsed = now >= state.window_start + config.window_secs;
-            let calls = if window_elapsed { 0 } else { state.calls_in_window };
+            let calls = if window_elapsed {
+                0
+            } else {
+                state.calls_in_window
+            };
 
             Ok(calls < config.max_calls)
         } else {
@@ -1363,7 +1388,7 @@ mod tests {
     #[test]
     fn test_admin_getter() {
         let (_env, admin, client) = setup();
-        let retrieved_admin = client.admin().unwrap();
+        let retrieved_admin = client.admin();
         assert_eq!(retrieved_admin, admin);
     }
 
@@ -1371,8 +1396,8 @@ mod tests {
     fn test_transfer_admin() {
         let (env, admin, client) = setup();
         let new_admin = Address::generate(&env);
-        client.transfer_admin(&admin, &new_admin).unwrap();
-        assert_eq!(client.admin().unwrap(), new_admin);
+        client.transfer_admin(&admin, &new_admin);
+        assert_eq!(client.admin(), new_admin);
     }
 
     #[test]
@@ -1412,7 +1437,7 @@ mod tests {
             Err(Ok(MiddlewareError::CircuitOpen))
         );
 
-        client.reset_circuit_breaker(&admin, &route).unwrap();
+        client.reset_circuit_breaker(&admin, &route);
         assert!(client.try_pre_call(&caller, &route).is_ok());
     }
 
@@ -1436,8 +1461,8 @@ mod tests {
         let old_admin = Address::generate(&env);
         let new_admin = Address::generate(&env);
 
-        client.initialize(&old_admin).unwrap();
-        client.transfer_admin(&old_admin, &new_admin).unwrap();
+        client.initialize(&old_admin);
+        client.transfer_admin(&old_admin, &new_admin);
 
         let events = env.events().all();
         let last_event = events.last().unwrap();
@@ -1557,7 +1582,7 @@ mod tests {
         let caller = Address::generate(&env);
         client.post_call(&caller, &route, &false);
         assert!(client.circuit_breaker_state(&route).unwrap().is_open);
-        client.reset_circuit_breaker(&admin, &route).unwrap();
+        client.reset_circuit_breaker(&admin, &route);
         let state = client.circuit_breaker_state(&route).unwrap();
         assert!(!state.is_open);
     }
@@ -1616,10 +1641,7 @@ mod tests {
 
         let state_after_window = client.rate_limit_state(&route, &caller).unwrap();
         assert_eq!(state_after_window.calls_in_window, 0);
-        assert_eq!(
-            state_after_window.window_start,
-            env.ledger().timestamp()
-        );
+        assert_eq!(state_after_window.window_start, env.ledger().timestamp());
     }
 
     #[test]
@@ -1769,7 +1791,7 @@ mod tests {
     #[test]
     fn test_set_global_enabled_emits_event() {
         let (env, admin, client) = setup();
-        client.set_global_enabled(&admin, &false).unwrap();
+        client.set_global_enabled(&admin, &false);
         let events = env.events().all();
         let last = events.last().unwrap();
         let topic: Symbol = last.1.get(0).unwrap().into_val(&env);
@@ -2135,19 +2157,19 @@ mod tests {
             RateLimitStrategy::Reject
         );
 
-        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::Throttle).unwrap();
+        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::Throttle);
         assert_eq!(
             client.get_rate_limit_strategy(&route),
             RateLimitStrategy::Throttle
         );
 
-        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::LogOnly).unwrap();
+        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::LogOnly);
         assert_eq!(
             client.get_rate_limit_strategy(&route),
             RateLimitStrategy::LogOnly
         );
 
-        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::Reject).unwrap();
+        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::Reject);
         assert_eq!(
             client.get_rate_limit_strategy(&route),
             RateLimitStrategy::Reject
@@ -2247,7 +2269,7 @@ mod tests {
         client.configure_route(&admin, &route_a, &1, &60, &true, &0, &0, &0, &0);
         client.configure_route(&admin, &route_b, &1, &60, &true, &0, &0, &0, &0);
 
-        client.set_rate_limit_strategy(&admin, &route_a, &RateLimitStrategy::Throttle).unwrap();
+        client.set_rate_limit_strategy(&admin, &route_a, &RateLimitStrategy::Throttle);
 
         let caller = Address::generate(&env);
         client.pre_call(&caller, &route_a);
@@ -2275,7 +2297,7 @@ mod tests {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
 
-        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::Throttle).unwrap();
+        client.set_rate_limit_strategy(&admin, &route, &RateLimitStrategy::Throttle);
 
         let events = env.events().all();
         let last = events.last().unwrap();

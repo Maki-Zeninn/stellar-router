@@ -6,12 +6,11 @@
 //! requires `wasm32` toolchain features and complicates native builds).
 
 use anyhow::{anyhow, Context, Result};
-use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::debug;
 
 // ── JSON-RPC request / response types ────────────────────────────────────────
 
@@ -38,7 +37,7 @@ struct RpcError {
 // ── Decoded ledger entry types ────────────────────────────────────────────────
 
 /// A single ledger entry returned by `getLedgerEntries`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct LedgerEntry {
     /// Base64-encoded XDR of the entry key.
     pub key: String,
@@ -53,6 +52,10 @@ struct GetLedgerEntriesResult {
 }
 
 /// A single event returned by `getEvents`.
+///
+/// Callers currently only count events (see `scrape_quote`), but the fields
+/// are kept to fully represent the RPC response shape for future use.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Clone)]
 pub struct ContractEvent {
     /// The contract that emitted the event.
@@ -137,7 +140,8 @@ impl SorobanRpcClient {
     }
 
     /// Call `getLedgerEntries` for the given base64-encoded XDR keys.
-    pub async fn get_ledger_entries(&self, keys_xdr: Vec<String>) -> Result<Vec<LedgerEntry>> {        let req = RpcRequest {
+    pub async fn get_ledger_entries(&self, keys_xdr: Vec<String>) -> Result<Vec<LedgerEntry>> {
+        let req = RpcRequest {
             jsonrpc: "2.0",
             id: 1,
             method: "getLedgerEntries",
@@ -237,6 +241,11 @@ impl SorobanRpcClient {
     }
 
     /// Convenience: call a view function and extract a `bool` from the result.
+    ///
+    /// Not yet called by any collector — boolean state (e.g. `paused`) is
+    /// currently read via the JSON simulation path instead. Kept for parity
+    /// with `call_u64` for future direct-boolean scrapes.
+    #[allow(dead_code)]
     pub async fn call_bool(&self, contract_id: &str, function_name: &str) -> Result<bool> {
         debug!(contract_id, function_name, "calling view function → bool");
         let result = self
@@ -332,6 +341,7 @@ fn extract_u64_from_sim_result(result: &Value) -> Result<u64> {
 }
 
 /// Extract a `bool` from a `simulateTransaction` result JSON value.
+#[allow(dead_code)]
 fn extract_bool_from_sim_result(result: &Value) -> Result<bool> {
     if let Some(v) = result
         .get("results")
@@ -399,6 +409,7 @@ fn extract_string_vec_from_sim_result(result: &Value) -> Result<Vec<String>> {
 ///
 /// Full XDR construction is left as an integration point; the collector uses
 /// the simulation path as a fallback.
+#[allow(dead_code)]
 pub fn instance_storage_key_xdr(_contract_id: &str) -> Result<String> {
     Err(anyhow!(
         "Direct XDR key construction not implemented. \
@@ -415,12 +426,9 @@ pub fn instance_storage_key_xdr(_contract_id: &str) -> Result<String> {
 #[async_trait::async_trait]
 pub trait RpcClient: Send + Sync {
     async fn call_u64(&self, contract_id: &str, function_name: &str) -> Result<u64>;
+    #[allow(dead_code)]
     async fn call_bool(&self, contract_id: &str, function_name: &str) -> Result<bool>;
-    async fn call_string_vec(
-        &self,
-        contract_id: &str,
-        function_name: &str,
-    ) -> Result<Vec<String>>;
+    async fn call_string_vec(&self, contract_id: &str, function_name: &str) -> Result<Vec<String>>;
     async fn simulate_invoke(
         &self,
         contract_id: &str,
@@ -444,11 +452,7 @@ impl RpcClient for SorobanRpcClient {
     async fn call_bool(&self, contract_id: &str, function_name: &str) -> Result<bool> {
         self.call_bool(contract_id, function_name).await
     }
-    async fn call_string_vec(
-        &self,
-        contract_id: &str,
-        function_name: &str,
-    ) -> Result<Vec<String>> {
+    async fn call_string_vec(&self, contract_id: &str, function_name: &str) -> Result<Vec<String>> {
         self.call_string_vec(contract_id, function_name).await
     }
     async fn simulate_invoke(
@@ -466,7 +470,8 @@ impl RpcClient for SorobanRpcClient {
         topic_filters: &[&str],
         start_ledger: u32,
     ) -> Result<Vec<ContractEvent>> {
-        self.get_events(contract_id, topic_filters, start_ledger).await
+        self.get_events(contract_id, topic_filters, start_ledger)
+            .await
     }
     async fn get_ledger_entries(&self, keys_xdr: Vec<String>) -> Result<Vec<LedgerEntry>> {
         self.get_ledger_entries(keys_xdr).await
@@ -491,8 +496,7 @@ pub struct MockRpcClient {
     u64_responses: std::collections::HashMap<(String, String), u64>,
     bool_responses: std::collections::HashMap<(String, String), bool>,
     string_vec_responses: std::collections::HashMap<(String, String), Vec<String>>,
-    simulate_responses:
-        std::collections::HashMap<(String, String), serde_json::Value>,
+    simulate_responses: std::collections::HashMap<(String, String), serde_json::Value>,
     events_responses: std::collections::HashMap<(String, String), Vec<ContractEvent>>,
     ledger_entries_responses: std::collections::HashMap<String, Vec<LedgerEntry>>,
 }
@@ -528,12 +532,7 @@ impl MockRpcClient {
         self
     }
 
-    pub fn with_simulate(
-        mut self,
-        contract: &str,
-        func: &str,
-        val: serde_json::Value,
-    ) -> Self {
+    pub fn with_simulate(mut self, contract: &str, func: &str, val: serde_json::Value) -> Self {
         self.simulate_responses
             .insert((contract.to_string(), func.to_string()), val);
         self
@@ -561,9 +560,7 @@ impl RpcClient for MockRpcClient {
             .get(&(contract_id.to_string(), function_name.to_string()))
             .copied()
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "MockRpcClient: no u64 response for {contract_id}::{function_name}"
-                )
+                anyhow::anyhow!("MockRpcClient: no u64 response for {contract_id}::{function_name}")
             })
     }
 
@@ -578,11 +575,7 @@ impl RpcClient for MockRpcClient {
             })
     }
 
-    async fn call_string_vec(
-        &self,
-        contract_id: &str,
-        function_name: &str,
-    ) -> Result<Vec<String>> {
+    async fn call_string_vec(&self, contract_id: &str, function_name: &str) -> Result<Vec<String>> {
         self.string_vec_responses
             .get(&(contract_id.to_string(), function_name.to_string()))
             .cloned()

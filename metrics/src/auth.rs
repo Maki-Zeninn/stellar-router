@@ -9,7 +9,7 @@
 //! - `ROUTER_AUTH_ENABLED` — Set to "true" to enable authentication (default: false)
 
 use axum::{
-    extract::Request,
+    extract::{Request, State},
     http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -40,7 +40,9 @@ impl AuthConfig {
         }
 
         if !enabled {
-            warn!("Metrics endpoint is unauthenticated — set ROUTER_AUTH_ENABLED=true for production");
+            warn!(
+                "Metrics endpoint is unauthenticated — set ROUTER_AUTH_ENABLED=true for production"
+            );
         }
 
         AuthConfig {
@@ -52,8 +54,8 @@ impl AuthConfig {
 
 /// Authentication middleware that validates API keys.
 pub async fn auth_middleware(
-    config: AuthConfig,
-    mut req: Request,
+    State(config): State<AuthConfig>,
+    req: Request,
     next: Next,
 ) -> Result<Response, AuthError> {
     // Skip authentication if disabled
@@ -67,7 +69,7 @@ pub async fn auth_middleware(
     match api_key {
         Some(key) => {
             if let Some(expected_key) = &config.api_key {
-                if key == expected_key {
+                if key == *expected_key {
                     Ok(next.run(req).await)
                 } else {
                     Err(AuthError::InvalidKey)

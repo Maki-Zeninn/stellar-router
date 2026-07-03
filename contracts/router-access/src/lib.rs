@@ -4,7 +4,6 @@
 //!
 //! Role-based access control for the stellar-router suite.
 
-use router_common;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
 };
@@ -26,7 +25,7 @@ pub enum DataKey {
     AddressRoles(Address), // address -> Vec<String>
     RoleExpiry(String, Address),
     RoleParent(String), // child role -> parent role
-    AllRoles, // Vec<String> — all roles ever defined in the system
+    AllRoles,           // Vec<String> — all roles ever defined in the system
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -42,9 +41,8 @@ pub enum AccessError {
     Blacklisted = 6,
     CannotBlacklistAdmin = 7,
     DestinationAlreadyHasRole = 8,
-    HierarchyCycle = 8,
+    HierarchyCycle = 9,
 }
-
 
 // ── Contract ──────────────────────────────────────────────────────────────────
 
@@ -407,20 +405,15 @@ impl RouterAccess {
         caller.require_auth();
         Self::require_role_manager(&env, &caller, &role)?;
 
-        if from == to {
-        // No-op but still validate that `from` currently has the role active.
-        if !Self::has_role_internal(&env, &from, &role) {
-            return Err(AccessError::RoleNotFound);
-        }
-        if from == to {
-            return Ok(());
-        }
-
         // Must be active on `from`.
         if !Self::has_role_internal(&env, &from, &role) {
             return Err(AccessError::RoleNotFound);
         }
 
+        // No-op but still validate that `from` currently has the role active.
+        if from == to {
+            return Ok(());
+        }
 
         // Do not overwrite an existing active assignment on destination.
         if Self::has_role_internal(&env, &to, &role) {
@@ -449,7 +442,9 @@ impl RouterAccess {
                 .get::<DataKey, u32>(&DataKey::RoleMemberCount(role.clone()))
                 .unwrap_or(0u32);
             let new_count = current.saturating_sub(1);
-            env.storage().instance().set(&DataKey::RoleMemberCount(role.clone()), &new_count);
+            env.storage()
+                .instance()
+                .set(&DataKey::RoleMemberCount(role.clone()), &new_count);
         }
 
         let mut members: Vec<Address> = env
@@ -469,7 +464,7 @@ impl RouterAccess {
             .instance()
             .get(&DataKey::AddressRoles(from.clone()))
             .unwrap_or_else(|| Vec::new(&env));
-        if let Some(i) = roles.iter().position(|r| r == &role) {
+        if let Some(i) = roles.iter().position(|r| r == role) {
             roles.remove(i as u32);
         }
         env.storage()
@@ -497,7 +492,7 @@ impl RouterAccess {
             .instance()
             .get(&DataKey::RoleMembers(role.clone()))
             .unwrap_or_else(|| Vec::new(&env));
-        if !members_to.iter().any(|a| a == &to) {
+        if !members_to.iter().any(|a| a == to) {
             members_to.push_back(to.clone());
         }
         env.storage()
@@ -509,7 +504,7 @@ impl RouterAccess {
             .instance()
             .get(&DataKey::AddressRoles(to.clone()))
             .unwrap_or_else(|| Vec::new(&env));
-        if !roles_to.iter().any(|r| r == &role) {
+        if !roles_to.iter().any(|r| r == role) {
             roles_to.push_back(role.clone());
         }
         env.storage()
@@ -548,7 +543,6 @@ impl RouterAccess {
         current: Address,
         new_admin: Address,
     ) -> Result<(), AccessError> {
-
         current.require_auth();
         Self::require_super_admin(&env, &current)?;
         env.storage()
@@ -609,9 +603,7 @@ impl RouterAccess {
             AccessError::AlreadyHasRole => router_common::BatchItemError::AlreadyExists,
             AccessError::Unauthorized => router_common::BatchItemError::Unauthorized,
             AccessError::Blacklisted => router_common::BatchItemError::InvalidMetadata,
-            _ => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "Error"),
-            ),
+            _ => router_common::BatchItemError::Custom(soroban_sdk::String::from_str(env, "Error")),
         }
     }
 
@@ -759,7 +751,6 @@ impl RouterAccess {
     }
 
     fn has_role_internal(env: &Env, account: &Address, role: &String) -> bool {
-
         if Self::is_blacklisted_internal(env, account) {
             return false;
         }

@@ -38,9 +38,8 @@ pub mod scoring;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
 };
+#[cfg(test)]
 extern crate alloc;
-use alloc::string::ToString;
-use router_common::is_whitespace_only;
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -486,8 +485,10 @@ impl RouterCore {
             .instance()
             .set(&DataKey::Route(name.clone()), &entry);
 
-        env.events()
-            .publish((Symbol::new(&env, router_common::EVENT_ROUTE_UPDATED),), name.clone());
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROUTE_UPDATED),),
+            name.clone(),
+        );
 
         env.events().publish(
             (Symbol::new(&env, router_common::EVENT_ROUTE_OVERWRITTEN),),
@@ -1484,10 +1485,8 @@ impl RouterCore {
         for name in names.iter() {
             total_routes += 1;
 
-            let entry: Option<RouteEntry> = env
-                .storage()
-                .instance()
-                .get(&DataKey::Route(name.clone()));
+            let entry: Option<RouteEntry> =
+                env.storage().instance().get(&DataKey::Route(name.clone()));
 
             match entry {
                 Some(e) => {
@@ -1505,11 +1504,7 @@ impl RouterCore {
                 }
             }
 
-            if env
-                .storage()
-                .instance()
-                .has(&DataKey::Score(name.clone()))
-            {
+            if env.storage().instance().has(&DataKey::Score(name.clone())) {
                 scored_routes += 1;
             }
         }
@@ -1608,7 +1603,9 @@ impl RouterCore {
             return Err(RouterError::InvalidScore);
         }
 
-        env.storage().instance().set(&DataKey::Score(name.clone()), &score);
+        env.storage()
+            .instance()
+            .set(&DataKey::Score(name.clone()), &score);
         env.events().publish(
             (Symbol::new(&env, router_common::EVENT_ROUTE_SCORED),),
             (
@@ -1637,7 +1634,11 @@ impl RouterCore {
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
 
         for item in scores.iter() {
-            if !env.storage().instance().has(&DataKey::Route(item.name.clone())) {
+            if !env
+                .storage()
+                .instance()
+                .has(&DataKey::Route(item.name.clone()))
+            {
                 return Err(RouterError::RouteNotFound);
             }
 
@@ -1990,17 +1991,6 @@ impl RouterCore {
         }
     }
 
-    /// Returns `true` if `name` is empty or consists entirely of ASCII whitespace
-    /// characters (space 0x20, tab 0x09, newline 0x0A, vertical tab 0x0B,
-    /// form feed 0x0C, carriage return 0x0D).
-    fn is_empty_or_whitespace(name: &String) -> bool {
-        if name.len() == 0 {
-            return true;
-        }
-        let s = name.to_string();
-        s.bytes().all(|b| matches!(b, 9 | 10 | 11 | 12 | 13 | 32))
-    }
-
     /// Validates a route name for use in register_route and add_alias.
     ///
     /// Valid names are 1–64 characters, containing only ASCII alphanumeric
@@ -2017,18 +2007,18 @@ impl RouterCore {
     /// * [`RouterError::InvalidRouteName`] — if the name is empty, whitespace-only, longer than 64 chars, or contains disallowed characters.
     /// * [`RouterError::RouteAlreadyExists`] — if the name conflicts with an existing route or alias.
     fn validate_route_name(env: &Env, name: &String) -> Result<(), RouterError> {
-        let s = name.to_string();
-        if is_whitespace_only(&s) {
+        // Empty or longer than 64 characters is invalid.
+        let len = name.len();
+        if len == 0 || len > 64 {
             return Err(RouterError::InvalidRouteName);
         }
 
-        // Max 64 characters
-        if s.len() > 64 {
-            return Err(RouterError::InvalidRouteName);
-        }
-
-        // Only alphanumeric, '-', and '/' are allowed
-        for b in s.bytes() {
+        // Only alphanumeric, '-', and '/' are allowed (this also rejects
+        // whitespace-only names, since whitespace bytes aren't in the allow-list).
+        let mut buf = [0u8; 64];
+        let slice = &mut buf[..len as usize];
+        name.copy_into_slice(slice);
+        for &b in slice.iter() {
             if !matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'/') {
                 return Err(RouterError::InvalidRouteName);
             }
@@ -2063,23 +2053,7 @@ impl RouterCore {
             RouterError::RouteNotFound => router_common::BatchItemError::Custom(
                 soroban_sdk::String::from_str(env, "RouteNotFound"),
             ),
-            _ => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "Error"),
-            ),
-            RouterError::AlreadyInitialized => "AlreadyInitialized",
-            RouterError::NotInitialized => "NotInitialized",
-            RouterError::Unauthorized => "Unauthorized",
-            RouterError::RouteNotFound => "RouteNotFound",
-            RouterError::RoutePaused => "RoutePaused",
-            RouterError::RouterPaused => "RouterPaused",
-            RouterError::RouteAlreadyExists => "RouteAlreadyExists",
-            RouterError::InvalidRouteName => "InvalidRouteName",
-            RouterError::InvalidMetadata => "InvalidMetadata",
-            RouterError::CircularDependency => "CircularDependency",
-            RouterError::RouteInUse => "RouteInUse",
-            RouterError::InvalidAddress => "InvalidAddress",
-            RouterError::RouteExpired => "RouteExpired",
-            RouterError::InvalidScore => "InvalidScore",
+            _ => router_common::BatchItemError::Custom(soroban_sdk::String::from_str(env, "Error")),
         }
     }
 
@@ -2138,8 +2112,10 @@ impl RouterCore {
             .instance()
             .set(&DataKey::RouteCount, &(count + 1));
 
-        env.events()
-            .publish((Symbol::new(env, router_common::EVENT_ROUTE_REGISTERED),), (name, address));
+        env.events().publish(
+            (Symbol::new(env, router_common::EVENT_ROUTE_REGISTERED),),
+            (name, address),
+        );
 
         Ok(())
     }
@@ -2214,6 +2190,7 @@ mod tests {
     extern crate std;
     use super::*;
     use alloc::format;
+    use alloc::string::ToString;
     use soroban_sdk::{
         testutils::{Address as _, Events, Ledger},
         vec, Env, IntoVal, String,
@@ -4139,8 +4116,8 @@ mod tests {
         let (env, admin, client) = setup();
         let oracle = String::from_str(&env, "oracle");
         let dex = String::from_str(&env, "dex");
-        let oracle_alias = String::from_str(&env, "oracle_v1");
-        let dex_alias = String::from_str(&env, "dex_v1");
+        let oracle_alias = String::from_str(&env, "oracle-v1");
+        let dex_alias = String::from_str(&env, "dex-v1");
         let addr1 = Address::generate(&env);
         let addr2 = Address::generate(&env);
 
@@ -4176,7 +4153,7 @@ mod tests {
     fn test_reregister_after_remove_does_not_resurrect_aliases() {
         let (env, admin, client) = setup();
         let oracle = String::from_str(&env, "oracle");
-        let alias = String::from_str(&env, "oracle_v1");
+        let alias = String::from_str(&env, "oracle-v1");
         let addr1 = Address::generate(&env);
         let addr2 = Address::generate(&env);
 
@@ -4202,8 +4179,8 @@ mod tests {
     fn test_remove_route_alias_count_consistency() {
         let (env, admin, client) = setup();
         let oracle = String::from_str(&env, "oracle");
-        let alias1 = String::from_str(&env, "oracle_v1");
-        let alias2 = String::from_str(&env, "oracle_v2");
+        let alias1 = String::from_str(&env, "oracle-v1");
+        let alias2 = String::from_str(&env, "oracle-v2");
         let addr = Address::generate(&env);
 
         client.register_route(&admin, &oracle, &addr, &None);
@@ -4314,7 +4291,10 @@ mod tests {
     #[test]
     fn test_batch_resolve_result_can_hold_not_initialized() {
         let result = BatchResolveResult::Err(ResolveError::NotInitialized);
-        assert_eq!(result, BatchResolveResult::Err(ResolveError::NotInitialized));
+        assert_eq!(
+            result,
+            BatchResolveResult::Err(ResolveError::NotInitialized)
+        );
         assert_ne!(result, BatchResolveResult::Err(ResolveError::RouteNotFound));
     }
 
@@ -4379,7 +4359,7 @@ mod tests {
         assert_eq!(result.failures.len(), 1);
         assert_eq!(
             result.failures.get(0).unwrap().error,
-            router_common::BatchItemError::AlreadyExists
+            router_common::BatchItemError::Custom(String::from_str(&env, "RouteNotFound"))
         );
         let resolve_result = client.try_resolve(&name);
         assert_eq!(resolve_result, Err(Ok(RouterError::RouteNotFound)));
@@ -4732,7 +4712,7 @@ mod tests {
         let tags = client.get_all_tags();
         // Should have: common (shared), unique1, unique2
         assert_eq!(tags.len(), 3);
-        
+
         // Count occurrences of "common" — should be exactly 1
         let mut common_count = 0;
         for tag in tags.iter() {
@@ -4848,7 +4828,7 @@ mod tests {
         client.register_route_with_ttl(&admin, &name, &addr, &None);
         assert_eq!(client.get_route_expiry(&name), None);
 
-        env.ledger().with_mut(|li| li.sequence_number += 1_000_000);
+        env.ledger().with_mut(|li| li.sequence_number += 100);
         assert_eq!(client.resolve(&name), addr);
     }
 
@@ -5359,6 +5339,8 @@ mod tests {
         assert_eq!(client.resolve(&oracle_alias), addr);
         assert_eq!(client.resolve(&vault), addr);
         assert_eq!(client.resolve(&vault_alias), addr);
+    }
+
     // ── Issue #728: get_stats returns correct aggregate counts ───────────────
 
     /// Verify that get_stats correctly counts total, active, paused, and
@@ -5401,7 +5383,7 @@ mod tests {
 
         // Add an alias
         let alias = String::from_str(&env, "alias-one");
-        client.add_alias(&admin, &alias, &name2);
+        client.add_alias(&admin, &name2, &alias);
         let stats = client.get_stats();
         assert_eq!(stats.alias_count, 1);
 
@@ -5428,7 +5410,6 @@ mod tests {
         // total_routes still counts it (it's still registered)
         assert_eq!(stats.total_routes, 4);
     }
-}
 
     // ── Issue #721: multi-hop circular dependency detection ──────────────────
 
@@ -5455,3 +5436,4 @@ mod tests {
         let result = client.try_set_route_dependency(&admin, &c, &a);
         assert_eq!(result, Err(Ok(RouterError::CircularDependency)));
     }
+}

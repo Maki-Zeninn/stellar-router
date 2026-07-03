@@ -52,7 +52,6 @@ pub enum DataKey {
     BackoffMultiplier, // multiplier applied each retry (stored as fixed-point *100, e.g. 200 = 2x)
     ExecHistory,       // Vec<ExecutionRecord>, capped at MaxHistorySize (oldest evicted first)
     MaxHistorySize,    // u32 — cap on ExecHistory length
-    MaxHistorySize, // u32 — cap on ExecHistory length
 }
 
 // ── Error Types ───────────────────────────────────────────────────────────────
@@ -222,7 +221,7 @@ impl RouterExecution {
         if max_retries == 0 || max_retries > 5 {
             return Err(ExecutionError::InvalidConfig);
         }
-        if backoff_multiplier < MIN_BACKOFF_MULTIPLIER || backoff_multiplier > MAX_BACKOFF_MULTIPLIER {
+        if !(MIN_BACKOFF_MULTIPLIER..=MAX_BACKOFF_MULTIPLIER).contains(&backoff_multiplier) {
             return Err(ExecutionError::InvalidConfig);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -260,7 +259,7 @@ impl RouterExecution {
     ) -> Result<(), ExecutionError> {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, ExecutionError)?;
-        if backoff_multiplier < MIN_BACKOFF_MULTIPLIER || backoff_multiplier > MAX_BACKOFF_MULTIPLIER {
+        if !(MIN_BACKOFF_MULTIPLIER..=MAX_BACKOFF_MULTIPLIER).contains(&backoff_multiplier) {
             return Err(ExecutionError::InvalidConfig);
         }
         env.storage()
@@ -623,7 +622,9 @@ impl RouterExecution {
         while history.len() > new_max {
             history.remove(0);
         }
-        env.storage().instance().set(&DataKey::ExecHistory, &history);
+        env.storage()
+            .instance()
+            .set(&DataKey::ExecHistory, &history);
 
         Ok(())
     }
@@ -653,11 +654,7 @@ impl RouterExecution {
             .get(&DataKey::ExecHistory)
             .unwrap_or(Vec::new(&env));
         let len = history.len();
-        let take = if limit as u32 > len {
-            len
-        } else {
-            limit as u32
-        };
+        let take = if limit > len { len } else { limit };
         let mut result = Vec::new(&env);
         // Return newest-first: iterate from the end
         let mut i = len;
@@ -768,7 +765,9 @@ impl RouterExecution {
             history.remove(0);
         }
 
-        env.storage().instance().set(&DataKey::ExecHistory, &history);
+        env.storage()
+            .instance()
+            .set(&DataKey::ExecHistory, &history);
     }
 }
 
@@ -1117,7 +1116,10 @@ mod tests {
         let mult = 200u32; // 2x
         let expected = [100u64, 200u64, 400u64, 800u64, 1600u64];
         for (attempt_index, &exp) in expected.iter().enumerate() {
-            assert_eq!(RouterExecution::compute_backoff_ms(base, mult, attempt_index as u32), exp);
+            assert_eq!(
+                RouterExecution::compute_backoff_ms(base, mult, attempt_index as u32),
+                exp
+            );
         }
     }
 
@@ -1127,7 +1129,10 @@ mod tests {
         let base = 123u64;
         let mult = 100u32;
         for attempt_index in 0u32..=10u32 {
-            assert_eq!(RouterExecution::compute_backoff_ms(base, mult, attempt_index), base);
+            assert_eq!(
+                RouterExecution::compute_backoff_ms(base, mult, attempt_index),
+                base
+            );
         }
     }
 
@@ -1135,7 +1140,10 @@ mod tests {
     fn test_backoff_delay_zero_base_is_zero_for_any_attempt() {
         let mult = 300u32;
         for attempt_index in 0u32..=10u32 {
-            assert_eq!(RouterExecution::compute_backoff_ms(0, mult, attempt_index), 0);
+            assert_eq!(
+                RouterExecution::compute_backoff_ms(0, mult, attempt_index),
+                0
+            );
         }
     }
 
@@ -1150,7 +1158,12 @@ mod tests {
         let mut prev = RouterExecution::compute_backoff_ms(base, mult, 0);
         for attempt_index in 1u32..=20u32 {
             let next = RouterExecution::compute_backoff_ms(base, mult, attempt_index);
-            assert!(next >= prev, "backoff should be monotonic: {} -> {}", prev, next);
+            assert!(
+                next >= prev,
+                "backoff should be monotonic: {} -> {}",
+                prev,
+                next
+            );
             prev = next;
         }
     }
@@ -1168,7 +1181,7 @@ mod tests {
         let client = RouterExecutionClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
-        client.initialize(&admin, &2, &100, &200).unwrap();
+        client.initialize(&admin, &2, &100, &200);
 
         let caller = Address::generate(&env);
         env.as_contract(&client.address, || {

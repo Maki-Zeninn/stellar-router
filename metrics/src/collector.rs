@@ -10,11 +10,11 @@
 //! way to read that state from off-chain is to call the contract's view
 //! functions via `simulateTransaction`.  This exporter calls:
 //!
-//! - `router-core`:       `total_routed()`, `is_paused()`, `get_all_routes()`
-//!                        + `get_route(name)` for each route
+//! - `router-core`: `total_routed()`, `is_paused()`, `get_all_routes()`
+//!   + `get_route(name)` for each route
 //! - `router-middleware`: `total_calls()`, `get_configured_routes()`
-//!                        + `circuit_breaker_state(route)` for each route
-//! - `router-registry`:   `get_all_names()` (total count)
+//!   + `circuit_breaker_state(route)` for each route
+//! - `router-registry`: `get_all_names()` (total count)
 //!
 //! Each contract scrape is timed and any error increments the
 //! `router_scrape_errors_total` counter for that contract label.
@@ -442,6 +442,59 @@ fn extract_u64_from_entry(entries: &[crate::rpc::LedgerEntry], key_name: &str) -
     None
 }
 
+/// Encode a plain string as a base64 XDR `ScVal::String` argument.
+///
+/// This is a placeholder — a real implementation would use the `stellar-xdr`
+/// crate to produce the correct XDR encoding.
+fn encode_string_arg(s: &str) -> String {
+    // Base64-encode the raw UTF-8 bytes as a minimal stand-in.
+    // Replace with proper ScVal XDR encoding in production.
+    use std::fmt::Write;
+    let mut out = String::new();
+    for b in s.as_bytes() {
+        write!(out, "{b:02x}").ok();
+    }
+    out
+}
+
+/// Extract the `paused` field from a `RouteEntry` JSON value returned by
+/// `simulateTransaction`.
+fn extract_route_paused(val: &serde_json::Value) -> Option<bool> {
+    // The Soroban RPC returns struct fields as a JSON map.
+    // RouteEntry { address, name, paused, updated_by, metadata }
+    val.get("results")
+        .and_then(|r| r.get(0))
+        .and_then(|r| r.get("retval"))
+        .and_then(|v| v.get("paused"))
+        .and_then(|p| p.as_bool())
+        .or_else(|| val.get("paused").and_then(|p| p.as_bool()))
+}
+
+/// Extract `(is_open, failure_count)` from a `CircuitBreakerState` JSON value.
+fn extract_circuit_breaker_state(val: &serde_json::Value) -> Option<(bool, u32)> {
+    let retval = val
+        .get("results")
+        .and_then(|r| r.get(0))
+        .and_then(|r| r.get("retval"))
+        .unwrap_or(val);
+
+    // Handle Option<CircuitBreakerState> — None means no state recorded yet
+    if retval.is_null() || retval.get("none").is_some() {
+        return Some((false, 0));
+    }
+
+    let state = retval.get("some").unwrap_or(retval);
+    let is_open = state
+        .get("is_open")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let failure_count = state
+        .get("failure_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+
+    Some((is_open, failure_count))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,22 +614,14 @@ mod tests {
 
         let mock = MockRpcClient::new()
             .with_u64("CORE_ID", "total_routed", 100)
-            .with_string_vec(
-                "CORE_ID",
-                "get_all_routes",
-                vec!["oracle".to_string()],
-            )
+            .with_string_vec("CORE_ID", "get_all_routes", vec!["oracle".to_string()])
             .with_simulate(
                 "CORE_ID",
                 "get_route",
                 json!({ "results": [{ "retval": { "paused": false } }] }),
             )
             .with_u64("MW_ID", "total_calls", 50)
-            .with_string_vec(
-                "MW_ID",
-                "get_configured_routes",
-                vec!["oracle".to_string()],
-            )
+            .with_string_vec("MW_ID", "get_configured_routes", vec!["oracle".to_string()])
             .with_simulate(
                 "MW_ID",
                 "circuit_breaker_state",
@@ -627,18 +672,32 @@ mod tests {
         };
 
         let mock = MockRpcClient::new()
-            .with_events("QUOTE_ID", "quote_generated", vec![make_event("quote_generated"), make_event("quote_generated")])
-            .with_events("QUOTE_ID", "fee_estimated", vec![make_event("fee_estimated")]);
+            .with_events(
+                "QUOTE_ID",
+                "quote_generated",
+                vec![make_event("quote_generated"), make_event("quote_generated")],
+            )
+            .with_events(
+                "QUOTE_ID",
+                "fee_estimated",
+                vec![make_event("fee_estimated")],
+            );
 
         let ok = collector.scrape_all(&mock).await;
         assert!(ok);
 
         assert_eq!(
-            metrics.quote_total_generated.with_label_values(&["QUOTE_ID"]).get(),
+            metrics
+                .quote_total_generated
+                .with_label_values(&["QUOTE_ID"])
+                .get(),
             2.0
         );
         assert_eq!(
-            metrics.quote_total_fee_estimated.with_label_values(&["QUOTE_ID"]).get(),
+            metrics
+                .quote_total_fee_estimated
+                .with_label_values(&["QUOTE_ID"])
+                .get(),
             1.0
         );
     }
@@ -648,29 +707,24 @@ mod tests {
         use crate::rpc::LedgerEntry;
         let (collector, metrics) = make_collector_full("", "", "", "", "EXEC_ID");
 
-        let mock = MockRpcClient::new()
-            .with_ledger_entries(
-                "EXEC_ID:TotalExecutions",
-                vec![LedgerEntry { key: "EXEC_ID:TotalExecutions".to_string(), xdr: "42".to_string() }],
-            )
-            .with_ledger_entries(
-                "EXEC_ID:TotalErrors",
-                vec![LedgerEntry { key: "EXEC_ID:TotalErrors".to_string(), xdr: "5".to_string() }],
-            )
-            .with_ledger_entries(
-                "EXEC_ID:MaxRetries",
-                vec![LedgerEntry { key: "EXEC_ID:MaxRetries".to_string(), xdr: "3".to_string() }],
-            );
-
         // get_ledger_entries is called once with all three keys; mock returns
         // entries for the first key only. We need a single mock that returns all.
         // Use a combined mock keyed on the first key.
         let mock = MockRpcClient::new().with_ledger_entries(
             "EXEC_ID:TotalExecutions",
             vec![
-                LedgerEntry { key: "EXEC_ID:TotalExecutions".to_string(), xdr: "42".to_string() },
-                LedgerEntry { key: "EXEC_ID:TotalErrors".to_string(), xdr: "5".to_string() },
-                LedgerEntry { key: "EXEC_ID:MaxRetries".to_string(), xdr: "3".to_string() },
+                LedgerEntry {
+                    key: "EXEC_ID:TotalExecutions".to_string(),
+                    xdr: "42".to_string(),
+                },
+                LedgerEntry {
+                    key: "EXEC_ID:TotalErrors".to_string(),
+                    xdr: "5".to_string(),
+                },
+                LedgerEntry {
+                    key: "EXEC_ID:MaxRetries".to_string(),
+                    xdr: "3".to_string(),
+                },
             ],
         );
 
@@ -678,79 +732,27 @@ mod tests {
         assert!(ok);
 
         assert_eq!(
-            metrics.execution_total_executions.with_label_values(&["EXEC_ID"]).get(),
+            metrics
+                .execution_total_executions
+                .with_label_values(&["EXEC_ID"])
+                .get(),
             42.0
         );
         assert_eq!(
-            metrics.execution_total_errors.with_label_values(&["EXEC_ID"]).get(),
+            metrics
+                .execution_total_errors
+                .with_label_values(&["EXEC_ID"])
+                .get(),
             5.0
         );
         assert_eq!(
-            metrics.execution_max_retries.with_label_values(&["EXEC_ID"]).get(),
+            metrics
+                .execution_max_retries
+                .with_label_values(&["EXEC_ID"])
+                .get(),
             3.0
         );
     }
-}
-
-/// Encode a plain string as a base64 XDR `ScVal::String` argument.
-///
-/// This is a placeholder — a real implementation would use the `stellar-xdr`
-/// crate to produce the correct XDR encoding.
-fn encode_string_arg(s: &str) -> String {
-    // Base64-encode the raw UTF-8 bytes as a minimal stand-in.
-    // Replace with proper ScVal XDR encoding in production.
-    use std::fmt::Write;
-    let mut out = String::new();
-    for b in s.as_bytes() {
-        write!(out, "{b:02x}").ok();
-    }
-    out
-}
-
-/// Extract the `paused` field from a `RouteEntry` JSON value returned by
-/// `simulateTransaction`.
-fn extract_route_paused(val: &serde_json::Value) -> Option<bool> {
-    // The Soroban RPC returns struct fields as a JSON map.
-    // RouteEntry { address, name, paused, updated_by, metadata }
-    val.get("results")
-        .and_then(|r| r.get(0))
-        .and_then(|r| r.get("retval"))
-        .and_then(|v| v.get("paused"))
-        .and_then(|p| p.as_bool())
-        .or_else(|| val.get("paused").and_then(|p| p.as_bool()))
-}
-
-/// Extract `(is_open, failure_count)` from a `CircuitBreakerState` JSON value.
-fn extract_circuit_breaker_state(val: &serde_json::Value) -> Option<(bool, u32)> {
-    let retval = val
-        .get("results")
-        .and_then(|r| r.get(0))
-        .and_then(|r| r.get("retval"))
-        .unwrap_or(val);
-
-    // Handle Option<CircuitBreakerState> — None means no state recorded yet
-    if retval.is_null() || retval.get("none").is_some() {
-        return Some((false, 0));
-    }
-
-    let state = retval.get("some").unwrap_or(retval);
-    let is_open = state
-        .get("is_open")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let failure_count = state
-        .get("failure_count")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
-
-    Some((is_open, failure_count))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
     #[test]
     fn test_extract_route_paused_true() {
         let val = json!({

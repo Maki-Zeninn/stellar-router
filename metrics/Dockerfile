@@ -3,13 +3,21 @@ FROM rust:1.83-slim as builder
 
 WORKDIR /build
 
-# Copy workspace files
-COPY Cargo.toml Cargo.lock ./
-COPY contracts ./contracts
-COPY metrics ./metrics
+# Copy dependency files first for better layer caching
+COPY metrics/Cargo.toml ./
 
-# Build the metrics exporter
-RUN cargo build --release -p router-metrics-exporter
+# Create a dummy main.rs to cache dependencies
+RUN mkdir src && \
+    echo "fn main() {}" > src/main.rs && \
+    cargo build --release && \
+    rm -rf src
+
+# Copy actual source code
+COPY metrics/src/ src/
+
+# Build the actual binary
+RUN touch src/main.rs && \
+    cargo build --release
 
 # Runtime stage
 FROM debian:bookworm-slim

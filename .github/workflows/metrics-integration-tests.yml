@@ -25,11 +25,11 @@ jobs:
           key: ${{ runner.os }}-cargo-metrics-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build metrics exporter
-        run: cargo build -p router-metrics-exporter --release
+        run: cargo build --manifest-path metrics/Cargo.toml --release
 
       - name: Start metrics exporter
         run: |
-          timeout 30 ./target/release/router-metrics-exporter \
+          timeout 30 ./metrics/target/release/router-metrics-exporter \
             --port 9090 \
             --rpc-url http://localhost:8000 \
             --log-level debug &

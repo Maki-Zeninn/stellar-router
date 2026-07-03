@@ -14,7 +14,6 @@
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
 };
-use router_common;
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -169,8 +168,10 @@ impl RouterQuote {
             .instance()
             .set(&DataKey::RouteFee(route.clone()), &fee_bps);
 
-        env.events()
-            .publish((Symbol::new(&env, router_common::EVENT_ROUTE_FEE_SET),), (route, fee_bps));
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROUTE_FEE_SET),),
+            (route, fee_bps),
+        );
 
         Ok(())
     }
@@ -189,7 +190,7 @@ impl RouterQuote {
         caller.require_auth();
         Self::require_admin(&env, &caller)?;
 
-        let mut sorted_tiers = Vec::new(&env);
+        let mut sorted_tiers: Vec<FeeTier> = Vec::new(&env);
         for tier in tiers.iter() {
             if tier.fee_bps > 10000 {
                 return Err(QuoteError::InvalidFeeBps);
@@ -288,11 +289,8 @@ impl RouterQuote {
             return Err(QuoteError::InvalidAmount);
         }
 
-        let fee_bps = Self::resolve_route_fee_bps(
-            env.clone(),
-            request.route.clone(),
-            request.amount_in,
-        )?;
+        let fee_bps =
+            Self::resolve_route_fee_bps(env.clone(), request.route.clone(), request.amount_in)?;
 
         // Calculate fee: fee_amount = amount_in * fee_bps / 10000
         let fee_amount = request
@@ -463,8 +461,10 @@ impl RouterQuote {
 
         env.storage().instance().set(&DataKey::DefaultFee, &fee_bps);
 
-        env.events()
-            .publish((Symbol::new(&env, router_common::EVENT_DEFAULT_FEE_UPDATED),), fee_bps);
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_DEFAULT_FEE_UPDATED),),
+            fee_bps,
+        );
 
         Ok(())
     }
@@ -1102,8 +1102,8 @@ mod tests {
         let route2 = String::from_str(&env, "sushiswap");
         let route3 = String::from_str(&env, "pancakeswap");
         client.set_route_fee(&admin, &route1, &100); // 1%   -> out 9900
-        client.set_route_fee(&admin, &route2, &30);  // 0.3% -> out 9970 (best)
-        client.set_route_fee(&admin, &route3, &50);  // 0.5% -> out 9950
+        client.set_route_fee(&admin, &route2, &30); // 0.3% -> out 9970 (best)
+        client.set_route_fee(&admin, &route3, &50); // 0.5% -> out 9950
 
         let token_in = Address::generate(&env);
         let token_out = Address::generate(&env);
@@ -1155,7 +1155,10 @@ mod tests {
 
         let sorted = client.get_quotes_sorted(&requests);
         assert_eq!(sorted.len(), 1);
-        assert_eq!(sorted.get(0).unwrap().route, String::from_str(&env, "uniswap"));
+        assert_eq!(
+            sorted.get(0).unwrap().route,
+            String::from_str(&env, "uniswap")
+        );
     }
 
     #[test]

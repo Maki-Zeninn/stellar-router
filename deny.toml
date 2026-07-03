@@ -1,25 +1,25 @@
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
-unsound = "warn"
-yanked = "warn"
+# Security vulnerabilities in dependencies are denied by default in this
+# version of cargo-deny; nothing to ignore currently.
+ignore = [
+    # Transitive dependency of soroban-sdk (via wasmi_core / soroban-wasmi),
+    # not a direct dependency of this project. No upstream fix is available;
+    # revisit when soroban-sdk updates its wasmi dependency.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained transitive dependency via soroban-sdk; no direct alternative available" },
+]
 
 [licenses]
-unlicensed = "deny"
-copyleft = "warn"
+# GPL-2.0/GPL-3.0/AGPL-3.0 etc. are excluded simply by not being listed here —
+# cargo-deny denies any license not present in this allow list.
 allow = [
     "MIT",
     "Apache-2.0",
-    "Apache-2.0 OR MIT",
+    "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
     "Unicode-DFS-2016",
-]
-deny = [
-    "GPL-2.0",
-    "GPL-3.0",
-    "AGPL-3.0",
+    "Unicode-3.0",
 ]
 
 [bans]

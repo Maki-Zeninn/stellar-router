@@ -40,17 +40,17 @@ jobs:
       - name: Cache cargo build
         uses: actions/cache@v4
         with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
-      
+          path: metrics/target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('metrics/Cargo.lock') }}
+
       - name: Run tests
-        run: cargo test -p router-metrics-exporter --verbose
-      
+        run: cargo test --manifest-path metrics/Cargo.toml --verbose
+
       - name: Check formatting
-        run: cargo fmt -p router-metrics-exporter -- --check
-      
+        run: cargo fmt --manifest-path metrics/Cargo.toml -- --check
+
       - name: Run clippy
-        run: cargo clippy -p router-metrics-exporter -- -D warnings
+        run: cargo clippy --manifest-path metrics/Cargo.toml -- -D warnings
 
   build:
     name: Build Binary
@@ -72,13 +72,13 @@ jobs:
           targets: ${{ matrix.target }}
       
       - name: Build release binary
-        run: cargo build --release -p router-metrics-exporter --target ${{ matrix.target }}
-      
+        run: cargo build --release --manifest-path metrics/Cargo.toml --target ${{ matrix.target }}
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: router-metrics-exporter-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/router-metrics-exporter*
+          path: metrics/target/${{ matrix.target }}/release/router-metrics-exporter*
 
   docker:
     name: Build Docker Image
