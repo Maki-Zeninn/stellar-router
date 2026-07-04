@@ -1,14 +1,8 @@
-# WASM size baseline for CI regression detection.
-# Run `make build-wasm` and update these values after a release to set a new baseline.
-# CI will fail if any contract grows more than 10% beyond its baseline.
-#
-# Format: <contract_name>:<size_in_bytes>
-#
-router_core:73163
-router_registry:46649
+router_core:73155
+router_registry:46641
 router_access:35422
 router_middleware:50698
-router_timelock:33954
+router_timelock:33946
 router_multicall:27525
 router_execution:35834
 router_quote:20722
