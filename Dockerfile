@@ -9,7 +9,6 @@ WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
 COPY contracts/ contracts/
-COPY metrics/ metrics/
 
 RUN cargo build \
     --package router-common \
@@ -20,8 +19,7 @@ RUN cargo build \
     --package router-timelock \
     --package router-multicall \
     --package router-quote \
-    --package router-execution \
-    --package router-metrics-exporter
+    --package router-execution
 
 # ── Test stage ────────────────────────────────────────────────────────────────
 FROM builder AS test
@@ -47,12 +45,23 @@ RUN cargo build --target wasm32-unknown-unknown --release \
     --package router-multicall \
     --package router-execution
 
+# ── Metrics exporter builder ──────────────────────────────────────────────────
+# router-metrics-exporter is its own standalone workspace (see metrics/Cargo.toml),
+# not a member of the root workspace, so it's built separately.
+FROM rust:1.88-slim AS metrics-builder
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY metrics/ metrics/
+RUN cargo build --release --manifest-path metrics/Cargo.toml
+
 # ── Metrics exporter runtime ──────────────────────────────────────────────────
 FROM debian:bookworm-slim AS metrics
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/target/release/router-metrics-exporter /usr/local/bin/
+COPY --from=metrics-builder /app/metrics/target/release/router-metrics-exporter /usr/local/bin/
 RUN useradd -m -u 1000 metrics && \
     chown -R metrics:metrics /usr/local/bin/router-metrics-exporter
 USER metrics

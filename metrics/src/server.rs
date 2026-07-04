@@ -71,9 +71,12 @@ pub async fn serve(listen: String, registry: Registry, limiter: RateLimiter) -> 
         .await
         .with_context(|| format!("failed to bind to {addr}"))?;
 
-    axum::serve(listener, app)
-        .await
-        .context("HTTP server error")?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .context("HTTP server error")?;
 
     Ok(())
 }

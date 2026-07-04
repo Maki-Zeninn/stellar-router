@@ -28,11 +28,12 @@ jobs:
         run: cargo build --manifest-path metrics/Cargo.toml --release
 
       - name: Start metrics exporter
+        env:
+          RUST_LOG: debug
         run: |
           timeout 30 ./metrics/target/release/router-metrics-exporter \
-            --port 9090 \
-            --rpc-url http://localhost:8000 \
-            --log-level debug &
+            --listen 0.0.0.0:9090 \
+            --rpc-url http://localhost:8000 &
           EXPORTER_PID=$!
           sleep 2
           echo "EXPORTER_PID=$EXPORTER_PID" >> $GITHUB_ENV
