@@ -169,7 +169,7 @@ jobs:
         run: cargo install --locked stellar-cli
 
       - name: Run integration tests
-        run: cargo test --test integration_tests -- --ignored --test-threads=1 --nocapture
+        run: cargo test --manifest-path integration-tests/Cargo.toml --test integration_tests -- --ignored --test-threads=1 --nocapture
         env:
           STELLAR_RPC_URL: https://soroban-testnet.stellar.org
 
