@@ -209,7 +209,12 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           files: ./coverage/cobertura.xml
-          fail_ci_if_error: true
+          # No CODECOV_TOKEN secret is configured for this repo yet, so don't
+          # fail the whole pipeline over a rejected tokenless upload. The
+          # coverage report is still generated and uploaded as a build
+          # artifact below regardless. Set CODECOV_TOKEN and flip this back
+          # to true once Codecov is wired up.
+          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Check coverage threshold
