@@ -33,7 +33,11 @@ impl AppState {
     ) -> Self {
         let (tx_status_tx, _) = broadcast::channel(1000);
         Self {
-            rpc: SorobanRpcClient::with_timeout(rpc_url, Some(router_core_contract_id.clone()), rpc_timeout_secs),
+            rpc: SorobanRpcClient::with_timeout(
+                rpc_url,
+                Some(router_core_contract_id.clone()),
+                rpc_timeout_secs,
+            ),
 
             execution_contract_id,
             router_core_contract_id,

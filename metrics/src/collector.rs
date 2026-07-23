@@ -412,7 +412,7 @@ impl Collector {
 /// Produces a string key that the mock client can match on. In production
 /// this should be replaced with proper XDR encoding via the `stellar-xdr` crate.
 fn encode_contract_data_key(contract_id: &str, storage_key: &str) -> String {
-    format!("{}:{}", contract_id, storage_key)
+    format!("{contract_id}:{storage_key}")
 }
 
 /// Extract a `u64` value from a `getLedgerEntries` response for the given key name.
