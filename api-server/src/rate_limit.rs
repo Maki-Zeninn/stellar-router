@@ -1,7 +1,10 @@
 //! Simple per-client rate limiting middleware for the API server.
 //!
-//! Tracks requests by `X-Api-Key` header or remote IP and rejects excess
-//! requests with HTTP 429.
+//! Tracks requests by remote IP address and rejects excess requests with
+//! HTTP 429. The client cannot influence its own bucket key: an
+//! unauthenticated, client-supplied override (e.g. a header) would let an
+//! attacker pick a fresh key per request and dodge the limit entirely, and
+//! would also let them grow `buckets` without bound.
 
 use std::{net::SocketAddr, sync::Arc, time::{Duration, Instant}};
 
@@ -93,6 +96,22 @@ impl RateLimiter {
         }
         1
     }
+
+    /// Spawns a background task that periodically evicts buckets whose window
+    /// has expired, so `buckets` cannot grow without bound over the life of
+    /// the process. Must be called from within a Tokio runtime.
+    pub fn spawn_sweeper(&self) {
+        let buckets = self.buckets.clone();
+        let window = self.config.window;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(window);
+            loop {
+                interval.tick().await;
+                let now = Instant::now();
+                buckets.retain(|_, entry| now.duration_since(entry.window_start) < window);
+            }
+        });
+    }
 }
 
 #[derive(Serialize)]
@@ -113,12 +132,7 @@ pub async fn rate_limit_middleware(
         .map(|connect_info| connect_info.0)
         .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 0)));
 
-    let key = req
-        .headers()
-        .get("x-api-key")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| remote_addr.ip().to_string());
+    let key = remote_addr.ip().to_string();
 
     let limiter = &state.rate_limiter;
     let allowed = limiter.check(&key);

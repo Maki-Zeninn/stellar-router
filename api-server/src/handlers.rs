@@ -148,9 +148,6 @@ pub async fn get_route(
                 ErrorCode::NotFound,
                 format!("route '{}' not found", name),
             )),
-            Json(ErrorResponse {
-                error: format!("route '{}' not found", name),
-            }),
         )),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -121,6 +121,7 @@ async fn main() -> Result<()> {
         max_requests: args.rate_limit_max_requests,
         window: std::time::Duration::from_secs(args.rate_limit_window_secs),
     });
+    rate_limiter.spawn_sweeper();
 
     let state = AppState::new(
         args.rpc_url,
@@ -160,7 +161,11 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     let drain_timeout = std::time::Duration::from_secs(args.shutdown_timeout_secs);
-    let serve = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
+    let serve = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal());
 
     match tokio::time::timeout(drain_timeout, serve).await {
         Ok(result) => result?,
