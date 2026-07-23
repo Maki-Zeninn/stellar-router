@@ -1,8 +1,8 @@
-router_core:73155
-router_registry:46641
-router_access:35422
-router_middleware:50698
-router_timelock:33946
-router_multicall:27525
-router_execution:35834
-router_quote:20722
+router_core:73096
+router_registry:46594
+router_access:35374
+router_middleware:50597
+router_timelock:33899
+router_multicall:27486
+router_execution:35787
+router_quote:20681
