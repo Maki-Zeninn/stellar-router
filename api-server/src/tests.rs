@@ -33,9 +33,69 @@ fn test_app() -> Router {
     Router::new()
         .route("/simulate", post(handlers::simulate))
         .route("/health", get(handlers::health))
+        .route("/routes", get(handlers::list_routes))
         .route("/routes/:name", get(handlers::get_route))
         .layer(middleware::from_fn(crate::rate_limit::rate_limit_middleware))
         .with_state(state)
+}
+
+/// Like `test_app`, but with a non-empty `router_core_contract_id` so
+/// `list_routes` takes the RPC-call path instead of the 503 short-circuit.
+fn test_app_with_core_contract() -> Router {
+    let rate_limiter = RateLimiter::new(RateLimitConfig::default());
+    let state = AppState::new(
+        "http://localhost:1".to_string(),
+        "".to_string(),
+        VALID_CONTRACT_ID.to_string(),
+        rate_limiter,
+        10,
+    );
+
+    Router::new()
+        .route("/routes", get(handlers::list_routes))
+        .layer(middleware::from_fn(crate::rate_limit::rate_limit_middleware))
+        .with_state(state)
+}
+
+#[tokio::test]
+async fn test_list_routes_returns_503_when_core_not_configured() {
+    let app = test_app();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/routes")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(json["error"]["code"].is_string());
+    assert!(json["error"]["message"].is_string());
+}
+
+#[tokio::test]
+async fn test_list_routes_returns_500_on_rpc_error() {
+    let app = test_app_with_core_contract();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/routes")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["error"]["code"].as_str().unwrap(), "RPC_ERROR");
 }
 
 #[tokio::test]

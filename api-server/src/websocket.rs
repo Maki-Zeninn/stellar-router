@@ -39,11 +39,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     info!("WebSocket client connected");
 
-    let mut subscriptions: Vec<String> = Vec::new();
-    let mut rx_handles: Vec<(
-        String,
-        tokio::sync::broadcast::Receiver<TransactionStatusEvent>,
-    )> = Vec::new();
     let mut last_activity = tokio::time::Instant::now();
     let mut ping_ticker = tokio::time::interval(PING_INTERVAL);
     ping_ticker.tick().await; // consume the immediate first tick
@@ -76,13 +71,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         }
                                     } else {
                                         info!("Client subscribed to tx_id: {}", sub_msg.tx_id);
-                                        subscriptions.push(sub_msg.tx_id.clone());
+                                        subscriptions.insert(sub_msg.tx_id.clone());
                                         state.add_subscriber(sub_msg.tx_id.clone());
-                                        let rx = state.tx_status_tx.subscribe();
-                                        rx_handles.push((sub_msg.tx_id.clone(), rx));
-                                    info!("Client subscribed to tx_id: {}", sub_msg.tx_id);
-                                    subscriptions.insert(sub_msg.tx_id.clone());
-                                    state.add_subscriber(sub_msg.tx_id.clone());
 
                                         let response = json!({
                                             "msg_type": "subscribed",
