@@ -458,6 +458,9 @@ impl RouterRegistry {
         caller.require_auth();
         Self::require_admin(&env, &caller)?;
         let versions = Self::get_versions_list(&env, &name);
+        if versions.is_empty() {
+            return Err(RegistryError::NotFound);
+        }
         for v in versions.iter() {
             // Skip already-deprecated entries rather than aborting
             let _ = Self::deprecate_one(&env, name.clone(), v, reason.clone());
@@ -1614,6 +1617,14 @@ mod tests {
         let constraint = String::from_str(&env, ">=0");
         let result = client.get_latest_with_constraint(&name, &Some(constraint));
         assert_eq!(result.version, 1);
+    }
+
+    #[test]
+    fn test_deprecate_all_versions_not_found_for_unregistered_name() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "never-registered");
+        let result = client.try_deprecate_all_versions(&admin, &name, &None::<String>);
+        assert_eq!(result, Err(Ok(RegistryError::NotFound)));
     }
 
     #[test]
