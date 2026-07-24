@@ -83,6 +83,10 @@ pub enum TimelockError {
     CircularDependency = 11,
     /// Dependency chain exceeds maximum allowed depth.
     DependencyTooDeep = 12,
+    /// An operation with this op_id has already been queued.
+    AlreadyQueued = 13,
+    /// One or more of this operation's dependencies has not yet been executed.
+    DependencyNotExecuted = 14,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -165,6 +169,10 @@ impl RouterTimelock {
         preimage.append(&Bytes::from_array(&env, &eta_bytes));
 
         let op_id: Bytes = env.crypto().sha256(&preimage).into();
+
+        if env.storage().instance().has(&DataKey::Op(op_id.clone())) {
+            return Err(TimelockError::AlreadyQueued);
+        }
 
         // Validate no circular dependencies
         for dep_id in deps.iter() {
@@ -260,6 +268,22 @@ impl RouterTimelock {
         }
         if now > op.eta + op.grace_period_seconds {
             return Err(TimelockError::Expired);
+        }
+
+        let deps: Vec<Bytes> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Deps(op_id.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        for dep_id in deps.iter() {
+            let dep_op: Op = env
+                .storage()
+                .instance()
+                .get(&DataKey::Op(dep_id))
+                .ok_or(TimelockError::DependencyNotExecuted)?;
+            if !dep_op.executed {
+                return Err(TimelockError::DependencyNotExecuted);
+            }
         }
 
         op.executed = true;
