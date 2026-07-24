@@ -16,7 +16,9 @@
 //!
 //! ## Events (following naming convention: past tense verbs in snake_case)
 //! - `execution_result` — Execution result logged (target, function, success, attempts)
-//! - `fee_estimated` — Fee estimation completed (total_fee, surge_pricing)
+//! - `fee_estimated` — Fee estimation completed (total_fee, surge_pricing). Note:
+//!   `surge_pricing`/`high_load` here reflect only the caller's own asserted load
+//!   hint (see `estimate_fee`), not a verified on-chain network-congestion signal.
 //! - `simulation_result` — Pre-execution simulation result (target, function, success)
 
 use soroban_sdk::{
@@ -109,6 +111,17 @@ pub struct ExecutionRequest {
     /// Maximum number of retries for transient (network) errors.
     /// Capped at the contract-level `max_retries` setting.
     pub max_retries: u32,
+    /// Positional call arguments passed to `function` on `target`, in the
+    /// exact order and types the target function's ABI expects. Each `Val`
+    /// must already be the correctly-typed/serialized argument (e.g. built
+    /// via `IntoVal` on the caller's side) — this contract performs no
+    /// argument type-checking beyond whatever `try_invoke_contract` enforces
+    /// at the host level.
+    pub args: Vec<soroban_sdk::Val>,
+    /// Transaction amount in stroops. Used to compute the real fee recorded
+    /// in `ExecutionRecord.fee_paid` (see `estimate_fee`'s resource-fee
+    /// scaling, which this mirrors).
+    pub amount: i128,
 }
 
 /// A single entry in the per-execution history log.
@@ -161,7 +174,9 @@ pub struct FeeEstimate {
     pub total_fee: i128,
     /// Surge multiplier applied (100 = 1x, 200 = 2x, etc.).
     pub surge_multiplier: u32,
-    /// Whether the estimate reflects high-load conditions.
+    /// Whether the estimate reflects high-load conditions, per the caller's
+    /// own asserted load hint. This is NOT a verified/observed network
+    /// condition — see `estimate_fee`'s doc comment.
     pub high_load: bool,
 }
 
@@ -188,6 +203,16 @@ const SURGE_MULTIPLIER: u32 = 200;
 
 /// Normal (no-surge) pricing multiplier (100 = 1×).
 const NORMAL_MULTIPLIER: u32 = 100;
+
+// ── Instance storage TTL constants ─────────────────────────────────────────────
+
+/// Threshold (in ledgers) below which instance storage TTL is extended on
+/// state-mutating/frequently-invoked calls. ~30 days assuming ~5s average
+/// ledger close time (17280 ledgers/day).
+const INSTANCE_TTL_THRESHOLD: u32 = 17280 * 30;
+
+/// Ledger count instance storage TTL is bumped to when extended. ~60 days.
+const INSTANCE_TTL_EXTEND_TO: u32 = 17280 * 60;
 
 // ── Contract ──────────────────────────────────────────────────────────────────
 
@@ -258,6 +283,7 @@ impl RouterExecution {
         backoff_multiplier: u32,
     ) -> Result<(), ExecutionError> {
         caller.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, ExecutionError)?;
         if !(MIN_BACKOFF_MULTIPLIER..=MAX_BACKOFF_MULTIPLIER).contains(&backoff_multiplier) {
             return Err(ExecutionError::InvalidConfig);
@@ -311,6 +337,7 @@ impl RouterExecution {
         request: ExecutionRequest,
     ) -> Result<ExecutionResult, ExecutionError> {
         caller.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
 
         let max_retries: u32 = env
             .storage()
@@ -324,13 +351,14 @@ impl RouterExecution {
             max_retries
         };
 
+        let fee_paid = Self::compute_actual_fee(request.amount);
+
         // ── Simulation phase ──────────────────────────────────────────────
         if request.simulate_first {
-            let args: Vec<soroban_sdk::Val> = Vec::new(&env);
             let sim_result = env.try_invoke_contract::<soroban_sdk::Val, soroban_sdk::Val>(
                 &request.target,
                 &request.function,
-                args,
+                request.args.clone(),
             );
             if sim_result.is_err() {
                 Self::log_error(
@@ -359,17 +387,16 @@ impl RouterExecution {
         let mut attempts = 0u32;
         loop {
             attempts += 1;
-            let args: Vec<soroban_sdk::Val> = Vec::new(&env);
             let result = env.try_invoke_contract::<soroban_sdk::Val, soroban_sdk::Val>(
                 &request.target,
                 &request.function,
-                args,
+                request.args.clone(),
             );
 
             match result {
                 Ok(_) => {
                     Self::increment_counter(&env, &DataKey::TotalExecutions);
-                    Self::append_history(&env, &request.target, &request.function, true, 0);
+                    Self::append_history(&env, &request.target, &request.function, true, fee_paid);
                     let exec_result = ExecutionResult {
                         target: request.target.clone(),
                         function: request.function.clone(),
@@ -407,7 +434,7 @@ impl RouterExecution {
                         ExecutionError::ContractRejected,
                         attempts,
                     );
-                    Self::append_history(&env, &request.target, &request.function, false, 0);
+                    Self::append_history(&env, &request.target, &request.function, false, fee_paid);
                     return Err(ExecutionError::ContractRejected);
                 }
             }
@@ -425,8 +452,13 @@ impl RouterExecution {
     /// * `function` - The function to be invoked.
     /// * `amount` - The transaction amount in stroops (used to scale resource fees).
     ///   Must be greater than zero.
-    /// * `high_load_threshold` - Basis-point threshold above which surge pricing
-    ///   applies (e.g., 8000 = 80% network utilization).
+    /// * `caller_asserted_load_bps` - A **caller-asserted** basis-point hint above
+    ///   which surge pricing applies (e.g., 8000 = "I assert 80% network
+    ///   utilization"). This is NOT a verified on-chain or oracle-derived network
+    ///   utilization figure — the contract has no mechanism to observe real
+    ///   network load, so this value is simply whatever the caller passes in and
+    ///   must not be trusted as ground truth by downstream consumers (including
+    ///   the `high_load` field below and the `fee_estimated` event).
     ///
     /// # Errors
     /// * [`ExecutionError::InvalidAmount`] — if `amount` is ≤ 0.
@@ -436,7 +468,7 @@ impl RouterExecution {
         _target: Address,
         _function: Symbol,
         amount: i128,
-        high_load_threshold: u32,
+        caller_asserted_load_bps: u32,
     ) -> Result<FeeEstimate, ExecutionError> {
         // Verify initialized
         if !env.storage().instance().has(&DataKey::Admin) {
@@ -446,21 +478,14 @@ impl RouterExecution {
             return Err(ExecutionError::InvalidAmount);
         }
 
-        // Base fee: minimum Stellar network transaction fee
-        let base_fee: i128 = BASE_FEE_STROOPS;
+        let (base_fee, resource_fee) = Self::compute_base_and_resource_fee(amount);
 
-        // Resource fee scales with amount (0.1% of amount, min MIN_RESOURCE_FEE_STROOPS)
-        let resource_fee: i128 = {
-            let scaled = amount / FEE_SCALE_DIVISOR;
-            if scaled < MIN_RESOURCE_FEE_STROOPS {
-                MIN_RESOURCE_FEE_STROOPS
-            } else {
-                scaled
-            }
-        };
-
-        // Surge pricing: apply 2x multiplier above HIGH_LOAD_THRESHOLD_BPS
-        let (surge_multiplier, high_load) = if high_load_threshold >= HIGH_LOAD_THRESHOLD_BPS {
+        // Surge pricing: apply 2x multiplier above HIGH_LOAD_THRESHOLD_BPS.
+        // NOTE: `caller_asserted_load_bps` is caller-supplied and unverified —
+        // see the doc comment above. `high_load` below reflects only what the
+        // caller asserted, not a confirmed network condition.
+        let (surge_multiplier, high_load) = if caller_asserted_load_bps >= HIGH_LOAD_THRESHOLD_BPS
+        {
             (SURGE_MULTIPLIER, true)
         } else {
             (NORMAL_MULTIPLIER, false)
@@ -496,6 +521,9 @@ impl RouterExecution {
     /// * `caller` - The address requesting simulation; must authenticate.
     /// * `target` - The contract to simulate against.
     /// * `function` - The function to simulate.
+    /// * `args` - Positional call arguments to pass to `function`, in the exact
+    ///   order/types the target function's ABI expects (same contract as
+    ///   [`ExecutionRequest::args`]).
     ///
     /// # Returns
     /// A [`SimulationResult`] with `success`, `would_fail`, and a `message`.
@@ -507,6 +535,7 @@ impl RouterExecution {
         caller: Address,
         target: Address,
         function: Symbol,
+        args: Vec<soroban_sdk::Val>,
     ) -> Result<SimulationResult, ExecutionError> {
         caller.require_auth();
 
@@ -514,7 +543,6 @@ impl RouterExecution {
             return Err(ExecutionError::NotInitialized);
         }
 
-        let args: Vec<soroban_sdk::Val> = Vec::new(&env);
         let sim_ok = env
             .try_invoke_contract::<soroban_sdk::Val, soroban_sdk::Val>(&target, &function, args)
             .is_ok();
@@ -570,6 +598,7 @@ impl RouterExecution {
     /// * [`ExecutionError::InvalidConfig`] — if `new_max` > 5.
     pub fn set_max_retries(env: Env, caller: Address, new_max: u32) -> Result<(), ExecutionError> {
         caller.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         let admin: Address = env
             .storage()
             .instance()
@@ -599,6 +628,7 @@ impl RouterExecution {
         new_max: u32,
     ) -> Result<(), ExecutionError> {
         caller.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         let admin: Address = env
             .storage()
             .instance()
@@ -696,6 +726,33 @@ impl RouterExecution {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// Computes `(base_fee, resource_fee)` for a transaction amount: a fixed
+    /// base fee plus a resource fee that scales with `amount` (0.1%, floored
+    /// at `MIN_RESOURCE_FEE_STROOPS`). Shared by `estimate_fee` and
+    /// `compute_actual_fee` so the two stay in sync.
+    fn compute_base_and_resource_fee(amount: i128) -> (i128, i128) {
+        let base_fee: i128 = BASE_FEE_STROOPS;
+        let resource_fee: i128 = {
+            let scaled = amount / FEE_SCALE_DIVISOR;
+            if scaled < MIN_RESOURCE_FEE_STROOPS {
+                MIN_RESOURCE_FEE_STROOPS
+            } else {
+                scaled
+            }
+        };
+        (base_fee, resource_fee)
+    }
+
+    /// Computes the real fee for an executed transaction, mirroring
+    /// `estimate_fee`'s base + resource fee logic (without surge pricing,
+    /// since `execute()` has no caller-asserted load hint to apply it
+    /// against). Used to populate `ExecutionRecord.fee_paid` with an actual
+    /// value instead of a hardcoded `0`.
+    fn compute_actual_fee(amount: i128) -> i128 {
+        let (base_fee, resource_fee) = Self::compute_base_and_resource_fee(amount);
+        base_fee + resource_fee
+    }
 
     /// Compute exponential backoff delay in milliseconds for a given attempt index.
     ///
@@ -898,7 +955,7 @@ mod tests {
         let target = Address::generate(&env);
         let function = Symbol::new(&env, "transfer");
         // Calling a random address that has no contract → simulation should fail
-        let result = client.simulate(&caller, &target, &function);
+        let result = client.simulate(&caller, &target, &function, &Vec::new(&env));
         assert!(!result.success);
         assert!(result.would_fail);
     }
@@ -1029,7 +1086,7 @@ mod tests {
         let caller = Address::generate(&env);
         let target = Address::generate(&env);
         let function = Symbol::new(&env, "transfer");
-        let result = client.simulate(&caller, &target, &function);
+        let result = client.simulate(&caller, &target, &function, &Vec::new(&env));
         // Message should indicate failure
         assert_eq!(
             result.message,
@@ -1200,6 +1257,8 @@ mod tests {
                 function,
                 simulate_first: false,
                 max_retries: 1,
+                args: Vec::new(&env),
+                amount: 1_000_000,
             };
 
             let result = RouterExecution::execute(env.clone(), caller.clone(), request);

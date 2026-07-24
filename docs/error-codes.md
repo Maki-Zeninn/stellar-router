@@ -140,7 +140,8 @@ Uses range-based codes to distinguish error categories.
 | 9    | `InvalidConstraint` |
 | 10   | `AllVersionsDeprecated` |
 | 11   | `ContractUnreachable` |
-| **12** | ← next available |
+| 12   | `InvalidHealthFn` |
+| **13** | ← next available |
 
 ---
 

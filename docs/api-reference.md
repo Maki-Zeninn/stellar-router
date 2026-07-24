@@ -846,6 +846,8 @@ Each contract defines its own `#[contracterror]` enum. Use the tables below as t
 | `VersionNotFound` | `8` | Deprecating a version that does not exist | Verify version list with `versions(name)` first |
 | `InvalidConstraint` | `9` | Constraint string format is invalid | Validate/normalize constraint syntax before calling |
 | `AllVersionsDeprecated` | `10` | Lookup finds only deprecated versions for a name | Register a new active version or allow deprecated fallback intentionally |
+| `ContractUnreachable` | `11` | `register_with_check` failed to invoke the supplied health function on the target address | Confirm the target contract exposes the allow-listed `health` or `ping` function and that it returns successfully |
+| `InvalidHealthFn` | `12` | `register_with_check` rejected `health_fn` because it was not in the `health` / `ping` allow-list (issue #828) | Pass `None` or use one of `health` / `ping`; pass-through arbitrary symbols are no longer accepted to prevent state-mutating entry points being invoked on the target during registration |
 
 ### router-access (`AccessError`)
 

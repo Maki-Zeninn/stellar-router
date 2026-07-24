@@ -70,6 +70,10 @@ pub enum RegistryError {
     InvalidConstraint = 9,
     AllVersionsDeprecated = 10,
     ContractUnreachable = 11,
+    /// Returned by [`RouterRegistry::register_with_check`] when the
+    /// supplied `health_fn` symbol is not in the allow-list of
+    /// conventionally side-effect-free liveness-probe names.
+    InvalidHealthFn = 12,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -137,12 +141,53 @@ impl RouterRegistry {
 
     /// Register a new contract entry with an optional liveness check.
     ///
-    /// When `health_fn` is provided, the registry invokes that function on
-    /// `address` via a cross-contract call before storing the entry. If the
-    /// call fails, registration is rejected with
+    /// When `health_fn` is `Some(_)`, the registry invokes that function
+    /// on `address` via a real cross-contract call before storing the
+    /// entry, as a passive liveness probe. If the call fails (function
+    /// not present or invocation error), registration is rejected with
     /// [`RegistryError::ContractUnreachable`].
     ///
-    /// When `health_fn` is `None`, this behaves identically to [`register`].
+    /// When `health_fn` is `None`, this behaves identically to
+    /// [`register`] — no cross-contract call is performed.
+    ///
+    /// # SECURITY: `health_fn` MUST be side-effect-free (issue #828)
+    ///
+    /// `try_invoke_contract` is a **real** cross-contract call, not a
+    /// read-only host-function simulation. Any state-mutating entry point
+    /// named by `health_fn` will execute for real as a consequence of
+    /// merely registering the target contract. This includes arbitrary
+    /// admin toggles, resets, `increment`-style entry points, or any
+    /// other no-arg state-mutating function exposed on the target under
+    /// a plausible-sounding name — whether through admin operator error,
+    /// a compromised admin key, or a misleading naming convention on the
+    /// target contract itself.
+    ///
+    /// To mitigate this risk, `health_fn` is restricted to a fixed
+    /// allow-list of symbols that conventionally denote side-effect-free
+    /// liveness probes: `health` or `ping`. Any other symbol is rejected
+    /// with [`RegistryError::InvalidHealthFn`] **before** any
+    /// cross-contract call is performed, so a non-allow-listed symbol
+    /// cannot cause state changes on the target.
+    ///
+    /// Callers remain responsible for ensuring that the target
+    /// contract's implementation of `health` or `ping` is itself
+    /// side-effect-free. The allow-list is a name-shape guardrail, not
+    /// a behavioural guarantee — a target could still implement `health`
+    /// in a state-mutating way.
+    ///
+    /// # Errors
+    /// * [`RegistryError::InvalidHealthFn`] — `health_fn` was supplied
+    ///   but its symbol is not in the `health` / `ping` allow-list.
+    /// * [`RegistryError::ContractUnreachable`] — `health_fn` was
+    ///   allow-listed, but the target contract either does not
+    ///   implement it or the invocation failed.
+    /// * [`RegistryError::Unauthorized`] — if `caller` is not the admin.
+    /// * [`RegistryError::InvalidVersion`] — if `version` is 0 or not
+    ///   greater than all existing versions for `name`.
+    /// * [`RegistryError::AlreadyRegistered`] — if `(name, version)`
+    ///   is already registered.
+    /// * [`RegistryError::NotInitialized`] — if the registry has not
+    ///   been initialized.
     pub fn register_with_check(
         env: Env,
         caller: Address,
@@ -155,6 +200,17 @@ impl RouterRegistry {
         Self::require_admin(&env, &caller)?;
 
         if let Some(fn_sym) = health_fn {
+            // SECURITY (issue #828): `try_invoke_contract` is a real
+            // cross-contract call — not a read-only simulation — so the
+            // symbol chosen here is reachable arbitrary code on the
+            // target. Restrict to the documented allow-list BEFORE any
+            // call is dispatched so a non-allow-listed symbol cannot
+            // trigger state-mutating entry points on the target during
+            // registration.
+            if !Self::is_allowed_health_fn(&env, &fn_sym) {
+                return Err(RegistryError::InvalidHealthFn);
+            }
+
             let args: Vec<Val> = Vec::new(&env);
             if env
                 .try_invoke_contract::<Val, Val>(&address, &fn_sym, args)
@@ -606,6 +662,14 @@ impl RouterRegistry {
             RegistryError::InvalidVersion => router_common::BatchItemError::InvalidName,
             RegistryError::Unauthorized => router_common::BatchItemError::Unauthorized,
             RegistryError::InvalidConstraint => router_common::BatchItemError::InvalidMetadata,
+            // `InvalidHealthFn` and other variants are intentionally not
+            // listed here: `bulk_register` only invokes
+            // `validate_registration` and `register_entry`, never
+            // `register_with_check`, so these discriminants cannot be
+            // produced inside a batch and the catch-all is unreachable for
+            // them in practice. If a future code path on this contract can
+            // emit these errors during a bulk operation, add an explicit
+            // arm for it rather than relying on the catch-all.
             _ => router_common::BatchItemError::Custom(soroban_sdk::String::from_str(env, "Error")),
         }
     }
@@ -680,6 +744,22 @@ impl RouterRegistry {
         );
 
         Ok(())
+    }
+
+    /// Returns `true` when `fn_sym` is in the documented allow-list of
+    /// side-effect-free liveness-probe names accepted by
+    /// [`RouterRegistry::register_with_check`].
+    ///
+    /// Currently: `health` and `ping`. The allow-list is intentionally
+    /// small so that the registry cannot be coerced into invoking an
+    /// arbitrary — and potentially state-mutating — entry point on the
+    /// target contract via a misleading or accidental name (issue #828).
+    fn is_allowed_health_fn(env: &Env, fn_sym: &Symbol) -> bool {
+        // Dereference `&Symbol` to `Symbol` to compare `Symbol == Symbol`
+        // rather than `Symbol == &Symbol` — the latter requires
+        // `PartialEq<&Symbol>` which is not part of the documented surface
+        // for `soroban_sdk::Symbol` across SDK versions.
+        *fn_sym == Symbol::new(env, "health") || *fn_sym == Symbol::new(env, "ping")
     }
 
     fn require_admin(env: &Env, caller: &Address) -> Result<(), RegistryError> {
@@ -1626,11 +1706,23 @@ mod tests {
 
     #[contractimpl]
     impl MockHealthContract {
-        pub fn version(_env: Env) -> u32 {
-            1
-        }
-
         pub fn health(_env: Env) {}
+
+        pub fn ping(_env: Env) {}
+    }
+
+    /// A contract that *intentionally* does not implement the allow-listed
+    /// `health` / `ping` symbols, used to verify that an allow-listed
+    /// symbol returns `ContractUnreachable` (not `InvalidHealthFn`) when the
+    /// function is missing on the target.
+    #[contract]
+    pub struct MockNoHealthContract;
+
+    #[contractimpl]
+    impl MockNoHealthContract {
+        pub fn some_other_fn(_env: Env) -> u32 {
+            42
+        }
     }
 
     #[test]
@@ -1649,7 +1741,8 @@ mod tests {
         let (env, admin, client) = setup();
         let mock_id = env.register_contract(None, MockHealthContract);
         let name = String::from_str(&env, "oracle");
-        let health_fn = Symbol::new(&env, "version");
+        // `health` is in the allow-list and MockHealthContract implements it.
+        let health_fn = Symbol::new(&env, "health");
         let result = client.try_register_with_check(&admin, &name, &1, &mock_id, &Some(health_fn));
         assert_eq!(result, Ok(Ok(())));
         let entry = client.get(&name, &1);
@@ -1657,14 +1750,92 @@ mod tests {
     }
 
     #[test]
-    fn test_register_with_check_missing_health_fn_fails() {
+    fn test_register_with_check_ping_fn_succeeds() {
         let (env, admin, client) = setup();
         let mock_id = env.register_contract(None, MockHealthContract);
         let name = String::from_str(&env, "oracle");
-        let health_fn = Symbol::new(&env, "nonexistent");
+        // `ping` is in the allow-list and MockHealthContract implements it.
+        let health_fn = Symbol::new(&env, "ping");
+        let result = client.try_register_with_check(&admin, &name, &1, &mock_id, &Some(health_fn));
+        assert_eq!(result, Ok(Ok(())));
+        let entry = client.get(&name, &1);
+        assert_eq!(entry.address, mock_id);
+    }
+
+    #[test]
+    fn test_register_with_check_non_allowlisted_symbol_rejected() {
+        // Issue #828: arbitrary symbols must be rejected BEFORE any
+        // cross-contract call so they cannot trigger state-mutating entry
+        // points on the target during registration. The list below mixes
+        // plausible admin-toggle / increment function names (which on a
+        // hostile target contract WOULD mutate state) with arbitrary
+        // non-existent names (which test the same rejection path). The
+        // rejection happens pre-invocation, so the function does not need
+        // to actually exist on the target — we just need it to NOT be in
+        // the `health`/`ping` allow-list.
+        for sym_str in ["reset", "pause", "unpause", "increment", "nonexistent", "init"] {
+            let (env, admin, client) = setup();
+            let mock_id = env.register_contract(None, MockHealthContract);
+            let name = String::from_str(&env, "oracle");
+            let health_fn = Symbol::new(&env, sym_str);
+            let result =
+                client.try_register_with_check(&admin, &name, &1, &mock_id, &Some(health_fn));
+            assert_eq!(
+                result,
+                Err(Ok(RegistryError::InvalidHealthFn)),
+                "non-allow-listed symbol '{}' must be rejected",
+                sym_str
+            );
+            // Contract must NOT have been registered — the rejection happens
+            // before the entry is stored.
+            assert_eq!(client.try_get(&name, &1), Err(Ok(RegistryError::NotFound)));
+        }
+    }
+
+    #[test]
+    fn test_register_with_check_allowlisted_target_missing_fn_fails() {
+        // Allow-listed symbol whose target implementation is missing
+        // returns ContractUnreachable (after the allow-list check).
+        let (env, admin, client) = setup();
+        let mock_id = env.register_contract(None, MockNoHealthContract);
+        let name = String::from_str(&env, "oracle");
+        // `health` is allow-listed, but MockNoHealthContract does NOT
+        // implement it, so try_invoke_contract fails.
+        let health_fn = Symbol::new(&env, "health");
         let result = client.try_register_with_check(&admin, &name, &1, &mock_id, &Some(health_fn));
         assert_eq!(result, Err(Ok(RegistryError::ContractUnreachable)));
         assert_eq!(client.try_get(&name, &1), Err(Ok(RegistryError::NotFound)));
+    }
+
+    #[test]
+    fn test_register_with_check_unauthorized_fail_still_returns_unauthorized() {
+        // Admin-gating must run BEFORE the allow-list check so a
+        // non-admin cannot learn anything about the allow-list via
+        // differential error responses. We exercise both paths:
+        // (a) non-admin caller with an allow-listed symbol
+        // (b) non-admin caller with a non-allow-listed symbol
+        // Both must return Unauthorized and never InvalidHealthFn or
+        // ContractUnreachable — the admin check is the only gate that
+        // runs before everything else here.
+        for sym_str in ["health", "reset"] {
+            let (env, _admin, client) = setup();
+            let mock_id = env.register_contract(None, MockHealthContract);
+            let name = String::from_str(&env, "oracle");
+            let attacker = Address::generate(&env);
+            let result = client.try_register_with_check(
+                &attacker,
+                &name,
+                &1,
+                &mock_id,
+                &Some(Symbol::new(&env, sym_str)),
+            );
+            assert_eq!(
+                result,
+                Err(Ok(RegistryError::Unauthorized)),
+                "non-admin caller with symbol '{}' must see Unauthorized, not any allow-list error",
+                sym_str
+            );
+        }
     }
 
     // ── Issue #644: version constraint parsing edge cases ────────────────────
