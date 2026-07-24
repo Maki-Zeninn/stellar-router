@@ -100,6 +100,16 @@ pub struct CircuitBreakerState {
     pub is_half_open: bool,
 }
 
+/// Per-route state combining per-caller rate limits with the route's circuit
+/// breaker, stored under a single `DataKey::RouteCallState(route)` key.
+///
+/// `rate_limits` grows one entry per distinct caller that has ever invoked
+/// `pre_call` on a rate-limited route, with no TTL of its own. To bound this,
+/// `pre_call` lazily evicts entries whose rate-limit window has been idle for
+/// longer than `RATE_LIMIT_STALE_WINDOW_MULTIPLIER` × the route's configured
+/// `window_seconds` every time it loads this state, so long-idle callers don't
+/// permanently inflate the read/write cost of every other caller's calls on
+/// the route.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct RouteCallState {
@@ -108,6 +118,10 @@ pub struct RouteCallState {
     /// Route-level circuit breaker state
     pub circuit_breaker: CircuitBreakerState,
 }
+
+/// Multiplier applied to a route's `window_seconds` to decide when an idle
+/// caller's rate-limit entry is considered stale and safe to evict.
+const RATE_LIMIT_STALE_WINDOW_MULTIPLIER: u64 = 4;
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -316,7 +330,12 @@ impl RouterMiddleware {
                 return Err(MiddlewareError::RouteDisabled);
             }
 
-            let mut state_changed = false;
+            let mut state_changed = Self::prune_stale_rate_limits(
+                &env,
+                &mut route_call_state.rate_limits,
+                env.ledger().timestamp(),
+                config.window_seconds,
+            );
             if config.failure_threshold > 0 && route_call_state.circuit_breaker.is_open {
                 let now = env.ledger().timestamp();
                 let recovers = config.recovery_window_seconds > 0
@@ -1152,6 +1171,35 @@ impl RouterMiddleware {
         } else {
             Ok(true)
         }
+    }
+
+    /// Evicts entries from `rate_limits` whose window has been idle for
+    /// longer than `RATE_LIMIT_STALE_WINDOW_MULTIPLIER` × `base_window_seconds`,
+    /// bounding the map's growth to actively-rate-limited callers. Returns
+    /// `true` if any entry was removed (so the caller knows to persist the
+    /// pruned state).
+    fn prune_stale_rate_limits(
+        env: &Env,
+        rate_limits: &mut Map<Address, RateLimitState>,
+        now: u64,
+        base_window_seconds: u64,
+    ) -> bool {
+        let stale_after = base_window_seconds
+            .saturating_mul(RATE_LIMIT_STALE_WINDOW_MULTIPLIER)
+            .max(1);
+
+        let mut stale_callers: Vec<Address> = Vec::new(env);
+        for (caller, state) in rate_limits.iter() {
+            if now >= state.window_start.saturating_add(stale_after) {
+                stale_callers.push_back(caller);
+            }
+        }
+
+        for caller in stale_callers.iter() {
+            rate_limits.remove(caller);
+        }
+
+        !stale_callers.is_empty()
     }
 }
 
