@@ -120,12 +120,30 @@ impl RouterAccess {
             return Err(AccessError::RoleNotFound);
         }
 
+        Self::deactivate_role_grant(&env, &role, &target);
+
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROLE_REVOKED),),
+            (role, target),
+        );
+        Ok(())
+    }
+
+    /// Shared bookkeeping for deactivating a role grant: removes the
+    /// `HasRole` entry, decrements `RoleMemberCount` when the grant was
+    /// active, and removes `target`/`role` from the `RoleMembers` /
+    /// `AddressRoles` index vectors. Used by both `revoke_role` and
+    /// `expire_role` so storage stays consistent regardless of which path
+    /// deactivated the grant.
+    fn deactivate_role_grant(env: &Env, role: &String, target: &Address) {
         // Decrement active-member counter only if this grant was currently active.
         // (If the role is expired, it may still exist in HasRole but shouldn't be
         // counted as an active member.)
-        let was_active = Self::has_role_internal(&env, &target, &role);
+        let was_active = Self::has_role_internal(env, target, role);
 
-        env.storage().instance().remove(&key);
+        env.storage()
+            .instance()
+            .remove(&DataKey::HasRole(role.clone(), target.clone()));
 
         if was_active {
             let current: u32 = env
@@ -143,8 +161,8 @@ impl RouterAccess {
             .storage()
             .instance()
             .get(&DataKey::RoleMembers(role.clone()))
-            .unwrap_or_else(|| Vec::new(&env));
-        if let Some(i) = members.iter().position(|a| a == target) {
+            .unwrap_or_else(|| Vec::new(env));
+        if let Some(i) = members.iter().position(|a| a == *target) {
             members.remove(i as u32);
         }
         env.storage()
@@ -155,8 +173,8 @@ impl RouterAccess {
             .storage()
             .instance()
             .get(&DataKey::AddressRoles(target.clone()))
-            .unwrap_or_else(|| Vec::new(&env));
-        if let Some(i) = roles.iter().position(|r| r == role) {
+            .unwrap_or_else(|| Vec::new(env));
+        if let Some(i) = roles.iter().position(|r| r == *role) {
             roles.remove(i as u32);
         }
         env.storage()
@@ -168,7 +186,7 @@ impl RouterAccess {
             .remove(&DataKey::RoleExpiry(role.clone(), target.clone()));
 
         // Keep RoleMemberCount consistent for expiry-based removal.
-        if Self::has_role_internal(&env, &target, &role) {
+        if Self::has_role_internal(env, target, role) {
             let current: u32 = env
                 .storage()
                 .instance()
@@ -179,12 +197,6 @@ impl RouterAccess {
                 .instance()
                 .set(&DataKey::RoleMemberCount(role.clone()), &new_count);
         }
-
-        env.events().publish(
-            (Symbol::new(&env, router_common::EVENT_ROLE_REVOKED),),
-            (role, target),
-        );
-        Ok(())
     }
 
     /// Check if an address has a role (and it has not expired).
@@ -545,6 +557,9 @@ impl RouterAccess {
     ) -> Result<(), AccessError> {
         current.require_auth();
         Self::require_super_admin(&env, &current)?;
+        if Self::is_blacklisted_internal(&env, &new_admin) {
+            return Err(AccessError::Blacklisted);
+        }
         env.storage()
             .instance()
             .set(&DataKey::SuperAdmin, &new_admin);
@@ -570,12 +585,7 @@ impl RouterAccess {
     ) -> Result<(), AccessError> {
         caller.require_auth();
         Self::require_super_admin(&env, &caller)?;
-        env.storage()
-            .instance()
-            .remove(&DataKey::RoleExpiry(role.clone(), target.clone()));
-        env.storage()
-            .instance()
-            .remove(&DataKey::HasRole(role.clone(), target.clone()));
+        Self::deactivate_role_grant(&env, &role, &target);
         env.events().publish(
             (Symbol::new(&env, router_common::EVENT_ROLE_EXPIRED),),
             (role, target),
@@ -714,6 +724,9 @@ impl RouterAccess {
     }
 
     fn require_super_admin(env: &Env, caller: &Address) -> Result<(), AccessError> {
+        if Self::is_blacklisted_internal(env, caller) {
+            return Err(AccessError::Blacklisted);
+        }
         let admin: Address = env
             .storage()
             .instance()
