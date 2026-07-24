@@ -42,6 +42,8 @@ pub enum AccessError {
     CannotBlacklistAdmin = 7,
     DestinationAlreadyHasRole = 8,
     HierarchyCycle = 9,
+    InvalidExpiry = 10,
+    HierarchyTooDeep = 11,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -327,6 +329,13 @@ impl RouterAccess {
             return Err(AccessError::CannotBlacklistAdmin);
         }
 
+        // Decrement RoleMemberCount for every role the target currently holds
+        // actively (directly), since has_role_internal/get_role_members will
+        // stop counting them the moment they're blacklisted — must be read
+        // *before* the Blacklisted flag is set below, or has_direct_role_internal
+        // would already see them as inactive.
+        Self::adjust_role_member_counts_for_blacklist_change(&env, &target, false);
+
         env.storage()
             .instance()
             .set(&DataKey::Blacklisted(target.clone()), &true);
@@ -344,6 +353,13 @@ impl RouterAccess {
         env.storage()
             .instance()
             .remove(&DataKey::Blacklisted(target.clone()));
+
+        // Re-increment RoleMemberCount for every role the target still
+        // actively (directly, non-expired) holds now that the blacklist gate
+        // is lifted, keeping get_role_member_count in sync with
+        // get_role_members/has_role_internal.
+        Self::adjust_role_member_counts_for_blacklist_change(&env, &target, true);
+
         env.events().publish(
             (Symbol::new(
                 &env,
@@ -352,6 +368,35 @@ impl RouterAccess {
             target,
         );
         Ok(())
+    }
+
+    /// Adjusts `RoleMemberCount` for every role in `target`'s `AddressRoles`
+    /// list that it directly and actively (non-expired) holds, by +1 (when
+    /// `increment` is true, i.e. on unblacklist) or -1 (on blacklist).
+    fn adjust_role_member_counts_for_blacklist_change(env: &Env, target: &Address, increment: bool) {
+        let roles: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AddressRoles(target.clone()))
+            .unwrap_or_else(|| Vec::new(env));
+
+        for role in roles.iter() {
+            if Self::has_direct_role_internal(env, target, &role) {
+                let current: u32 = env
+                    .storage()
+                    .instance()
+                    .get::<DataKey, u32>(&DataKey::RoleMemberCount(role.clone()))
+                    .unwrap_or(0u32);
+                let new_count = if increment {
+                    current.saturating_add(1)
+                } else {
+                    current.saturating_sub(1)
+                };
+                env.storage()
+                    .instance()
+                    .set(&DataKey::RoleMemberCount(role.clone()), &new_count);
+            }
+        }
     }
 
     pub fn is_blacklisted(env: Env, target: Address) -> bool {
@@ -603,20 +648,34 @@ impl RouterAccess {
             AccessError::AlreadyHasRole => router_common::BatchItemError::AlreadyExists,
             AccessError::Unauthorized => router_common::BatchItemError::Unauthorized,
             AccessError::Blacklisted => router_common::BatchItemError::InvalidMetadata,
+            AccessError::InvalidExpiry => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "InvalidExpiry"),
+            ),
             _ => router_common::BatchItemError::Custom(soroban_sdk::String::from_str(env, "Error")),
         }
     }
 
+    /// Validates a prospective `role -> parent_role` edge: rejects it if it
+    /// would create a cycle, or if it would make the longest ancestor chain
+    /// reachable from `role` reach/exceed `MAX_HIERARCHY_DEPTH` — the same
+    /// bound `has_role_internal` enforces when walking up from a role, so a
+    /// chain accepted here is guaranteed to be fully walkable there.
     fn ensure_no_role_parent_cycle(
         env: &Env,
         role: &String,
         parent_role: &String,
     ) -> Result<(), AccessError> {
         let mut current = parent_role.clone();
+        // The role -> parent_role edge itself is depth 1.
+        let mut depth: u32 = 1;
 
         loop {
             if &current == role {
                 return Err(AccessError::HierarchyCycle);
+            }
+
+            if depth >= MAX_HIERARCHY_DEPTH {
+                return Err(AccessError::HierarchyTooDeep);
             }
 
             match env
@@ -624,7 +683,10 @@ impl RouterAccess {
                 .instance()
                 .get::<DataKey, String>(&DataKey::RoleParent(current.clone()))
             {
-                Some(parent) => current = parent,
+                Some(parent) => {
+                    current = parent;
+                    depth += 1;
+                }
                 None => return Ok(()),
             }
         }
@@ -657,7 +719,11 @@ impl RouterAccess {
                 .get::<DataKey, u64>(&DataKey::RoleExpiry(role.clone(), account.clone()));
 
             let requested_expiry = match expires_in {
-                Some(seconds) => env.ledger().timestamp() + seconds,
+                Some(seconds) => env
+                    .ledger()
+                    .timestamp()
+                    .checked_add(seconds)
+                    .ok_or(AccessError::InvalidExpiry)?,
                 None => u64::MAX,
             };
 
@@ -671,7 +737,11 @@ impl RouterAccess {
         Self::track_role_in_all_roles(env, role);
 
         let expiry_timestamp = match expires_in {
-            Some(seconds) => env.ledger().timestamp() + seconds,
+            Some(seconds) => env
+                .ledger()
+                .timestamp()
+                .checked_add(seconds)
+                .ok_or(AccessError::InvalidExpiry)?,
             None => u64::MAX,
         };
 
