@@ -72,12 +72,18 @@ pub fn handle_failure(
     }
 }
 
-/// Handle a success in `post_call`: close circuit if in half-open state,
-/// or reset failure count if failures exist.
-pub fn handle_success(route_call_state: &mut RouteCallState) {
+/// Handle a success in `post_call`: close circuit if in half-open state
+/// (emitting a `circuit_closed` event and clearing `opened_at`), or reset
+/// the failure count if failures exist.
+pub fn handle_success(env: &Env, route: &String, route_call_state: &mut RouteCallState) {
     if route_call_state.circuit_breaker.is_half_open {
         route_call_state.circuit_breaker.is_half_open = false;
         route_call_state.circuit_breaker.failure_count = 0;
+        route_call_state.circuit_breaker.opened_at = 0;
+        env.events().publish(
+            (Symbol::new(env, router_common::EVENT_CIRCUIT_CLOSED),),
+            route.clone(),
+        );
     } else if !route_call_state.circuit_breaker.is_open
         && route_call_state.circuit_breaker.failure_count > 0
     {
@@ -115,5 +121,150 @@ pub fn default_route_call_state(env: &Env) -> RouteCallState {
             is_open: false,
             is_half_open: false,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::RouterMiddleware;
+    use soroban_sdk::testutils::{Events, Ledger};
+    use soroban_sdk::IntoVal;
+
+    fn env_with_contract() -> (Env, soroban_sdk::Address) {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, RouterMiddleware);
+        (env, contract_id)
+    }
+
+    fn cfg(failure_threshold: u32, recovery_window_seconds: u64) -> RouteConfig {
+        RouteConfig {
+            max_calls_per_window: 0,
+            window_seconds: 0,
+            enabled: true,
+            failure_threshold,
+            recovery_window_seconds,
+            log_retention: 0,
+            burst_allowance: 0,
+        }
+    }
+
+    #[test]
+    fn handle_failure_opens_circuit_at_threshold() {
+        let (env, contract_id) = env_with_contract();
+        let route = String::from_str(&env, "route");
+        env.as_contract(&contract_id, || {
+            let mut state = default_route_call_state(&env);
+            let config = cfg(2, 60);
+            handle_failure(&env, &route, &config, &mut state);
+            assert!(!state.circuit_breaker.is_open);
+            assert_eq!(state.circuit_breaker.failure_count, 1);
+
+            handle_failure(&env, &route, &config, &mut state);
+            assert!(state.circuit_breaker.is_open);
+            assert_eq!(state.circuit_breaker.failure_count, 2);
+        });
+    }
+
+    #[test]
+    fn check_and_transition_blocks_while_open_and_recovery_window_not_elapsed() {
+        let (env, contract_id) = env_with_contract();
+        let route = String::from_str(&env, "route");
+        env.ledger().set_timestamp(1000);
+        env.as_contract(&contract_id, || {
+            let mut state = default_route_call_state(&env);
+            state.circuit_breaker.is_open = true;
+            state.circuit_breaker.opened_at = 1000;
+            let config = cfg(1, 60);
+
+            let blocked = check_and_transition(&env, &route, &config, &mut state);
+            assert!(blocked);
+            assert!(state.circuit_breaker.is_open);
+        });
+    }
+
+    #[test]
+    fn check_and_transition_moves_to_half_open_after_recovery_window() {
+        let (env, contract_id) = env_with_contract();
+        let route = String::from_str(&env, "route");
+        env.ledger().set_timestamp(1000);
+        env.as_contract(&contract_id, || {
+            let mut state = default_route_call_state(&env);
+            state.circuit_breaker.is_open = true;
+            state.circuit_breaker.opened_at = 1000;
+            let config = cfg(1, 60);
+
+            env.ledger().set_timestamp(1060);
+            let blocked = check_and_transition(&env, &route, &config, &mut state);
+            assert!(!blocked);
+            assert!(!state.circuit_breaker.is_open);
+            assert!(state.circuit_breaker.is_half_open);
+        });
+    }
+
+    #[test]
+    fn handle_success_closes_circuit_from_half_open_and_emits_event() {
+        let (env, contract_id) = env_with_contract();
+        let route = String::from_str(&env, "route");
+        env.as_contract(&contract_id, || {
+            let mut state = default_route_call_state(&env);
+            state.circuit_breaker.is_half_open = true;
+            state.circuit_breaker.opened_at = 500;
+            state.circuit_breaker.failure_count = 3;
+
+            handle_success(&env, &route, &mut state);
+
+            assert!(!state.circuit_breaker.is_half_open);
+            assert_eq!(state.circuit_breaker.failure_count, 0);
+            assert_eq!(state.circuit_breaker.opened_at, 0);
+        });
+
+        let events = env.events().all();
+        let expected_topic = Symbol::new(&env, router_common::EVENT_CIRCUIT_CLOSED);
+        let found = events.iter().any(|e| {
+            let topic: Symbol = e.1.get(0).unwrap().into_val(&env);
+            topic == expected_topic
+        });
+        assert!(found, "circuit_closed event must be emitted");
+    }
+
+    #[test]
+    fn reset_clears_open_circuit_back_to_closed() {
+        let (env, contract_id) = env_with_contract();
+        let route = String::from_str(&env, "route");
+        env.as_contract(&contract_id, || {
+            let mut state = default_route_call_state(&env);
+            state.circuit_breaker.is_open = true;
+            state.circuit_breaker.failure_count = 5;
+            state.circuit_breaker.opened_at = 42;
+            env.storage()
+                .instance()
+                .set(&DataKey::RouteCallState(route.clone()), &state);
+
+            reset(&env, &route);
+
+            let after: RouteCallState = env
+                .storage()
+                .instance()
+                .get(&DataKey::RouteCallState(route.clone()))
+                .unwrap();
+            assert!(!after.circuit_breaker.is_open);
+            assert_eq!(after.circuit_breaker.failure_count, 0);
+            assert_eq!(after.circuit_breaker.opened_at, 0);
+        });
+    }
+
+    #[test]
+    fn reset_is_noop_when_no_state_exists() {
+        let (env, contract_id) = env_with_contract();
+        let route = String::from_str(&env, "route");
+        env.as_contract(&contract_id, || {
+            reset(&env, &route);
+            assert!(env
+                .storage()
+                .instance()
+                .get::<DataKey, RouteCallState>(&DataKey::RouteCallState(route.clone()))
+                .is_none());
+        });
     }
 }
