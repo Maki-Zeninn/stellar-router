@@ -250,6 +250,8 @@ fn test_pipeline_execution_swap() {
         function: Symbol::new(&s.env, "swap"),
         simulate_first: false,
         max_retries: 1,
+        args: Vec::new(&s.env),
+        amount: 1_000_000,
     };
 
     // Execute (with mocked auth, this should succeed)
@@ -386,6 +388,8 @@ fn test_quote_to_execution_to_multicall_pipeline() {
         function: Symbol::new(&s.env, "swap"),
         simulate_first: false,
         max_retries: 1,
+        args: Vec::new(&s.env),
+        amount: 1_000_000,
     };
 
     let exec_result = s.execution.execute(&s.user, &exec_request)
