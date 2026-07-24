@@ -6,7 +6,11 @@
 //! attacker pick a fresh key per request and dodge the limit entirely, and
 //! would also let them grow `buckets` without bound.
 
-use std::{net::SocketAddr, sync::Arc, time::{Duration, Instant}};
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     body::Body,
@@ -123,8 +127,8 @@ struct RateLimitError {
 
 pub async fn rate_limit_middleware(
     State(state): State<crate::state::AppState>,
-    mut req: Request<Body>,
-    next: Next<Body>,
+    req: Request<Body>,
+    next: Next,
 ) -> Response {
     let remote_addr = req
         .extensions()
@@ -163,10 +167,7 @@ pub async fn rate_limit_middleware(
             )],
             Json(RateLimitError {
                 error: "rate_limit_exceeded",
-                message: format!(
-                    "Too many requests. Retry after {} second(s).",
-                    retry_after
-                ),
+                message: format!("Too many requests. Retry after {retry_after} second(s)."),
                 retry_after_secs: retry_after,
             }),
         )

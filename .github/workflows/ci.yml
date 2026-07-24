@@ -90,6 +90,9 @@ jobs:
     name: Dependency Audit (cargo-deny)
     runs-on: ubuntu-latest
     needs: test
+    strategy:
+      matrix:
+        manifest: [Cargo.toml, metrics/Cargo.toml, api-server/Cargo.toml]
     steps:
       - uses: actions/checkout@v4
 
@@ -97,6 +100,7 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories licenses bans
+          manifest-path: ${{ matrix.manifest }}
 
   build:
     name: Build WASM

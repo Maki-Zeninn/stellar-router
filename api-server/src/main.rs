@@ -22,11 +22,13 @@ use std::net::SocketAddr;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{info, info_span, warn, Instrument};
 
-
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::{rate_limit::{RateLimitConfig, RateLimiter}, state::AppState};
+use crate::{
+    rate_limit::{RateLimitConfig, RateLimiter},
+    state::AppState,
+};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -99,9 +101,6 @@ struct Args {
     rpc_timeout_secs: u64,
 }
 
-
-
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -131,8 +130,6 @@ async fn main() -> Result<()> {
         args.rpc_timeout_secs,
     );
 
-
-
     let cors = build_cors_layer(&args.cors_origins);
 
     let docs = SwaggerUi::new("/docs/{tail:.*}").url("/openapi.json", ApiDoc::openapi());
@@ -145,7 +142,10 @@ async fn main() -> Result<()> {
         .route("/ws", get(websocket::ws_handler))
         .route("/openapi.json", get(openapi_json))
         .merge(docs)
-        .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::rate_limit_middleware,
+        ))
         .layer(middleware::from_fn(request_id_middleware))
         .layer(cors)
         .layer(DefaultBodyLimit::max(1024 * 1024))

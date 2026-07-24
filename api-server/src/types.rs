@@ -164,7 +164,7 @@ pub struct TransactionStatusEvent {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum TransactionStatus {
     Pending,

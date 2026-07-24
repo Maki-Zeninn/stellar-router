@@ -7,8 +7,8 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
-use std::time::Duration;
 use std::collections::HashSet;
+use std::time::Duration;
 use tracing::{error, info, warn};
 
 use crate::{
@@ -42,8 +42,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let mut last_activity = tokio::time::Instant::now();
     let mut ping_ticker = tokio::time::interval(PING_INTERVAL);
     ping_ticker.tick().await; // consume the immediate first tick
-    // One receiver for the whole connection. Events for all subscriptions
-    // arrive on the same broadcast channel and are filtered by tx_id below.
+                              // One receiver for the whole connection. Events for all subscriptions
+                              // arrive on the same broadcast channel and are filtered by tx_id below.
     let mut rx = state.tx_status_tx.subscribe();
     let mut subscriptions: HashSet<String> = HashSet::new();
 

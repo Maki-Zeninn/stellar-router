@@ -9,6 +9,9 @@ jobs:
   audit:
     name: Cargo Audit & Deny
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        manifest: [Cargo.toml, metrics/Cargo.toml, api-server/Cargo.toml]
     steps:
       - uses: actions/checkout@v4
 
@@ -31,7 +34,7 @@ jobs:
         run: cargo install cargo-deny
 
       - name: Run cargo audit
-        run: cargo audit
+        run: cargo audit --file $(dirname ${{ matrix.manifest }})/Cargo.lock
 
       - name: Run cargo deny
-        run: cargo deny check
+        run: cargo deny check --manifest-path ${{ matrix.manifest }}

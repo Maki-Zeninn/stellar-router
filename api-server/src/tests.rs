@@ -35,7 +35,10 @@ fn test_app() -> Router {
         .route("/health", get(handlers::health))
         .route("/routes", get(handlers::list_routes))
         .route("/routes/:name", get(handlers::get_route))
-        .layer(middleware::from_fn(crate::rate_limit::rate_limit_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::rate_limit::rate_limit_middleware,
+        ))
         .with_state(state)
 }
 
@@ -53,7 +56,10 @@ fn test_app_with_core_contract() -> Router {
 
     Router::new()
         .route("/routes", get(handlers::list_routes))
-        .layer(middleware::from_fn(crate::rate_limit::rate_limit_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::rate_limit::rate_limit_middleware,
+        ))
         .with_state(state)
 }
 
@@ -196,20 +202,12 @@ async fn test_simulate_rate_limit_headers_and_rejects_after_limit() {
     };
 
     for _ in 0..100 {
-        let resp = app
-            .clone()
-            .oneshot(request())
-            .await
-            .unwrap();
+        let resp = app.clone().oneshot(request()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(resp.headers()["x-rate-limit-limit"], "100");
     }
 
-    let resp = app
-        .clone()
-        .oneshot(request())
-        .await
-        .unwrap();
+    let resp = app.clone().oneshot(request()).await.unwrap();
 
     assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     assert!(resp.headers().get("retry-after").is_some());
@@ -656,7 +654,10 @@ fn test_valid_subscribe_message_parses_correctly() {
 fn test_malformed_json_returns_parse_error() {
     let bad_json = "not valid json {{{{";
     let result: Result<crate::types::SubscribeMessage, _> = serde_json::from_str(bad_json);
-    assert!(result.is_err(), "malformed JSON must not parse successfully");
+    assert!(
+        result.is_err(),
+        "malformed JSON must not parse successfully"
+    );
 }
 
 /// An object that is valid JSON but missing required fields must also fail.
@@ -753,9 +754,7 @@ fn test_broadcast_channel_has_adequate_capacity() {
     // and that the channel is functional after creation.
     let state = ws_app_state();
     // Subscribing up to a representative number of simultaneous connections must not panic.
-    let _receivers: Vec<_> = (0..100)
-        .map(|_| state.tx_status_tx.subscribe())
-        .collect();
+    let _receivers: Vec<_> = (0..100).map(|_| state.tx_status_tx.subscribe()).collect();
     // All 100 subscriptions succeeded without panic — channel capacity is adequate.
 }
 

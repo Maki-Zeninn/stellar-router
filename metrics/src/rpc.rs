@@ -520,6 +520,7 @@ impl MockRpcClient {
         self
     }
 
+    #[allow(dead_code)]
     pub fn with_bool(mut self, contract: &str, func: &str, val: bool) -> Self {
         self.bool_responses
             .insert((contract.to_string(), func.to_string()), val);

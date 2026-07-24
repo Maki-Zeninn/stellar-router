@@ -15,6 +15,7 @@ use axum::{
 };
 use dashmap::DashMap;
 use std::env;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
@@ -66,6 +67,7 @@ struct NonceEntry {
 pub struct NonceCache {
     cache: Arc<DashMap<String, NonceEntry>>,
     config: ReplayProtectionConfig,
+    last_swept_at: Arc<AtomicU64>,
 }
 
 impl NonceCache {
@@ -74,6 +76,7 @@ impl NonceCache {
         NonceCache {
             cache: Arc::new(DashMap::new()),
             config,
+            last_swept_at: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -82,8 +85,10 @@ impl NonceCache {
     pub fn check_and_add(&self, nonce: &str) -> bool {
         let now = current_timestamp();
 
-        // Clean up expired nonces
-        self.cleanup_expired(now);
+        // Full-table cleanup is O(n); only run it at most once per sweep
+        // interval instead of on every request, otherwise every request on
+        // the hot path pays for a full DashMap scan/lock of every shard.
+        self.maybe_cleanup_expired(now);
 
         // Check if nonce already exists
         if self.cache.contains_key(nonce) {
@@ -102,6 +107,24 @@ impl NonceCache {
             .insert(nonce.to_string(), NonceEntry { timestamp: now });
 
         true
+    }
+
+    /// Run `cleanup_expired` only if at least one sweep interval has passed
+    /// since the last sweep, so concurrent requests don't each pay for a
+    /// full-table scan when nothing has expired yet.
+    fn maybe_cleanup_expired(&self, now: u64) {
+        let sweep_interval = (self.config.nonce_ttl_secs / 10).max(1);
+        let last = self.last_swept_at.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < sweep_interval {
+            return;
+        }
+        if self
+            .last_swept_at
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.cleanup_expired(now);
+        }
     }
 
     /// Clean up expired nonces from the cache.
