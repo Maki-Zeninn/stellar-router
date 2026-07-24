@@ -81,3 +81,92 @@ pub fn clear(env: &Env, route: &String) {
         .instance()
         .remove(&DataKey::CallLogSummary(route.clone()));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::RouterMiddleware;
+    use soroban_sdk::testutils::Address as _;
+
+    fn env_with_contract() -> (Env, soroban_sdk::Address) {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, RouterMiddleware);
+        (env, contract_id)
+    }
+
+    fn cfg(log_retention: u32) -> RouteConfig {
+        RouteConfig {
+            max_calls_per_window: 0,
+            window_seconds: 0,
+            enabled: true,
+            failure_threshold: 0,
+            recovery_window_seconds: 0,
+            log_retention,
+            burst_allowance: 0,
+        }
+    }
+
+    #[test]
+    fn append_is_noop_when_log_retention_zero() {
+        let (env, contract_id) = env_with_contract();
+        let caller = soroban_sdk::Address::generate(&env);
+        let route = String::from_str(&env, "route");
+        env.as_contract(&contract_id, || {
+            append(&env, &caller, &route, true, &cfg(0));
+            assert!(env
+                .storage()
+                .instance()
+                .get::<DataKey, CallLogState>(&DataKey::CallLog(route.clone()))
+                .is_none());
+            assert!(env
+                .storage()
+                .instance()
+                .get::<DataKey, CallLogSummary>(&DataKey::CallLogSummary(route.clone()))
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn append_updates_summary_counts() {
+        let (env, contract_id) = env_with_contract();
+        let caller = soroban_sdk::Address::generate(&env);
+        let route = String::from_str(&env, "route");
+        env.as_contract(&contract_id, || {
+            append(&env, &caller, &route, true, &cfg(5));
+            append(&env, &caller, &route, false, &cfg(5));
+            let summary: CallLogSummary = env
+                .storage()
+                .instance()
+                .get(&DataKey::CallLogSummary(route.clone()))
+                .unwrap();
+            assert_eq!(summary.total_calls, 2);
+            assert_eq!(summary.success_count, 1);
+            assert_eq!(summary.failure_count, 1);
+        });
+    }
+
+    #[test]
+    fn clear_removes_both_log_and_summary() {
+        // Regression test for issue #812: reset must not leave a stale
+        // CallLogSummary behind after the CallLog itself is cleared.
+        let (env, contract_id) = env_with_contract();
+        let caller = soroban_sdk::Address::generate(&env);
+        let route = String::from_str(&env, "route");
+        env.as_contract(&contract_id, || {
+            append(&env, &caller, &route, true, &cfg(5));
+            assert!(env
+                .storage()
+                .instance()
+                .has(&DataKey::CallLogSummary(route.clone())));
+            assert!(env.storage().instance().has(&DataKey::CallLog(route.clone())));
+
+            clear(&env, &route);
+
+            assert!(!env
+                .storage()
+                .instance()
+                .has(&DataKey::CallLogSummary(route.clone())));
+            assert!(!env.storage().instance().has(&DataKey::CallLog(route.clone())));
+        });
+    }
+}

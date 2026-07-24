@@ -1237,4 +1237,148 @@ mod tests {
         let (_, mult) = client.backoff_config();
         assert_eq!(mult, 10_000);
     }
+
+    // ── Issue #811: execute() success path coverage ──────────────────────────
+    //
+    // Every other `execute()` test drives the failure/exhaustion branch by
+    // calling an unregistered target. These tests register a lightweight
+    // in-process contract so `try_invoke_contract` returns `Ok(_)` and the
+    // success branch (~lines 370-385) is actually exercised.
+
+    #[contract]
+    pub struct MockTarget;
+
+    #[contractimpl]
+    impl MockTarget {
+        /// A trivial no-arg function that always succeeds.
+        pub fn ping(_env: Env) {}
+    }
+
+    #[contract]
+    pub struct FlakyTarget;
+
+    #[contractimpl]
+    impl FlakyTarget {
+        /// Fails on the first invocation, succeeds on every call after that.
+        /// Used to exercise the retry-then-succeed path of `execute()`.
+        pub fn ping(env: Env) {
+            let key = Symbol::new(&env, "calls");
+            let count: u32 = env.storage().instance().get(&key).unwrap_or(0);
+            env.storage().instance().set(&key, &(count + 1));
+            if count == 0 {
+                panic!("flaky: first call fails");
+            }
+        }
+    }
+
+    #[test]
+    fn test_execute_success_path() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockTarget);
+        let caller = Address::generate(&env);
+        let function = Symbol::new(&env, "ping");
+
+        let request = ExecutionRequest {
+            target: mock_id.clone(),
+            function: function.clone(),
+            simulate_first: false,
+            max_retries: 0,
+        };
+
+        let result = client.execute(&caller, &request);
+        assert!(result.success);
+        assert_eq!(result.attempts, 1);
+        assert_eq!(result.target, mock_id);
+        assert_eq!(result.function, function);
+        assert!(!result.simulated);
+
+        // TotalExecutions should have incremented; no errors recorded.
+        let (total_execs, total_errors) = client.stats();
+        assert_eq!(total_execs, 1);
+        assert_eq!(total_errors, 0);
+
+        // The new ExecutionRecord should be present in history, success=true.
+        let history = client.get_execution_history(&1);
+        assert_eq!(history.len(), 1);
+        let record = history.get(0).unwrap();
+        assert!(record.success);
+        assert_eq!(record.target, mock_id);
+        assert_eq!(record.function, function);
+
+        // An `execution_result` event should be present with the expected payload.
+        let all_events = env.events().all();
+        let exec_event = all_events
+            .iter()
+            .find(|e| {
+                let topic: Symbol = e.1.get(0).unwrap().into_val(&env);
+                topic == Symbol::new(&env, router_common::EVENT_EXECUTION_RESULT)
+            })
+            .expect("execution_result event not found");
+        let (evt_target, evt_function, evt_success, evt_attempts): (Address, Symbol, bool, u32) =
+            exec_event.2.into_val(&env);
+        assert_eq!(evt_target, mock_id);
+        assert_eq!(evt_function, function);
+        assert!(evt_success);
+        assert_eq!(evt_attempts, 1);
+    }
+
+    #[test]
+    fn test_execute_retry_then_succeeds() {
+        // setup() initializes with backoff_base_ms=500, backoff_multiplier=200 (2x).
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, FlakyTarget);
+        let caller = Address::generate(&env);
+        let function = Symbol::new(&env, "ping");
+
+        let request = ExecutionRequest {
+            target: mock_id.clone(),
+            function: function.clone(),
+            simulate_first: false,
+            max_retries: 2,
+        };
+
+        let result = client.execute(&caller, &request);
+        assert!(result.success);
+        // First attempt fails, second attempt (the retry) succeeds.
+        assert_eq!(result.attempts, 2);
+
+        let (total_execs, _) = client.stats();
+        assert_eq!(total_execs, 1);
+
+        let history = client.get_execution_history(&1);
+        assert_eq!(history.len(), 1);
+        assert!(history.get(0).unwrap().success);
+
+        let all_events = env.events().all();
+
+        // The failed first attempt should have emitted an `execution_retry` event
+        // carrying the computed backoff delay.
+        let retry_event = all_events
+            .iter()
+            .find(|e| {
+                let topic: Symbol = e.1.get(0).unwrap().into_val(&env);
+                topic == Symbol::new(&env, router_common::EVENT_EXECUTION_RETRY)
+            })
+            .expect("execution_retry event not found");
+        let (retry_target, retry_function, retry_attempts, delay_ms): (Address, Symbol, u32, u64) =
+            retry_event.2.into_val(&env);
+        assert_eq!(retry_target, mock_id);
+        assert_eq!(retry_function, function);
+        assert_eq!(retry_attempts, 1);
+        // attempt_index = attempts - 1 = 0 -> delay == backoff_base_ms unchanged.
+        assert_eq!(delay_ms, 500);
+
+        // The eventual success should still emit `execution_result` with attempts=2.
+        let exec_event = all_events
+            .iter()
+            .find(|e| {
+                let topic: Symbol = e.1.get(0).unwrap().into_val(&env);
+                topic == Symbol::new(&env, router_common::EVENT_EXECUTION_RESULT)
+            })
+            .expect("execution_result event not found");
+        let (_, _, evt_success, evt_attempts): (Address, Symbol, bool, u32) =
+            exec_event.2.into_val(&env);
+        assert!(evt_success);
+        assert_eq!(evt_attempts, 2);
+    }
 }
