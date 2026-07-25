@@ -105,7 +105,7 @@ cargo test -p router-metrics-exporter
 cargo test --test integration_tests -- --ignored --test-threads=1 --nocapture
 ```
 
-See [INTEGRATION_TESTS.md](INTEGRATION_TESTS.md) for full details.
+See [integration-tests/tests/README.md](integration-tests/tests/README.md) for full details.
 
 ### Build WASM artifacts
 

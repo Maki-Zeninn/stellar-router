@@ -220,7 +220,7 @@ Run integration tests on Stellar testnet:
 cargo test --test integration_tests -- --ignored --test-threads=1 --nocapture
 ```
 
-See [INTEGRATION_TESTS.md](INTEGRATION_TESTS.md) for detailed integration test documentation.
+See [integration-tests/tests/README.md](integration-tests/tests/README.md) for detailed integration test documentation.
 
 ### Build for Deployment (WASM)
 
