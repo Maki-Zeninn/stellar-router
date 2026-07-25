@@ -129,6 +129,7 @@ pub enum ResolveError {
     RouteNotFound,
     RoutePaused,
     NotInitialized,
+    RouteExpired,
 }
 
 /// Per-entry result returned by [`RouterCore::batch_resolve`].
@@ -1840,6 +1841,9 @@ impl RouterCore {
                 Err(RouterError::RoutePaused) => BatchResolveResult::Err(ResolveError::RoutePaused),
                 Err(RouterError::NotInitialized) => {
                     BatchResolveResult::Err(ResolveError::NotInitialized)
+                }
+                Err(RouterError::RouteExpired) => {
+                    BatchResolveResult::Err(ResolveError::RouteExpired)
                 }
                 Err(_) => BatchResolveResult::Err(ResolveError::RouteNotFound),
             };
