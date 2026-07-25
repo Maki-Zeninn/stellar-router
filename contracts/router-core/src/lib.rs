@@ -839,7 +839,7 @@ impl RouterCore {
 
         env.events().publish(
             (Symbol::new(&env, router_common::EVENT_ROUTED),),
-            (name.clone(), entry.address.clone()),
+            (final_name.clone(), entry.address.clone()),
         );
 
         Ok(entry.address)
