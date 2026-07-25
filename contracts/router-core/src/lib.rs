@@ -299,6 +299,17 @@ impl RouterCore {
             if meta.tags.len() > 5 {
                 return Err(RouterError::InvalidMetadata);
             }
+            for tag in meta.tags.iter() {
+                let tlen = tag.len() as usize;
+                if tlen == 0 {
+                    return Err(RouterError::InvalidMetadata);
+                }
+                let mut tbuf = [0u8; 256];
+                tag.copy_into_slice(&mut tbuf[..tlen]);
+                if tbuf[..tlen].iter().all(|&b| b == b' ') {
+                    return Err(RouterError::InvalidMetadata);
+                }
+            }
         }
 
         let entry = RouteEntry {
@@ -1111,6 +1122,17 @@ impl RouterCore {
             }
             if meta.tags.len() > 5 {
                 return Err(RouterError::InvalidMetadata);
+            }
+            for tag in meta.tags.iter() {
+                let tlen = tag.len() as usize;
+                if tlen == 0 {
+                    return Err(RouterError::InvalidMetadata);
+                }
+                let mut tbuf = [0u8; 256];
+                tag.copy_into_slice(&mut tbuf[..tlen]);
+                if tbuf[..tlen].iter().all(|&b| b == b' ') {
+                    return Err(RouterError::InvalidMetadata);
+                }
             }
         }
 
@@ -2150,6 +2172,17 @@ impl RouterCore {
     fn validate_metadata(meta: &RouteMetadata) -> Result<(), RouterError> {
         if meta.description.len() > 256 || meta.tags.len() > 5 {
             return Err(RouterError::InvalidMetadata);
+        }
+        for tag in meta.tags.iter() {
+            let tlen = tag.len() as usize;
+            if tlen == 0 {
+                return Err(RouterError::InvalidMetadata);
+            }
+            let mut tbuf = [0u8; 256];
+            tag.copy_into_slice(&mut tbuf[..tlen]);
+            if tbuf[..tlen].iter().all(|&b| b == b' ') {
+                return Err(RouterError::InvalidMetadata);
+            }
         }
         Ok(())
     }
