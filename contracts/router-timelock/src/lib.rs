@@ -83,6 +83,10 @@ pub enum TimelockError {
     CircularDependency = 11,
     /// Dependency chain exceeds maximum allowed depth.
     DependencyTooDeep = 12,
+    /// An operation with this exact (description, target, eta) already exists.
+    AlreadyQueued = 13,
+    /// A dependency of this operation has not yet been executed.
+    DependencyNotExecuted = 14,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -129,7 +133,7 @@ impl RouterTimelock {
         deps: Vec<Bytes>,
     ) -> Result<Bytes, TimelockError> {
         proposer.require_auth();
-        Self::require_admin(&env, &proposer)?;
+        router_common::require_admin_simple!(&env, &proposer, &DataKey::Admin, TimelockError)?;
 
         let min_delay: u64 = env
             .storage()
@@ -165,6 +169,14 @@ impl RouterTimelock {
         preimage.append(&Bytes::from_array(&env, &eta_bytes));
 
         let op_id: Bytes = env.crypto().sha256(&preimage).into();
+
+        // Reject if an operation with this exact id (description + target + eta)
+        // already exists, regardless of its current state — otherwise a
+        // re-submission with matching parameters would silently overwrite an
+        // already-executed/cancelled op back to pending.
+        if env.storage().instance().has(&DataKey::Op(op_id.clone())) {
+            return Err(TimelockError::AlreadyQueued);
+        }
 
         // Validate no circular dependencies
         for dep_id in deps.iter() {
@@ -208,7 +220,7 @@ impl RouterTimelock {
     /// Cancel a queued operation before it is executed.
     pub fn cancel(env: Env, caller: Address, op_id: Bytes) -> Result<(), TimelockError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, TimelockError)?;
 
         let mut op: Op = env
             .storage()
@@ -239,7 +251,7 @@ impl RouterTimelock {
     /// Returns `TimelockError::Expired` if called after `eta + grace_period_seconds`.
     pub fn execute(env: Env, caller: Address, op_id: Bytes) -> Result<(), TimelockError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, TimelockError)?;
 
         let mut op: Op = env
             .storage()
@@ -261,6 +273,8 @@ impl RouterTimelock {
         if now > op.eta + op.grace_period_seconds {
             return Err(TimelockError::Expired);
         }
+
+        Self::require_dependencies_executed(&env, &op_id)?;
 
         op.executed = true;
         env.storage()
@@ -290,7 +304,7 @@ impl RouterTimelock {
         new_description: String,
     ) -> Result<(), TimelockError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, TimelockError)?;
 
         let mut op: Op = env
             .storage()
@@ -561,7 +575,7 @@ impl RouterTimelock {
         new_min_delay: u64,
     ) -> Result<(), TimelockError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, TimelockError)?;
 
         let old_min_delay: u64 = env
             .storage()
@@ -599,7 +613,7 @@ impl RouterTimelock {
         new_admin: Address,
     ) -> Result<(), TimelockError> {
         current.require_auth();
-        Self::require_admin(&env, &current)?;
+        router_common::require_admin_simple!(&env, &current, &DataKey::Admin, TimelockError)?;
 
         env.storage().instance().set(&DataKey::Admin, &new_admin);
 
@@ -613,17 +627,7 @@ impl RouterTimelock {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    fn require_admin(env: &Env, caller: &Address) -> Result<(), TimelockError> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(TimelockError::NotInitialized)?;
-        if &admin != caller {
-            return Err(TimelockError::Unauthorized);
-        }
-        Ok(())
-    }
+
 
     fn require_op_pending(op: &Op) -> Result<(), TimelockError> {
         if op.cancelled {
@@ -662,6 +666,30 @@ impl RouterTimelock {
             .unwrap_or_else(|| Vec::new(env));
         for child_id in children.iter() {
             Self::check_dependency_depth(env, child_id, depth + 1)?;
+        }
+        Ok(())
+    }
+
+    /// Require that every dependency recorded for `op_id` (via `DataKey::Deps`)
+    /// has itself been executed. A dependency that doesn't exist as an `Op`
+    /// (or exists but hasn't executed yet) blocks execution.
+    fn require_dependencies_executed(env: &Env, op_id: &Bytes) -> Result<(), TimelockError> {
+        let deps: Vec<Bytes> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Deps(op_id.clone()))
+            .unwrap_or_else(|| Vec::new(env));
+
+        for dep_id in deps.iter() {
+            let dep_executed = env
+                .storage()
+                .instance()
+                .get::<DataKey, Op>(&DataKey::Op(dep_id))
+                .map(|dep_op| dep_op.executed)
+                .unwrap_or(false);
+            if !dep_executed {
+                return Err(TimelockError::DependencyNotExecuted);
+            }
         }
         Ok(())
     }
@@ -775,6 +803,39 @@ mod tests {
         assert_eq!(op.grace_period_seconds, custom_grace);
     }
 
+    // ── Issue #822: queue() op_id collision guard ────────────────────────────
+
+    #[test]
+    fn test_queue_rejects_op_id_collision_after_execution() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterTimelock);
+        let client = RouterTimelockClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &0, &1000); // min_delay = 0 for full control over eta
+
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "upgrade oracle");
+        let deps: Vec<Bytes> = Vec::new(&env);
+
+        let op_id = client.queue(&admin, &desc, &target, &0, &GRACE, &deps);
+        // delay is 0, so now == eta already; execute immediately.
+        client.execute(&admin, &op_id);
+        let op = client.get_op(&op_id).unwrap();
+        assert!(op.executed);
+
+        // Re-queue with identical description/target and a delay of 0 again.
+        // Since the ledger timestamp hasn't advanced, this reproduces the
+        // exact same (description, target, eta) triple and thus the same
+        // op_id — this must be rejected, not silently reset the already
+        // executed op back to pending.
+        let result = client.try_queue(&admin, &desc, &target, &0, &GRACE, &deps);
+        assert_eq!(result, Err(Ok(TimelockError::AlreadyQueued)));
+
+        let op_after = client.get_op(&op_id).unwrap();
+        assert!(op_after.executed);
+    }
+
     // ── execute ───────────────────────────────────────────────────────────────
 
     #[test]
@@ -802,6 +863,37 @@ mod tests {
 
         let op = client.get_op(&op_id).unwrap();
         assert!(op.executed);
+    }
+
+    // ── Issue #821: execute() enforces dependency completion ─────────────────
+
+    #[test]
+    fn test_execute_child_before_parent_executed_fails() {
+        let (env, admin, client) = setup();
+        let parent_target = Address::generate(&env);
+        let child_target = Address::generate(&env);
+        let parent_desc = String::from_str(&env, "register adapter");
+        let child_desc = String::from_str(&env, "upgrade adapter");
+        let no_deps: Vec<Bytes> = Vec::new(&env);
+
+        let parent_id = client.queue(&admin, &parent_desc, &parent_target, &3600, &GRACE, &no_deps);
+
+        let mut deps = Vec::new(&env);
+        deps.push_back(parent_id.clone());
+        let child_id = client.queue(&admin, &child_desc, &child_target, &3600, &GRACE, &deps);
+
+        env.ledger().with_mut(|l| l.timestamp += 3601);
+
+        // Child cannot execute before its dependency (parent) has executed.
+        let result = client.try_execute(&admin, &child_id);
+        assert_eq!(result, Err(Ok(TimelockError::DependencyNotExecuted)));
+
+        // Once the parent executes, the child can execute too.
+        client.execute(&admin, &parent_id);
+        client.execute(&admin, &child_id);
+
+        let child_op = client.get_op(&child_id).unwrap();
+        assert!(child_op.executed);
     }
 
     #[test]

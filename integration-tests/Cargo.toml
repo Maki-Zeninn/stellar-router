@@ -14,4 +14,13 @@ path = "tests/integration_tests.rs"
 # No runtime dependencies needed - tests use stellar CLI
 
 [dev-dependencies]
-# Tests are self-contained and use stellar CLI via Command
+# Local integration tests require soroban-sdk and contract crates
+soroban-sdk = { version = "21.7.6", features = ["testutils"] }
+router-core = { path = "../contracts/router-core" }
+router-registry = { path = "../contracts/router-registry" }
+router-access = { path = "../contracts/router-access" }
+router-middleware = { path = "../contracts/router-middleware" }
+router-timelock = { path = "../contracts/router-timelock" }
+router-multicall = { path = "../contracts/router-multicall" }
+router-quote = { path = "../contracts/router-quote" }
+router-execution = { path = "../contracts/router-execution" }

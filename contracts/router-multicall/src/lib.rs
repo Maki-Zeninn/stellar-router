@@ -32,6 +32,21 @@ pub enum DataKey {
     BatchResult(u64, u32), // (batch_id, call_index) -> CallResult
 }
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+/// Maximum number of arguments allowed per [`CallDescriptor`].
+///
+/// Prevents callers from passing unbounded argument vectors that would bloat
+/// ledger entries and exhaust the transaction's instruction budget before the
+/// call even executes.
+const MAX_ARGS_PER_CALL: u32 = 20;
+/// Maximum number of batch results to keep in instance storage.
+///
+/// When `store_results` is `true` and the total batch count exceeds this
+/// threshold, results from the oldest batch (`batch_id - MAX_STORED_BATCHES`)
+/// are removed to prevent unbounded ledger growth.
+const MAX_STORED_BATCHES: u64 = 50;
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /// A single call descriptor in a batch.
@@ -86,6 +101,8 @@ pub enum MulticallError {
     InvalidConfig = 7,
     Reentrancy = 8,
     GasLimitExceeded = 9,
+    /// A single [`CallDescriptor`]'s `args` vector exceeds [`MAX_ARGS_PER_CALL`].
+    ArgsTooLarge = 10,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -233,6 +250,14 @@ impl RouterMulticall {
             }
         }
 
+        // Validate args length for each call before executing any of them.
+        for call in calls.iter() {
+            if call.args.len() > MAX_ARGS_PER_CALL {
+                env.storage().instance().remove(&DataKey::Executing);
+                return Err(MulticallError::ArgsTooLarge);
+            }
+        }
+
         let batch_id: u64 = env
             .storage()
             .instance()
@@ -270,7 +295,7 @@ impl RouterMulticall {
                 result.record_failure(call_index, failure_error);
             }
 
-            if store_results {
+            if store_results && !simulate {
                 env.storage().instance().set(
                     &DataKey::BatchResult(batch_id, call_index),
                     &router_common::CallResult {
@@ -305,9 +330,20 @@ impl RouterMulticall {
         }
 
         if !simulate {
+            let new_batch_id = batch_id + 1;
             env.storage()
                 .instance()
-                .set(&DataKey::TotalBatches, &(batch_id + 1));
+                .set(&DataKey::TotalBatches, &new_batch_id);
+
+            // Prune stale batch results to prevent unbounded ledger growth.
+            if store_results && new_batch_id > MAX_STORED_BATCHES {
+                let stale_id = new_batch_id - MAX_STORED_BATCHES - 1;
+                for i in 0..max {
+                    env.storage()
+                        .instance()
+                        .remove(&DataKey::BatchResult(stale_id, i));
+                }
+            }
         }
 
         env.storage().instance().remove(&DataKey::Executing);

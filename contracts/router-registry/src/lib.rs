@@ -135,7 +135,7 @@ impl RouterRegistry {
         version: u32,
     ) -> Result<(), RegistryError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RegistryError)?;
         Self::register_entry(&env, &caller, name, address, version)
     }
 
@@ -197,7 +197,7 @@ impl RouterRegistry {
         health_fn: Option<Symbol>,
     ) -> Result<(), RegistryError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RegistryError)?;
 
         if let Some(fn_sym) = health_fn {
             // SECURITY (issue #828): `try_invoke_contract` is a real
@@ -231,7 +231,7 @@ impl RouterRegistry {
         fail_fast: bool,
     ) -> Result<router_common::BatchResult, RegistryError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RegistryError)?;
         let mut result = router_common::BatchResult::new(&env);
 
         if fail_fast {
@@ -442,7 +442,7 @@ impl RouterRegistry {
         reason: Option<String>,
     ) -> Result<(), RegistryError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RegistryError)?;
         Self::deprecate_one(&env, name, version, reason)
     }
 
@@ -456,7 +456,7 @@ impl RouterRegistry {
         reason: Option<String>,
     ) -> Result<(), RegistryError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RegistryError)?;
         let versions = Self::get_versions_list(&env, &name);
         if versions.is_empty() {
             return Err(RegistryError::NotFound);
@@ -503,7 +503,7 @@ impl RouterRegistry {
         fail_fast: bool,
     ) -> Result<router_common::BatchResult, RegistryError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RegistryError)?;
         let mut result = router_common::BatchResult::new(&env);
         for (index, (name, version)) in entries.iter().enumerate() {
             let idx = index as u32;
@@ -542,7 +542,7 @@ impl RouterRegistry {
         new_admin: Address,
     ) -> Result<(), RegistryError> {
         current.require_auth();
-        Self::require_admin(&env, &current)?;
+        router_common::require_admin_simple!(&env, &current, &DataKey::Admin, RegistryError)?;
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         env.events().publish(
             (Symbol::new(&env, router_common::EVENT_ADMIN_TRANSFERRED),),
@@ -665,15 +665,30 @@ impl RouterRegistry {
             RegistryError::InvalidVersion => router_common::BatchItemError::InvalidName,
             RegistryError::Unauthorized => router_common::BatchItemError::Unauthorized,
             RegistryError::InvalidConstraint => router_common::BatchItemError::InvalidMetadata,
-            // `InvalidHealthFn` and other variants are intentionally not
-            // listed here: `bulk_register` only invokes
-            // `validate_registration` and `register_entry`, never
-            // `register_with_check`, so these discriminants cannot be
-            // produced inside a batch and the catch-all is unreachable for
-            // them in practice. If a future code path on this contract can
-            // emit these errors during a bulk operation, add an explicit
-            // arm for it rather than relying on the catch-all.
-            _ => router_common::BatchItemError::Custom(soroban_sdk::String::from_str(env, "Error")),
+            RegistryError::NotInitialized => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "NotInitialized"),
+            ),
+            RegistryError::AlreadyInitialized => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "AlreadyInitialized"),
+            ),
+            RegistryError::NotFound => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "NotFound"),
+            ),
+            RegistryError::AlreadyDeprecated => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "AlreadyDeprecated"),
+            ),
+            RegistryError::VersionNotFound => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "VersionNotFound"),
+            ),
+            RegistryError::AllVersionsDeprecated => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "AllVersionsDeprecated"),
+            ),
+            RegistryError::ContractUnreachable => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "ContractUnreachable"),
+            ),
+            RegistryError::InvalidHealthFn => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "InvalidHealthFn"),
+            ),
         }
     }
 
@@ -765,13 +780,7 @@ impl RouterRegistry {
         *fn_sym == Symbol::new(env, "health") || *fn_sym == Symbol::new(env, "ping")
     }
 
-    fn require_admin(env: &Env, caller: &Address) -> Result<(), RegistryError> {
-        let admin = Self::admin(env.clone())?;
-        if &admin != caller {
-            return Err(RegistryError::Unauthorized);
-        }
-        Ok(())
-    }
+
 
     fn get_versions_list(env: &Env, name: &String) -> Vec<u32> {
         env.storage()
@@ -1192,12 +1201,12 @@ mod tests {
         assert_eq!(results.failures.get(0).unwrap().index, 1);
         assert_eq!(
             results.failures.get(0).unwrap().error,
-            router_common::BatchItemError::Custom(String::from_str(&env, "Error"))
+            router_common::BatchItemError::Custom(String::from_str(&env, "VersionNotFound"))
         );
         assert_eq!(results.failures.get(1).unwrap().index, 2);
         assert_eq!(
             results.failures.get(1).unwrap().error,
-            router_common::BatchItemError::Custom(String::from_str(&env, "Error"))
+            router_common::BatchItemError::Custom(String::from_str(&env, "AlreadyDeprecated"))
         );
     }
 

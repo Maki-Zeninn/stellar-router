@@ -133,6 +133,39 @@ jobs:
           path: target/wasm32-unknown-unknown/release/*.wasm
           retention-days: 7
 
+  local-integration-tests:
+    name: Local Integration Tests (In-Process)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # These three test binaries were previously never executed by CI because
+      # all workflows scoped to --test integration_tests only. They run entirely
+      # in-process using soroban_sdk::Env with no network access required.
+      - name: Run cross_contract_tests
+        run: cargo test --manifest-path integration-tests/Cargo.toml --test cross_contract_tests
+
+      - name: Run failure_scenarios
+        run: cargo test --manifest-path integration-tests/Cargo.toml --test failure_scenarios
+
+      - name: Run quote_execution_multicall_pipeline
+        run: cargo test --manifest-path integration-tests/Cargo.toml --test quote_execution_multicall_pipeline
+
   integration-test:
     name: Integration Tests (Testnet)
     runs-on: ubuntu-latest

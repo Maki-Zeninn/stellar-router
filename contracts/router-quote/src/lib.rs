@@ -85,9 +85,19 @@ pub enum QuoteError {
     NoQuotesProvided = 6,
     RouteNotFound = 7,
     ArithmeticOverflow = 8,
+    /// The configured-routes index has reached [`MAX_TRACKED_ROUTES`]; cannot add more.
+    TooManyRoutes = 9,
+    /// A [`FeeTier`] has an invalid `min_amount` (e.g. negative).
+    InvalidFeeTier = 9,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
+
+/// Maximum number of routes that can be tracked in the configured-routes index.
+///
+/// `track_configured_route` returns [`QuoteError::TooManyRoutes`] once this
+/// limit is reached to prevent unbounded storage growth.
+const MAX_TRACKED_ROUTES: u32 = 500;
 
 #[contract]
 pub struct RouterQuote;
@@ -156,13 +166,13 @@ impl RouterQuote {
         fee_bps: u32,
     ) -> Result<(), QuoteError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, QuoteError)?;
 
         if fee_bps > 10000 {
             return Err(QuoteError::InvalidFeeBps);
         }
 
-        Self::track_configured_route(&env, &route);
+        Self::track_configured_route(&env, &route)?;
 
         env.storage()
             .instance()
@@ -224,10 +234,13 @@ impl RouterQuote {
         tiers: Vec<FeeTier>,
     ) -> Result<(), QuoteError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, QuoteError)?;
 
         let mut sorted_tiers: Vec<FeeTier> = Vec::new(&env);
         for tier in tiers.iter() {
+            if tier.min_amount < 0 {
+                return Err(QuoteError::InvalidFeeTier);
+            }
             if tier.fee_bps > 10000 {
                 return Err(QuoteError::InvalidFeeBps);
             }
@@ -243,10 +256,15 @@ impl RouterQuote {
             sorted_tiers.insert(position, tier.clone());
         }
 
-        Self::track_configured_route(&env, &route);
+        Self::track_configured_route(&env, &route)?;
         env.storage()
             .instance()
             .set(&DataKey::RouteFeeTiers(route.clone()), &sorted_tiers);
+
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROUTE_FEE_TIERS_SET),),
+            (route, sorted_tiers),
+        );
 
         Ok(())
     }
@@ -489,7 +507,7 @@ impl RouterQuote {
     /// * [`QuoteError::InvalidFeeBps`] — if fee_bps > 10000.
     pub fn set_default_fee(env: Env, caller: Address, fee_bps: u32) -> Result<(), QuoteError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, QuoteError)?;
 
         if fee_bps > 10000 {
             return Err(QuoteError::InvalidFeeBps);
@@ -562,7 +580,7 @@ impl RouterQuote {
         new_admin: Address,
     ) -> Result<(), QuoteError> {
         current.require_auth();
-        Self::require_admin(&env, &current)?;
+        router_common::require_admin_simple!(&env, &current, &DataKey::Admin, QuoteError)?;
         env.storage().instance().set(&DataKey::Admin, &new_admin);
 
         env.events().publish(
@@ -575,13 +593,7 @@ impl RouterQuote {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    fn require_admin(env: &Env, caller: &Address) -> Result<(), QuoteError> {
-        let admin = Self::admin(env.clone())?;
-        if &admin != caller {
-            return Err(QuoteError::Unauthorized);
-        }
-        Ok(())
-    }
+
 
     fn read_configured_routes(env: &Env) -> Vec<String> {
         env.storage()
@@ -596,12 +608,16 @@ impl RouterQuote {
             .set(&DataKey::ConfiguredRoutes, routes);
     }
 
-    fn track_configured_route(env: &Env, route: &String) {
+    fn track_configured_route(env: &Env, route: &String) -> Result<(), QuoteError> {
         let mut routes = Self::read_configured_routes(env);
         if !routes.contains(route) {
+            if routes.len() >= MAX_TRACKED_ROUTES {
+                return Err(QuoteError::TooManyRoutes);
+            }
             routes.push_back(route.clone());
             Self::write_configured_routes(env, &routes);
         }
+        Ok(())
     }
 
     fn resolve_route_fee_bps(env: Env, route: String, amount_in: i128) -> Result<u32, QuoteError> {
