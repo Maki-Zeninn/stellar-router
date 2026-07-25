@@ -176,6 +176,42 @@ impl RouterQuote {
         Ok(())
     }
 
+    /// Remove the custom fee for a specific route, reverting it to the default fee.
+    ///
+    /// After this call, `get_route_fee` for this route returns the contract's
+    /// default fee. If no custom fee was set for this route, this is a no-op
+    /// (the route continues using the default fee). Caller must be the admin.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `caller` - The address initiating the call; must be the admin.
+    /// * `route` - The route name whose custom fee should be removed.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`QuoteError::Unauthorized`] — if caller is not the admin.
+    pub fn unset_route_fee(
+        env: Env,
+        caller: Address,
+        route: String,
+    ) -> Result<(), QuoteError> {
+        caller.require_auth();
+        Self::require_admin(&env, &caller)?;
+
+        env.storage()
+            .instance()
+            .remove(&DataKey::RouteFee(route.clone()));
+
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROUTE_FEE_UNSET),),
+            route,
+        );
+
+        Ok(())
+    }
+
     /// Set tiered fees for a specific route.
     ///
     /// The tiers are sorted by `min_amount` ascending and are used to select

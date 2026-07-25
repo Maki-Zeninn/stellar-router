@@ -205,6 +205,9 @@ pub const EVENT_INITIALIZED: &str = "initialized";
 /// Standard event topic for per-route fee configuration
 pub const EVENT_ROUTE_FEE_SET: &str = "route_fee_set";
 
+/// Standard event topic for removing a custom per-route fee (reverts to default)
+pub const EVENT_ROUTE_FEE_UNSET: &str = "route_fee_unset";
+
 /// Standard event topic for a quote being calculated
 pub const EVENT_QUOTE_CALCULATED: &str = "quote_calculated";
 
