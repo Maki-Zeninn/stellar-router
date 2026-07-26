@@ -91,6 +91,15 @@ pub enum QuoteError {
     InvalidFeeTier = 9,
 }
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+/// Basis-points denominator: 10000 bps = 100%.
+///
+/// Used in every fee validation (`fee_bps > BPS_DENOMINATOR`) and in the
+/// fee calculation (`fee_amount = amount_in * fee_bps / BPS_DENOMINATOR`).
+/// A single source of truth prevents the literal from diverging across sites.
+const BPS_DENOMINATOR: u32 = 10_000;
+
 // ── Contract ──────────────────────────────────────────────────────────────────
 
 /// Maximum number of routes that can be tracked in the configured-routes index.
@@ -125,7 +134,7 @@ impl RouterQuote {
             return Err(QuoteError::AlreadyInitialized);
         }
 
-        if default_fee_bps > 10000 {
+        if default_fee_bps > BPS_DENOMINATOR {
             return Err(QuoteError::InvalidFeeBps);
         }
 
@@ -168,7 +177,7 @@ impl RouterQuote {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, QuoteError)?;
 
-        if fee_bps > 10000 {
+        if fee_bps > BPS_DENOMINATOR {
             return Err(QuoteError::InvalidFeeBps);
         }
 
@@ -241,7 +250,7 @@ impl RouterQuote {
             if tier.min_amount < 0 {
                 return Err(QuoteError::InvalidFeeTier);
             }
-            if tier.fee_bps > 10000 {
+            if tier.fee_bps > BPS_DENOMINATOR {
                 return Err(QuoteError::InvalidFeeBps);
             }
 
@@ -346,11 +355,11 @@ impl RouterQuote {
         let fee_bps =
             Self::resolve_route_fee_bps(env.clone(), request.route.clone(), request.amount_in)?;
 
-        // Calculate fee: fee_amount = amount_in * fee_bps / 10000
+        // Calculate fee: fee_amount = amount_in * fee_bps / BPS_DENOMINATOR
         let fee_amount = request
             .amount_in
             .checked_mul(fee_bps as i128)
-            .and_then(|v| v.checked_div(10000))
+            .and_then(|v| v.checked_div(BPS_DENOMINATOR as i128))
             .ok_or(QuoteError::ArithmeticOverflow)?;
 
         // Calculate output: amount_out = amount_in - fee_amount
@@ -509,7 +518,7 @@ impl RouterQuote {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, QuoteError)?;
 
-        if fee_bps > 10000 {
+        if fee_bps > BPS_DENOMINATOR {
             return Err(QuoteError::InvalidFeeBps);
         }
 
