@@ -20,6 +20,9 @@
 //!   `surge_pricing`/`high_load` here reflect only the caller's own asserted load
 //!   hint (see `estimate_fee`), not a verified on-chain network-congestion signal.
 //! - `simulation_result` — Pre-execution simulation result (target, function, success)
+//! - `execution_retry` — Retry attempt following a transient network error (target, function, attempts, delay_ms)
+//! - `execution_error` — Execution error logged (target, function, error_code, attempts)
+//! - `admin_transferred` — Admin transferred to a new address (previous_admin, new_admin)
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
