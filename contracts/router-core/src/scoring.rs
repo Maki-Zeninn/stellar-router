@@ -6,7 +6,7 @@
 
 use soroban_sdk::{Env, String, Symbol};
 
-use crate::{is_route_expired, DataKey, RouteEntry, RouteScore};
+use crate::{is_route_expired, DataKey, RouteEntry, RouteScore, ScoringWeights};
 
 /// Recompute and cache the highest-scoring, non-paused route.
 ///
@@ -14,6 +14,12 @@ use crate::{is_route_expired, DataKey, RouteEntry, RouteScore};
 /// [`DataKey::BestRoute`] (or removes the key when no scored, non-paused
 /// route exists). Called from every write path that can change the outcome:
 /// scoring, pausing, and route removal.
+///
+/// The composite formula uses configurable weights stored under
+/// [`DataKey::ScoringWeights`]:
+/// `liquidity_weight * liquidity_score + reliability_weight * reliability_score - fee_bps / fee_divisor`
+///
+/// Falls back to `(1, 1, 10)` when no weights have been explicitly set.
 pub fn recompute_best_route(env: &Env) {
     let names: soroban_sdk::Vec<String> = env
         .storage()
@@ -23,6 +29,17 @@ pub fn recompute_best_route(env: &Env) {
 
     let mut best_name: Option<String> = None;
     let mut best_score: i64 = i64::MIN;
+
+    // Load configurable weights (falls back to defaults when not set).
+    let weights: ScoringWeights = env
+        .storage()
+        .instance()
+        .get::<DataKey, ScoringWeights>(&DataKey::ScoringWeights)
+        .unwrap_or(ScoringWeights {
+            liquidity_weight: 1,
+            reliability_weight: 1,
+            fee_divisor: 10,
+        });
 
     for name in names.iter() {
         // Skip missing, paused, or expired routes
@@ -41,9 +58,13 @@ pub fn recompute_best_route(env: &Env) {
             None => continue,
         };
 
-        // Composite score: liquidity + reliability - fee_bps/10
-        let composite: i64 = score.liquidity_score as i64 + score.reliability_score as i64
-            - (score.fee_bps as i64 / 10);
+        // Composite score using configurable weights:
+        //   liquidity_weight * liquidity_score
+        // + reliability_weight * reliability_score
+        // - fee_bps / fee_divisor
+        let composite: i64 = weights.liquidity_weight * (score.liquidity_score as i64)
+            + weights.reliability_weight * (score.reliability_score as i64)
+            - (score.fee_bps as i64 / weights.fee_divisor);
 
         if composite > best_score {
             best_score = composite;

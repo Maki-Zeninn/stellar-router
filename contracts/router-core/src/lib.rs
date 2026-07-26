@@ -57,6 +57,9 @@ pub enum DataKey {
     Metadata(String),     // name -> RouteMetadata (stored separately; avoids nested contracttype)
     Dependencies(String), // name -> Vec<String> of direct dependencies
     BestRoute,            // cached name of the highest-scoring non-paused route, if any
+
+    /// Configurable weights used by the composite scoring formula.
+    ScoringWeights,
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -105,7 +108,7 @@ pub struct RouteScoreInput {
 /// Scoring attributes for a route used in path selection.
 ///
 /// Higher scores indicate more preferred routes. The composite score is
-/// computed as: `liquidity_score + reliability_score - fee_bps / 10`.
+/// computed as: `liquidity_weight * liquidity_score + reliability_weight * reliability_score - fee_bps / fee_divisor`.
 /// All fields are set by the admin and reflect off-chain measurements.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -116,6 +119,25 @@ pub struct RouteScore {
     pub fee_bps: u32,
     /// Historical reliability score (0–100). Higher = more reliable.
     pub reliability_score: u32,
+}
+
+/// Configurable weights for the composite route-scoring formula.
+///
+/// The composite score is:
+/// `liquidity_weight * liquidity_score + reliability_weight * reliability_score - fee_bps / fee_divisor`
+///
+/// Stored under [`DataKey::ScoringWeights`] and set by an admin via
+/// [`RouterCore::set_scoring_weights`].  When no weights have been configured
+/// the system falls back to `DEFAULT_SCORING_WEIGHTS`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScoringWeights {
+    /// Multiplier applied to `liquidity_score`. Default: 1.
+    pub liquidity_weight: i64,
+    /// Multiplier applied to `reliability_score`. Default: 1.
+    pub reliability_weight: i64,
+    /// Divisor applied to `fee_bps` (must be > 0). Default: 10.
+    pub fee_divisor: i64,
 }
 
 /// Resolution-specific errors returned by [`RouterCore::batch_resolve`].
@@ -183,6 +205,8 @@ pub enum RouterError {
     InvalidScore = 14,
     InvalidTtlExtension = 15,
     RecursionLimitExceeded = 15,
+    /// `fee_divisor` must be positive (> 0) when configuring scoring weights.
+    InvalidScoringWeights = 16,
 }
 
 /// Maximum allowed recursion depth for dependency resolution.
@@ -1624,6 +1648,57 @@ impl RouterCore {
             .get::<DataKey, String>(&DataKey::Alias(alias_name))
     }
 
+    /// Configure the weights used in the composite route-scoring formula.
+    ///
+    /// The composite score is computed as:
+    /// `liquidity_weight * liquidity_score + reliability_weight * reliability_score - fee_bps / fee_divisor`
+    ///
+    /// Stored persistently so the formula adapts to different deployment
+    /// scenarios (e.g. fee-sensitive vs. reliability-sensitive) without
+    /// redeploying the contract.
+    ///
+    /// # Arguments
+    /// * `env`                - The Soroban environment.
+    /// * `caller`             - Must be the admin.
+    /// * `weights`            - The [`ScoringWeights`] to persist.
+    ///
+    /// # Errors
+    /// * [`RouterError::Unauthorized`]          — if `caller` is not the admin.
+    /// * [`RouterError::NotInitialized`]        — if the contract is not initialized.
+    /// * [`RouterError::InvalidScoringWeights`] — if `fee_divisor` is ≤ 0 or any
+    ///   weight is negative.
+    pub fn set_scoring_weights(
+        env: Env,
+        caller: Address,
+        weights: ScoringWeights,
+    ) -> Result<(), RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
+
+        if weights.fee_divisor <= 0 || weights.liquidity_weight < 0 || weights.reliability_weight < 0 {
+            return Err(RouterError::InvalidScoringWeights);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ScoringWeights, &weights);
+
+        // Re-rank routes using the new weights.
+        Self::recompute_best_route(&env);
+
+        Ok(())
+    }
+
+    /// Return the currently configured [`ScoringWeights`].
+    ///
+    /// Falls back to `(liquidity_weight=1, reliability_weight=1, fee_divisor=10)`
+    /// when no weights have been explicitly set via [`set_scoring_weights`].
+    pub fn get_scoring_weights(env: Env) -> ScoringWeights {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+        Self::scoring_weights_internal(&env)
+    }
+
     /// Set or update the scoring attributes for a route.
     ///
     /// Scores are used by [`get_best_route`] to select the optimal path from a
@@ -2021,6 +2096,9 @@ impl RouterCore {
         let mut best_name: Option<String> = None;
         let mut best_score: i64 = i64::MIN;
 
+        // Load configurable weights (falls back to defaults when not set).
+        let weights = Self::scoring_weights_internal(env);
+
         for name in names.iter() {
             // Skip missing or paused routes
             match env
@@ -2039,11 +2117,13 @@ impl RouterCore {
                     None => continue,
                 };
 
-            // Composite score: liquidity + reliability - fee_bps/10
-            let composite = (score.liquidity_score as i64)
-                .checked_add(score.reliability_score as i64)
-                .unwrap()
-                - (score.fee_bps as i64 / 10);
+            // Composite score using configurable weights:
+            //   liquidity_weight * liquidity_score
+            // + reliability_weight * reliability_score
+            // - fee_bps / fee_divisor
+            let composite = weights.liquidity_weight * (score.liquidity_score as i64)
+                + weights.reliability_weight * (score.reliability_score as i64)
+                - (score.fee_bps as i64 / weights.fee_divisor);
 
             if composite > best_score {
                 best_score = composite;
@@ -2061,6 +2141,20 @@ impl RouterCore {
             }
             None => env.storage().instance().remove(&DataKey::BestRoute),
         }
+    }
+
+    /// Return the active [`ScoringWeights`], falling back to safe defaults
+    /// `(liquidity_weight=1, reliability_weight=1, fee_divisor=10)` when no
+    /// explicit weights have been stored via [`set_scoring_weights`].
+    fn scoring_weights_internal(env: &Env) -> ScoringWeights {
+        env.storage()
+            .instance()
+            .get::<DataKey, ScoringWeights>(&DataKey::ScoringWeights)
+            .unwrap_or(ScoringWeights {
+                liquidity_weight: 1,
+                reliability_weight: 1,
+                fee_divisor: 10,
+            })
     }
 
     /// Validates a route name for use in register_route and add_alias.
