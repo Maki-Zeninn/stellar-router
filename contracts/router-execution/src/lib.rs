@@ -706,8 +706,10 @@ impl RouterExecution {
         let mut collected = 0u32;
         while i > 0 && collected < take {
             i -= 1;
-            result.push_back(history.get(i).unwrap());
-            collected += 1;
+            if let Some(entry) = history.get(i) {
+                result.push_back(entry);
+                collected += 1;
+            }
         }
         Ok(result)
     }
