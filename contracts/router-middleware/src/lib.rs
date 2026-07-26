@@ -278,21 +278,7 @@ impl RouterMiddleware {
                 .instance()
                 .remove(&DataKey::CallLog(route.clone()));
 
-            let placeholder = CallLogEntry {
-                caller: caller.clone(),
-                timestamp: 0,
-                success: false,
-                route: route.clone(),
-            };
-            let mut entries = Vec::new(&env);
-            for _ in 0..log_retention {
-                entries.push_back(placeholder.clone());
-            }
-            let log = CallLogState {
-                entries,
-                head: 0,
-                count: 0,
-            };
+            let log = Self::empty_call_log(&env, &caller, &route, log_retention);
             env.storage()
                 .instance()
                 .set(&DataKey::CallLog(route.clone()), &log);
@@ -1091,6 +1077,25 @@ impl RouterMiddleware {
         }
 
         !stale_callers.is_empty()
+    }
+
+    /// Create an empty call log with pre-allocated placeholder entries.
+    fn empty_call_log(env: &Env, caller: &Address, route: &String, capacity: u32) -> CallLogState {
+        let placeholder = CallLogEntry {
+            caller: caller.clone(),
+            timestamp: 0,
+            success: false,
+            route: route.clone(),
+        };
+        let mut entries = Vec::new(env);
+        for _ in 0..capacity {
+            entries.push_back(placeholder.clone());
+        }
+        CallLogState {
+            entries,
+            head: 0,
+            count: 0,
+        }
     }
 }
 
