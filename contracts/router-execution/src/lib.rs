@@ -677,6 +677,17 @@ impl RouterExecution {
         Ok(())
     }
 
+    /// Get the global cap on per-request retry attempts.
+    ///
+    /// # Errors
+    /// * [`ExecutionError::NotInitialized`] — if the contract has not been initialized.
+    pub fn max_retries(env: Env) -> Result<u32, ExecutionError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxRetries)
+            .ok_or(ExecutionError::NotInitialized)
+    }
+
     /// Get the current cap on the number of execution history records retained.
     pub fn max_history_size(env: Env) -> u32 {
         env.storage()
@@ -1049,6 +1060,31 @@ mod tests {
         let attacker = Address::generate(&env);
         let result = client.try_set_max_retries(&attacker, &2);
         assert_eq!(result, Err(Ok(ExecutionError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_max_retries_returns_initialization_value() {
+        let (_, _, client) = setup();
+        // setup() initializes with max_retries=2
+        assert_eq!(client.max_retries(), 2);
+    }
+
+    #[test]
+    fn test_max_retries_reflects_updates() {
+        let (_, admin, client) = setup();
+        assert_eq!(client.max_retries(), 2);
+        client.set_max_retries(&admin, &3);
+        assert_eq!(client.max_retries(), 3);
+    }
+
+    #[test]
+    fn test_max_retries_uninitialized_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let result = client.try_max_retries();
+        assert_eq!(result, Err(Ok(ExecutionError::NotInitialized)));
     }
 
     // ── Execution history size limit (#664) ───────────────────────────────────
