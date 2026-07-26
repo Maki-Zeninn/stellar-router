@@ -316,22 +316,7 @@ impl RouterRegistry {
         if versions.is_empty() {
             return Err(RegistryError::NotFound);
         }
-        // Iterate in reverse to find latest non-deprecated
-        let len = versions.len();
-        let mut i = len;
-        while i > 0 {
-            i -= 1;
-            let v = versions.get(i).ok_or(RegistryError::NotFound)?;
-            let entry: ContractEntry = env
-                .storage()
-                .instance()
-                .get(&DataKey::Entry(name.clone(), v))
-                .ok_or(RegistryError::NotFound)?;
-            if !entry.deprecated {
-                return Ok(entry);
-            }
-        }
-        Err(RegistryError::AllVersionsDeprecated)
+        Self::latest_non_deprecated(&env, &name, &versions)
     }
 
     /// Get the latest non-deprecated entry matching a semver constraint.
@@ -357,23 +342,12 @@ impl RouterRegistry {
     ) -> Result<ContractEntry, RegistryError> {
         let versions = Self::get_versions_list(&env, &name);
 
-        // If no constraint, use get_latest logic
+        // If no constraint, delegate to the shared helper (same semantics as get_latest)
         if constraint.is_none() {
-            let len = versions.len();
-            let mut i = len;
-            while i > 0 {
-                i -= 1;
-                let v = versions.get(i).ok_or(RegistryError::NotFound)?;
-                let entry: ContractEntry = env
-                    .storage()
-                    .instance()
-                    .get(&DataKey::Entry(name.clone(), v))
-                    .ok_or(RegistryError::NotFound)?;
-                if !entry.deprecated {
-                    return Ok(entry);
-                }
+            if versions.is_empty() {
+                return Err(RegistryError::NotFound);
             }
-            return Err(RegistryError::AllVersionsDeprecated);
+            return Self::latest_non_deprecated(&env, &name, &versions);
         }
 
         let constraint_str = constraint.unwrap();
@@ -781,6 +755,40 @@ impl RouterRegistry {
     }
 
 
+
+    /// Iterates `versions` in descending order and returns the first
+    /// [`ContractEntry`] for `name` that is not deprecated.
+    ///
+    /// This is the single shared implementation used by both
+    /// [`get_latest`](Self::get_latest) and the "no constraint" branch of
+    /// [`get_latest_with_constraint`](Self::get_latest_with_constraint).
+    /// Any future change to "how we pick the latest non-deprecated version"
+    /// only needs to be made here.
+    ///
+    /// # Errors
+    /// * [`RegistryError::NotFound`] — if a version index lookup fails.
+    /// * [`RegistryError::AllVersionsDeprecated`] — if every version is deprecated.
+    fn latest_non_deprecated(
+        env: &Env,
+        name: &String,
+        versions: &Vec<u32>,
+    ) -> Result<ContractEntry, RegistryError> {
+        let len = versions.len();
+        let mut i = len;
+        while i > 0 {
+            i -= 1;
+            let v = versions.get(i).ok_or(RegistryError::NotFound)?;
+            let entry: ContractEntry = env
+                .storage()
+                .instance()
+                .get(&DataKey::Entry(name.clone(), v))
+                .ok_or(RegistryError::NotFound)?;
+            if !entry.deprecated {
+                return Ok(entry);
+            }
+        }
+        Err(RegistryError::AllVersionsDeprecated)
+    }
 
     fn get_versions_list(env: &Env, name: &String) -> Vec<u32> {
         env.storage()

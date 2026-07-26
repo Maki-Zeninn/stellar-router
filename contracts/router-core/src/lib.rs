@@ -189,6 +189,13 @@ pub enum RouterError {
 const MAX_RECURSION_DEPTH: u32 = 10;
 // ── Constants ─────────────────────────────────────────────────────────────────
 
+/// The Stellar "zero" address — used as a sentinel for "no owner" / invalid address checks.
+///
+/// A single source-of-truth for the literal so that a typo in one validation
+/// point cannot silently diverge from another, and any future change only
+/// needs to be made here.
+const ZERO_ADDRESS_STR: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+
 /// Minimum remaining TTL (in ledgers) before instance storage is extended.
 /// ~30 days at 5 s/ledger.
 const INSTANCE_TTL_THRESHOLD: u32 = 17280 * 30;
@@ -281,7 +288,7 @@ impl RouterCore {
         // Validate address is not the zero address
         let zero_address = Address::from_string(&String::from_str(
             &env,
-            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+            ZERO_ADDRESS_STR,
         ));
         if address == zero_address {
             return Err(RouterError::InvalidAddress);
@@ -2168,7 +2175,7 @@ impl RouterCore {
         // Validate address is not the zero address
         let zero_address = Address::from_string(&String::from_str(
             env,
-            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+            ZERO_ADDRESS_STR,
         ));
         if address == zero_address {
             return Err(RouterError::InvalidAddress);
