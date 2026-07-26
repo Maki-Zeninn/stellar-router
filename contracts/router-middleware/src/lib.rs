@@ -592,6 +592,14 @@ impl RouterMiddleware {
         Ok(())
     }
 
+    /// Returns whether the middleware is currently globally enabled.
+    pub fn is_global_enabled(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::GlobalEnabled)
+            .unwrap_or(true)
+    }
+
     /// Get total calls processed.
     pub fn total_calls(env: Env) -> u64 {
         env.storage()
@@ -1732,6 +1740,24 @@ mod tests {
         );
         let emitted: bool = last.2.into_val(&env);
         assert!(!emitted);
+    }
+
+    #[test]
+    fn test_is_global_enabled_returns_true_by_default() {
+        let (env, _admin, client) = setup();
+        assert!(client.is_global_enabled());
+    }
+
+    #[test]
+    fn test_is_global_enabled_reflects_set_value() {
+        let (env, admin, client) = setup();
+        assert!(client.is_global_enabled());
+
+        client.set_global_enabled(&admin, &false);
+        assert!(!client.is_global_enabled());
+
+        client.set_global_enabled(&admin, &true);
+        assert!(client.is_global_enabled());
     }
 
     #[test]
