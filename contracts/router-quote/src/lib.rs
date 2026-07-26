@@ -322,14 +322,14 @@ impl RouterQuote {
     /// Router name and Fee in basis points.
     pub fn get_all_configured_routes(env: Env) -> Vec<(String, u32)> {
         let routes = Self::read_configured_routes(&env);
-        let mut configures_routes = Vec::new(&env);
+        let mut configured_routes = Vec::new(&env);
 
         for route in routes {
             if let Ok(fee) = Self::get_route_fee(env.clone(), route.clone()) {
-                configures_routes.push_back((route, fee));
+                configured_routes.push_back((route, fee));
             }
         }
-        configures_routes
+        configured_routes
     }
 
     /// Get a quote for a single route with configurable fee.
