@@ -1786,4 +1786,32 @@ mod tests {
         assert_eq!(result, Err(Ok(AccessError::HierarchyCycle)));
         assert_eq!(client.get_role_parent(&role_c), None);
     }
+
+    #[test]
+    fn test_get_role_parent_returns_none_when_not_set() {
+        // Mirrors test_get_role_admin_returns_none_when_not_set for get_role_parent.
+        // A role that has never been passed to set_role_parent must report no parent.
+        let (env, _admin, client) = setup();
+        let role = String::from_str(&env, "orphan-role");
+
+        assert_eq!(client.get_role_parent(&role), None);
+    }
+
+    #[test]
+    fn test_is_blacklisted_reflects_blacklist_state() {
+        // Directly exercises is_blacklisted: false → true after blacklist() → false after unblacklist().
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+
+        // Fresh address is not blacklisted
+        assert!(!client.is_blacklisted(&addr));
+
+        // After blacklisting it becomes true
+        client.blacklist(&admin, &addr);
+        assert!(client.is_blacklisted(&addr));
+
+        // After un-blacklisting it goes back to false
+        client.unblacklist(&admin, &addr);
+        assert!(!client.is_blacklisted(&addr));
+    }
 }
