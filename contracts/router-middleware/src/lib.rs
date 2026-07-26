@@ -514,7 +514,7 @@ impl RouterMiddleware {
             .set(&DataKey::TotalCalls, &(total + 1));
 
         env.events().publish(
-            (Symbol::new(&env, "pre_call"),),
+            (Symbol::new(&env, router_common::EVENT_PRE_CALL),),
             (caller.clone(), route.clone()),
         );
 
@@ -529,7 +529,7 @@ impl RouterMiddleware {
     /// Post-call hook: tracks failures and manages circuit breaker.
     pub fn post_call(env: Env, caller: Address, route: String, success: bool) {
         env.events().publish(
-            (Symbol::new(&env, "post_call"),),
+            (Symbol::new(&env, router_common::EVENT_POST_CALL),),
             (caller.clone(), route.clone(), success),
         );
 
@@ -689,7 +689,7 @@ impl RouterMiddleware {
         call_log::clear(&env, &route);
 
         env.events()
-            .publish((Symbol::new(&env, "call_log_cleared"),), route);
+            .publish((Symbol::new(&env, router_common::EVENT_CALL_LOG_CLEARED),), route);
         Ok(())
     }
 
