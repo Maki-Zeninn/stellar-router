@@ -366,12 +366,8 @@ impl RouterExecution {
 
         // ── Simulation phase ──────────────────────────────────────────────
         if request.simulate_first {
-            let sim_result = env.try_invoke_contract::<soroban_sdk::Val, soroban_sdk::Val>(
-                &request.target,
-                &request.function,
-                request.args.clone(),
-            );
-            if sim_result.is_err() {
+            let sim_ok = Self::dry_run_invoke(&env, &request.target, &request.function, request.args.clone());
+            if !sim_ok {
                 Self::log_error(
                     &env,
                     &request.target,
@@ -398,56 +394,49 @@ impl RouterExecution {
         let mut attempts = 0u32;
         loop {
             attempts += 1;
-            let result = env.try_invoke_contract::<soroban_sdk::Val, soroban_sdk::Val>(
-                &request.target,
-                &request.function,
-                request.args.clone(),
-            );
+            let invoke_ok = Self::dry_run_invoke(&env, &request.target, &request.function, request.args.clone());
 
-            match result {
-                Ok(_) => {
-                    Self::increment_counter(&env, &DataKey::TotalExecutions);
-                    Self::append_history(&env, &request.target, &request.function, true, fee_paid);
-                    let exec_result = ExecutionResult {
-                        target: request.target.clone(),
-                        function: request.function.clone(),
-                        success: true,
-                        attempts,
-                        simulated: request.simulate_first,
-                    };
+            if invoke_ok {
+                Self::increment_counter(&env, &DataKey::TotalExecutions);
+                Self::append_history(&env, &request.target, &request.function, true, fee_paid);
+                let exec_result = ExecutionResult {
+                    target: request.target.clone(),
+                    function: request.function.clone(),
+                    success: true,
+                    attempts,
+                    simulated: request.simulate_first,
+                };
+                env.events().publish(
+                    (Symbol::new(&env, router_common::EVENT_EXECUTION_RESULT),),
+                    (&request.target, &request.function, true, attempts),
+                );
+                return Ok(exec_result);
+            } else {
+                if attempts <= effective_retries {
+                    // Compute the delay the caller should wait before the next
+                    // retry: base_ms * multiplier^(attempt-1) / 100^(attempt-1).
+                    // Emitting this lets off-chain orchestrators honour the backoff.
+                    let delay_ms = Self::compute_backoff_ms(
+                        backoff_base_ms,
+                        backoff_multiplier,
+                        attempts - 1,
+                    );
                     env.events().publish(
-                        (Symbol::new(&env, router_common::EVENT_EXECUTION_RESULT),),
-                        (&request.target, &request.function, true, attempts),
+                        (Symbol::new(&env, router_common::EVENT_EXECUTION_RETRY),),
+                        (&request.target, &request.function, attempts, delay_ms),
                     );
-                    return Ok(exec_result);
+                    // Retry
+                    continue;
                 }
-                Err(_) => {
-                    if attempts <= effective_retries {
-                        // Compute the delay the caller should wait before the next
-                        // retry: base_ms * multiplier^(attempt-1) / 100^(attempt-1).
-                        // Emitting this lets off-chain orchestrators honour the backoff.
-                        let delay_ms = Self::compute_backoff_ms(
-                            backoff_base_ms,
-                            backoff_multiplier,
-                            attempts - 1,
-                        );
-                        env.events().publish(
-                            (Symbol::new(&env, router_common::EVENT_EXECUTION_RETRY),),
-                            (&request.target, &request.function, attempts, delay_ms),
-                        );
-                        // Retry
-                        continue;
-                    }
-                    Self::log_error(
-                        &env,
-                        &request.target,
-                        &request.function,
-                        ExecutionError::ContractRejected,
-                        attempts,
-                    );
-                    Self::append_history(&env, &request.target, &request.function, false, fee_paid);
-                    return Err(ExecutionError::ContractRejected);
-                }
+                Self::log_error(
+                    &env,
+                    &request.target,
+                    &request.function,
+                    ExecutionError::ContractRejected,
+                    attempts,
+                );
+                Self::append_history(&env, &request.target, &request.function, false, fee_paid);
+                return Err(ExecutionError::ContractRejected);
             }
         }
     }
@@ -561,9 +550,7 @@ impl RouterExecution {
             return Err(ExecutionError::NotInitialized);
         }
 
-        let sim_ok = env
-            .try_invoke_contract::<soroban_sdk::Val, soroban_sdk::Val>(&target, &function, args)
-            .is_ok();
+        let sim_ok = Self::dry_run_invoke(&env, &target, &function, args);
 
         let message = if sim_ok {
             String::from_str(&env, "simulation succeeded")
@@ -898,6 +885,16 @@ impl RouterExecution {
         env.storage()
             .instance()
             .set(&DataKey::ExecHistory, &history);
+    }
+
+    fn dry_run_invoke(
+        env: &Env,
+        target: &Address,
+        function: &Symbol,
+        args: Vec<soroban_sdk::Val>,
+    ) -> bool {
+        env.try_invoke_contract::<soroban_sdk::Val, soroban_sdk::Val>(target, function, args)
+            .is_ok()
     }
 }
 

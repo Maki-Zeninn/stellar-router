@@ -278,21 +278,7 @@ impl RouterMiddleware {
                 .instance()
                 .remove(&DataKey::CallLog(route.clone()));
 
-            let placeholder = CallLogEntry {
-                caller: caller.clone(),
-                timestamp: 0,
-                success: false,
-                route: route.clone(),
-            };
-            let mut entries = Vec::new(&env);
-            for _ in 0..log_retention {
-                entries.push_back(placeholder.clone());
-            }
-            let log = CallLogState {
-                entries,
-                head: 0,
-                count: 0,
-            };
+            let log = Self::empty_call_log(&env, &caller, &route, log_retention);
             env.storage()
                 .instance()
                 .set(&DataKey::CallLog(route.clone()), &log);
@@ -528,7 +514,7 @@ impl RouterMiddleware {
             .set(&DataKey::TotalCalls, &(total + 1));
 
         env.events().publish(
-            (Symbol::new(&env, "pre_call"),),
+            (Symbol::new(&env, router_common::EVENT_PRE_CALL),),
             (caller.clone(), route.clone()),
         );
 
@@ -543,7 +529,7 @@ impl RouterMiddleware {
     /// Post-call hook: tracks failures and manages circuit breaker.
     pub fn post_call(env: Env, caller: Address, route: String, success: bool) {
         env.events().publish(
-            (Symbol::new(&env, "post_call"),),
+            (Symbol::new(&env, router_common::EVENT_POST_CALL),),
             (caller.clone(), route.clone(), success),
         );
 
@@ -590,6 +576,14 @@ impl RouterMiddleware {
             enabled,
         );
         Ok(())
+    }
+
+    /// Returns whether the middleware is currently globally enabled.
+    pub fn is_global_enabled(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::GlobalEnabled)
+            .unwrap_or(true)
     }
 
     /// Get total calls processed.
@@ -695,7 +689,7 @@ impl RouterMiddleware {
         call_log::clear(&env, &route);
 
         env.events()
-            .publish((Symbol::new(&env, "call_log_cleared"),), route);
+            .publish((Symbol::new(&env, router_common::EVENT_CALL_LOG_CLEARED),), route);
         Ok(())
     }
 
@@ -1083,6 +1077,25 @@ impl RouterMiddleware {
         }
 
         !stale_callers.is_empty()
+    }
+
+    /// Create an empty call log with pre-allocated placeholder entries.
+    fn empty_call_log(env: &Env, caller: &Address, route: &String, capacity: u32) -> CallLogState {
+        let placeholder = CallLogEntry {
+            caller: caller.clone(),
+            timestamp: 0,
+            success: false,
+            route: route.clone(),
+        };
+        let mut entries = Vec::new(env);
+        for _ in 0..capacity {
+            entries.push_back(placeholder.clone());
+        }
+        CallLogState {
+            entries,
+            head: 0,
+            count: 0,
+        }
     }
 }
 
@@ -1732,6 +1745,24 @@ mod tests {
         );
         let emitted: bool = last.2.into_val(&env);
         assert!(!emitted);
+    }
+
+    #[test]
+    fn test_is_global_enabled_returns_true_by_default() {
+        let (env, _admin, client) = setup();
+        assert!(client.is_global_enabled());
+    }
+
+    #[test]
+    fn test_is_global_enabled_reflects_set_value() {
+        let (env, admin, client) = setup();
+        assert!(client.is_global_enabled());
+
+        client.set_global_enabled(&admin, &false);
+        assert!(!client.is_global_enabled());
+
+        client.set_global_enabled(&admin, &true);
+        assert!(client.is_global_enabled());
     }
 
     #[test]
