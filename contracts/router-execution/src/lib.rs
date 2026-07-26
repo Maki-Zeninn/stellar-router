@@ -728,6 +728,25 @@ impl RouterExecution {
         Ok(result)
     }
 
+    /// Get the current count of stored execution history records.
+    ///
+    /// Returns the number of records currently in the execution history without
+    /// materializing the entire vector across the host boundary.
+    ///
+    /// # Errors
+    /// * [`ExecutionError::NotInitialized`] — if the contract is not initialized.
+    pub fn execution_history_len(env: Env) -> Result<u32, ExecutionError> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(ExecutionError::NotInitialized);
+        }
+        let history: Vec<ExecutionRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExecHistory)
+            .unwrap_or(Vec::new(&env));
+        Ok(history.len() as u32)
+    }
+
     /// Get the current admin address.
     ///
     /// # Errors
@@ -1157,6 +1176,51 @@ mod tests {
         let (_, _, client) = setup();
         let history = client.get_execution_history(&10);
         assert_eq!(history.len(), 0);
+    }
+
+    #[test]
+    fn test_execution_history_len_fresh_contract_is_zero() {
+        let (_, _, client) = setup();
+        assert_eq!(client.execution_history_len(), 0);
+    }
+
+    #[test]
+    fn test_execution_history_len_reflects_appends() {
+        let (env, _, client) = setup();
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        env.as_contract(&client.address, || {
+            for i in 0..5u32 {
+                RouterExecution::append_history(&env, &target, &function, true, 0);
+                assert_eq!(RouterExecution::execution_history_len(env.clone()), Ok(i + 1));
+            }
+        });
+        assert_eq!(client.execution_history_len(), 5);
+    }
+
+    #[test]
+    fn test_execution_history_len_after_eviction() {
+        let (env, admin, client) = setup();
+        client.set_max_history_size(&admin, &3);
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        env.as_contract(&client.address, || {
+            for _ in 0..5u32 {
+                RouterExecution::append_history(&env, &target, &function, true, 0);
+            }
+        });
+        // Should be capped at 3 due to eviction of oldest entries
+        assert_eq!(client.execution_history_len(), 3);
+    }
+
+    #[test]
+    fn test_execution_history_len_uninitialized_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let result = client.try_execution_history_len();
+        assert_eq!(result, Err(Ok(ExecutionError::NotInitialized)));
     }
 
     #[test]
