@@ -10,6 +10,9 @@ use soroban_sdk::{
 
 const MAX_HIERARCHY_DEPTH: u32 = 16;
 
+/// Sentinel value for `RoleExpiry` meaning "no expiry / permanent grant".
+const NO_EXPIRY: u64 = u64::MAX;
+
 /// Default cap on the total number of distinct role names the system may hold.
 /// Prevents unbounded `AllRoles` growth. Configurable via `set_role_limits`.
 const DEFAULT_MAX_ROLES: u32 = 100;
@@ -830,10 +833,10 @@ impl RouterAccess {
                     .timestamp()
                     .checked_add(seconds)
                     .ok_or(AccessError::InvalidExpiry)?,
-                None => u64::MAX,
+                None => NO_EXPIRY,
             };
 
-            let existing_expiry = existing_expiry.unwrap_or(u64::MAX);
+            let existing_expiry = existing_expiry.unwrap_or(NO_EXPIRY);
             if existing_expiry == requested_expiry {
                 return Err(AccessError::AlreadyHasRole);
             }
@@ -848,7 +851,7 @@ impl RouterAccess {
                 .timestamp()
                 .checked_add(seconds)
                 .ok_or(AccessError::InvalidExpiry)?,
-            None => u64::MAX,
+            None => NO_EXPIRY,
         };
 
         env.storage()
