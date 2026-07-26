@@ -203,7 +203,9 @@ impl RouterMiddleware {
     /// `caller` has not exceeded their rate limit for `route`. All validation
     /// is performed before any state is written — if any check fails, no state
     /// is modified. On success, increments the global call counter, updates the
-    /// rate limit state, and emits a `pre_call` event.
+    /// rate limit state, and emits a `pre_call` event. If the recovery window
+    /// for an open circuit breaker has elapsed, the circuit is reset and a
+    /// `circuit_closed` event is emitted.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -352,6 +354,10 @@ impl RouterMiddleware {
             env.storage()
                 .instance()
                 .set(&DataKey::CircuitBreaker(route.clone()), &reset_state);
+            env.events().publish(
+                (Symbol::new(&env, "circuit_closed"),),
+                route.clone(),
+            );
         }
 
         // Increment global call counter
@@ -1477,6 +1483,56 @@ mod tests {
         assert!(!state_after_recovery.is_open);
         assert_eq!(state_after_recovery.failure_count, 0);
         assert_eq!(state_after_recovery.opened_at, 0);
+    }
+
+    // ── Issue #711: circuit_closed event on recovery ──────────────────────────
+
+    #[test]
+    fn test_circuit_closed_event_emitted_on_recovery() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        // failure_threshold=1, recovery_window=60s
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &60, &0);
+
+        let caller = Address::generate(&env);
+
+        // Trip the circuit
+        client.post_call(&caller, &route, &false);
+
+        // Advance time past recovery window
+        env.ledger().with_mut(|l| l.timestamp += 61);
+
+        // Call recovers the circuit
+        assert!(client.try_pre_call(&caller, &route).is_ok());
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        let topic: Symbol = last.1.get(0).unwrap().into_val(&env);
+        assert_eq!(topic, Symbol::new(&env, "circuit_closed"));
+        let emitted_route: String = last.2.into_val(&env);
+        assert_eq!(emitted_route, route);
+    }
+
+    #[test]
+    fn test_circuit_closed_event_not_emitted_without_recovery() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &60, &0);
+
+        let caller = Address::generate(&env);
+        client.post_call(&caller, &route, &false);
+
+        // Only 30 seconds — recovery window has not elapsed
+        env.ledger().with_mut(|l| l.timestamp += 30);
+        assert_eq!(
+            client.try_pre_call(&caller, &route),
+            Err(Ok(MiddlewareError::CircuitOpen))
+        );
+
+        for event in env.events().all().iter() {
+            let topic: Symbol = event.1.get(0).unwrap().into_val(&env);
+            assert_ne!(topic, Symbol::new(&env, "circuit_closed"));
+        }
     }
 
     // ── Issue #311: set_global_enabled emits event ────────────────────────────
