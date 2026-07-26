@@ -213,6 +213,21 @@ impl RouterAccess {
         }
     }
 
+    /// Returns the number of active (non-expired) members currently holding `role`.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `role` - The role name.
+    ///
+    /// # Returns
+    /// The active member count, or `0` if the role has no members.
+    pub fn get_role_member_count(env: Env, role: String) -> u32 {
+        env.storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::RoleMemberCount(role))
+            .unwrap_or(0u32)
+    }
+
     /// Return the expiry timestamp for a role grant, or None if no expiry is set.
     ///
     /// # Arguments
@@ -222,13 +237,6 @@ impl RouterAccess {
     ///
     /// # Returns
     /// `Some(timestamp)` if an expiry exists, `None` otherwise.
-    pub fn get_role_member_count(env: Env, role: String) -> u32 {
-        env.storage()
-            .instance()
-            .get::<DataKey, u32>(&DataKey::RoleMemberCount(role))
-            .unwrap_or(0u32)
-    }
-
     pub fn get_role_expiry(env: Env, role: String, target: Address) -> Option<u64> {
         env.storage()
             .instance()
