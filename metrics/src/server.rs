@@ -4,29 +4,30 @@
 //! - `GET /metrics` — Prometheus text format metrics
 //! - `GET /health`  — simple liveness probe (returns `200 OK`)
 //! - `GET /ready`   — readiness probe (returns `200 OK` if router_up == 1, `503` otherwise)
+//! - `GET /swagger-ui/` — Swagger UI for API documentation
+//! - `GET /api-docs/openapi.json` — OpenAPI specification
 //!
 //! Every request is assigned a unique `request_id` that is logged and returned
 //! in the `X-Request-Id` response header.
 
 use anyhow::{Context, Result};
 use axum::{
-    extract::{ConnectInfo, State},
-    http::{header, StatusCode},
-    middleware,
     extract::State,
     http::{header, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
-    Router,
+    Json, Router,
 };
 use prometheus::{Encoder, Registry, TextEncoder};
 use std::net::SocketAddr;
 use tracing::{info, info_span, Instrument};
 
+use crate::auth::AuthConfig;
 use crate::logging::new_request_id;
-
+use crate::openapi::ApiDoc;
 use crate::rate_limit::{rate_limit_middleware, RateLimiter};
+use crate::replay_protection::{NonceCache, ReplayProtectionConfig};
 
 /// Shared server state.
 #[derive(Clone)]
@@ -41,17 +42,27 @@ pub async fn serve(listen: String, registry: Registry, limiter: RateLimiter) -> 
         .with_context(|| format!("invalid listen address: {listen}"))?;
 
     let state = AppState { registry };
+    let auth_config = AuthConfig::from_env();
+    let replay_config = ReplayProtectionConfig::from_env();
+    let nonce_cache = NonceCache::new(replay_config);
 
     let app = Router::new()
         .route("/metrics", get(metrics_handler))
         .route("/health", get(health_handler))
         .route("/ready", get(ready_handler))
+        .route("/api-docs/openapi.json", get(openapi_handler))
         .layer(middleware::from_fn_with_state(
             limiter,
             rate_limit_middleware,
         ))
-        .with_state(state)
-        .into_make_service_with_connect_info::<SocketAddr>();
+        .layer(middleware::from_fn_with_state(
+            nonce_cache,
+            crate::replay_protection::replay_protection_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            auth_config,
+            crate::auth::auth_middleware,
+        ))
         .layer(middleware::from_fn(request_id_middleware))
         .with_state(state);
 
@@ -60,9 +71,12 @@ pub async fn serve(listen: String, registry: Registry, limiter: RateLimiter) -> 
         .await
         .with_context(|| format!("failed to bind to {addr}"))?;
 
-    axum::serve(listener, app)
-        .await
-        .context("HTTP server error")?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .context("HTTP server error")?;
 
     Ok(())
 }
@@ -100,6 +114,17 @@ async fn request_id_middleware(req: Request<axum::body::Body>, next: Next) -> Re
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /// `GET /metrics` — render all registered metrics in Prometheus text format.
+///
+/// Returns Prometheus-formatted metrics for all registered gauges, counters, and histograms.
+#[utoipa::path(
+    get,
+    path = "/metrics",
+    tag = "metrics",
+    responses(
+        (status = 200, description = "Prometheus metrics in text format", content_type = "text/plain; version=0.0.4"),
+        (status = 500, description = "Failed to encode metrics"),
+    ),
+)]
 async fn metrics_handler(State(state): State<AppState>) -> Response {
     let encoder = TextEncoder::new();
     let metric_families = state.registry.gather();
@@ -122,17 +147,23 @@ async fn metrics_handler(State(state): State<AppState>) -> Response {
 }
 
 /// `GET /health` — simple liveness probe.
+///
+/// Returns 200 OK if the exporter is running.
+#[utoipa::path(
+    get,
+    path = "/health",
+    tag = "health",
+    responses(
+        (status = 200, description = "Exporter is alive"),
+    ),
+)]
 async fn health_handler() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
-/// `GET /ready` — readiness probe that checks if the exporter is ready to serve traffic.
-///
-/// Returns 200 OK if:
-/// - At least one contract ID is configured
-/// - The last scrape cycle succeeded (router_up == 1)
-///
-/// Returns 503 Service Unavailable otherwise.
+/// `GET /ready` — readiness probe.
+#[utoipa::path(get, path = "/ready", tag = "health",
+    responses((status = 200, description = "Ready"), (status = 503, description = "Not ready")))]
 async fn ready_handler(State(state): State<AppState>) -> impl IntoResponse {
     // Check if router_up metric is 1
     let metric_families = state.registry.gather();
@@ -155,6 +186,12 @@ async fn ready_handler(State(state): State<AppState>) -> impl IntoResponse {
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "not ready")
     }
+}
+
+/// `GET /api-docs/openapi.json` — OpenAPI specification.
+async fn openapi_handler() -> impl IntoResponse {
+    use utoipa::OpenApi;
+    Json(ApiDoc::openapi())
 }
 
 #[cfg(test)]

@@ -9,20 +9,14 @@
 //! - Timelock operations
 //! - Multicall batching
 
-use crate::integration::testnet_setup::{TestAccount, TestFixture};
+use integration_tests::{TestAccount, TestSuite};
 
 #[test]
 #[ignore] // Run with: cargo test --test integration -- --ignored
 fn test_full_router_core_flow() {
     println!("\n=== Testing Full Router Core Flow ===\n");
 
-    let mut fixture = TestFixture::new().expect("Failed to create test fixture");
-    fixture
-        .deploy_all_contracts()
-        .expect("Failed to deploy contracts");
-    fixture
-        .initialize_all_contracts()
-        .expect("Failed to initialize contracts");
+    let fixture = TestSuite::setup().expect("Failed to set up test suite");
 
     let core = fixture
         .router_core
@@ -199,13 +193,7 @@ fn test_full_router_core_flow() {
 fn test_router_registry_flow() {
     println!("\n=== Testing Router Registry Flow ===\n");
 
-    let mut fixture = TestFixture::new().expect("Failed to create test fixture");
-    fixture
-        .deploy_all_contracts()
-        .expect("Failed to deploy contracts");
-    fixture
-        .initialize_all_contracts()
-        .expect("Failed to initialize contracts");
+    let fixture = TestSuite::setup().expect("Failed to set up test suite");
 
     let registry = fixture
         .router_registry
@@ -302,13 +290,7 @@ fn test_router_registry_flow() {
 fn test_router_access_control() {
     println!("\n=== Testing Router Access Control ===\n");
 
-    let mut fixture = TestFixture::new().expect("Failed to create test fixture");
-    fixture
-        .deploy_all_contracts()
-        .expect("Failed to deploy contracts");
-    fixture
-        .initialize_all_contracts()
-        .expect("Failed to initialize contracts");
+    let fixture = TestSuite::setup().expect("Failed to set up test suite");
 
     let access = fixture
         .router_access
@@ -384,13 +366,7 @@ fn test_router_access_control() {
 fn test_router_middleware_rate_limiting() {
     println!("\n=== Testing Router Middleware Rate Limiting ===\n");
 
-    let mut fixture = TestFixture::new().expect("Failed to create test fixture");
-    fixture
-        .deploy_all_contracts()
-        .expect("Failed to deploy contracts");
-    fixture
-        .initialize_all_contracts()
-        .expect("Failed to initialize contracts");
+    let fixture = TestSuite::setup().expect("Failed to set up test suite");
 
     let middleware = fixture
         .router_middleware
@@ -464,13 +440,7 @@ fn test_router_middleware_rate_limiting() {
 fn test_router_timelock_operations() {
     println!("\n=== Testing Router Timelock Operations ===\n");
 
-    let mut fixture = TestFixture::new().expect("Failed to create test fixture");
-    fixture
-        .deploy_all_contracts()
-        .expect("Failed to deploy contracts");
-    fixture
-        .initialize_all_contracts()
-        .expect("Failed to initialize contracts");
+    let fixture = TestSuite::setup().expect("Failed to set up test suite");
 
     let timelock = fixture
         .router_timelock
@@ -523,13 +493,7 @@ fn test_router_timelock_operations() {
 fn test_router_multicall_batching() {
     println!("\n=== Testing Router Multicall Batching ===\n");
 
-    let mut fixture = TestFixture::new().expect("Failed to create test fixture");
-    fixture
-        .deploy_all_contracts()
-        .expect("Failed to deploy contracts");
-    fixture
-        .initialize_all_contracts()
-        .expect("Failed to initialize contracts");
+    let fixture = TestSuite::setup().expect("Failed to set up test suite");
 
     let multicall = fixture
         .router_multicall
@@ -570,13 +534,7 @@ fn test_router_multicall_batching() {
 fn test_admin_transfer() {
     println!("\n=== Testing Admin Transfer ===\n");
 
-    let mut fixture = TestFixture::new().expect("Failed to create test fixture");
-    fixture
-        .deploy_all_contracts()
-        .expect("Failed to deploy contracts");
-    fixture
-        .initialize_all_contracts()
-        .expect("Failed to initialize contracts");
+    let fixture = TestSuite::setup().expect("Failed to set up test suite");
 
     let core = fixture
         .router_core

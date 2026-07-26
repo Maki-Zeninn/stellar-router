@@ -1,4 +1,14 @@
 target/
+storage-profile.txt
 **/test_snapshots/
+**/test_output.txt
 benches/src/scrap-menu/
 .DS_Store
+*.wasm
+artifacts/
+.env
+.env.*
+*.log
+*.tmp
+*.temp
+/tmp/

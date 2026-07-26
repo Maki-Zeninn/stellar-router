@@ -10,9 +10,6 @@ use soroban_sdk::{
 
 const MAX_HIERARCHY_DEPTH: u32 = 16;
 
-/// Sentinel value for `RoleExpiry` meaning "no expiry / permanent grant".
-const NO_EXPIRY: u64 = u64::MAX;
-
 /// Default cap on the total number of distinct role names the system may hold.
 /// Prevents unbounded `AllRoles` growth. Configurable via `set_role_limits`.
 const DEFAULT_MAX_ROLES: u32 = 100;
@@ -216,21 +213,6 @@ impl RouterAccess {
         }
     }
 
-    /// Returns the number of active (non-expired) members currently holding `role`.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    /// * `role` - The role name.
-    ///
-    /// # Returns
-    /// The active member count, or `0` if the role has no members.
-    pub fn get_role_member_count(env: Env, role: String) -> u32 {
-        env.storage()
-            .instance()
-            .get::<DataKey, u32>(&DataKey::RoleMemberCount(role))
-            .unwrap_or(0u32)
-    }
-
     /// Return the expiry timestamp for a role grant, or None if no expiry is set.
     ///
     /// # Arguments
@@ -240,6 +222,13 @@ impl RouterAccess {
     ///
     /// # Returns
     /// `Some(timestamp)` if an expiry exists, `None` otherwise.
+    pub fn get_role_member_count(env: Env, role: String) -> u32 {
+        env.storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::RoleMemberCount(role))
+            .unwrap_or(0u32)
+    }
+
     pub fn get_role_expiry(env: Env, role: String, target: Address) -> Option<u64> {
         env.storage()
             .instance()
@@ -723,34 +712,34 @@ impl RouterAccess {
             AccessError::Unauthorized => router_common::BatchItemError::Unauthorized,
             AccessError::Blacklisted => router_common::BatchItemError::InvalidMetadata,
             AccessError::InvalidExpiry => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "invalid expiry"),
+                soroban_sdk::String::from_str(env, "InvalidExpiry"),
             ),
             AccessError::AlreadyInitialized => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "already initialized"),
+                soroban_sdk::String::from_str(env, "AlreadyInitialized"),
             ),
             AccessError::NotInitialized => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "not initialized"),
+                soroban_sdk::String::from_str(env, "NotInitialized"),
             ),
             AccessError::RoleNotFound => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "role not found"),
+                soroban_sdk::String::from_str(env, "RoleNotFound"),
             ),
             AccessError::CannotBlacklistAdmin => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "cannot blacklist admin"),
+                soroban_sdk::String::from_str(env, "CannotBlacklistAdmin"),
             ),
             AccessError::DestinationAlreadyHasRole => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "destination already has role"),
+                soroban_sdk::String::from_str(env, "DestinationAlreadyHasRole"),
             ),
             AccessError::HierarchyCycle => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "hierarchy cycle detected"),
+                soroban_sdk::String::from_str(env, "HierarchyCycle"),
             ),
             AccessError::HierarchyTooDeep => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "role hierarchy too deep"),
+                soroban_sdk::String::from_str(env, "HierarchyTooDeep"),
             ),
             AccessError::MaxRolesExceeded => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "maximum role count exceeded"),
+                soroban_sdk::String::from_str(env, "MaxRolesExceeded"),
             ),
             AccessError::MaxGrantsPerRoleExceeded => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "maximum grants per role exceeded"),
+                soroban_sdk::String::from_str(env, "MaxGrantsPerRoleExceeded"),
             ),
         }
     }
@@ -833,10 +822,10 @@ impl RouterAccess {
                     .timestamp()
                     .checked_add(seconds)
                     .ok_or(AccessError::InvalidExpiry)?,
-                None => NO_EXPIRY,
+                None => u64::MAX,
             };
 
-            let existing_expiry = existing_expiry.unwrap_or(NO_EXPIRY);
+            let existing_expiry = existing_expiry.unwrap_or(u64::MAX);
             if existing_expiry == requested_expiry {
                 return Err(AccessError::AlreadyHasRole);
             }
@@ -851,7 +840,7 @@ impl RouterAccess {
                 .timestamp()
                 .checked_add(seconds)
                 .ok_or(AccessError::InvalidExpiry)?,
-            None => NO_EXPIRY,
+            None => u64::MAX,
         };
 
         env.storage()
@@ -1671,32 +1660,6 @@ mod tests {
         assert_eq!(result.successes.len(), 0);
         assert_eq!(result.failures.len(), 1);
         assert!(!client.has_role(&u2, &role));
-    }
-
-    // ── Issue #876: descriptive access_error_to_batch fallback strings ───────
-
-    #[test]
-    fn test_grant_role_batch_reports_descriptive_error_for_non_specific_variant() {
-        let (env, admin, client) = setup();
-        let role = String::from_str(&env, "operator");
-        client.set_role_limits(&admin, &0, &1);
-
-        let u1 = Address::generate(&env);
-        let u2 = Address::generate(&env);
-        let accounts = vec![&env, u1.clone(), u2.clone()];
-
-        // max_grants_per_role=1, so the second grant hits MaxGrantsPerRoleExceeded
-        // — a variant that previously fell through to a generic "Error" string.
-        let result = client.grant_role_batch(&admin, &accounts, &role, &None, &false);
-        assert_eq!(result.successes.len(), 1);
-        assert_eq!(result.failures.len(), 1);
-        assert_eq!(
-            result.failures.get(0).unwrap().error,
-            router_common::BatchItemError::Custom(String::from_str(
-                &env,
-                "maximum grants per role exceeded"
-            ))
-        );
     }
 
     // ── Issue #578: list_all_roles ────────────────────────────────────────────

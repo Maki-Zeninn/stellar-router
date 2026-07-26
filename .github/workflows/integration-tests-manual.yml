@@ -38,6 +38,14 @@ jobs:
       - name: Build WASM contracts
         run: cargo build --target wasm32-unknown-unknown --release
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y \
+            libdbus-1-dev \
+            libudev-dev \
+            libusb-1.0-0-dev \
+            pkg-config
+
       - name: Install Stellar CLI
         run: |
           cargo install --locked stellar-cli
@@ -48,16 +56,16 @@ jobs:
           if [ -z "${{ github.event.inputs.test_filter }}" ]; then
             echo "Running all integration tests..."
             if [ "${{ github.event.inputs.verbose }}" == "true" ]; then
-              cargo test --test integration_tests -- --ignored --test-threads=1 --nocapture
+              cargo test --manifest-path integration-tests/Cargo.toml --test integration_tests -- --ignored --test-threads=1 --nocapture
             else
-              cargo test --test integration_tests -- --ignored --test-threads=1
+              cargo test --manifest-path integration-tests/Cargo.toml --test integration_tests -- --ignored --test-threads=1
             fi
           else
             echo "Running filtered tests: ${{ github.event.inputs.test_filter }}"
             if [ "${{ github.event.inputs.verbose }}" == "true" ]; then
-              cargo test --test integration_tests ${{ github.event.inputs.test_filter }} -- --ignored --nocapture
+              cargo test --manifest-path integration-tests/Cargo.toml --test integration_tests ${{ github.event.inputs.test_filter }} -- --ignored --nocapture
             else
-              cargo test --test integration_tests ${{ github.event.inputs.test_filter }} -- --ignored
+              cargo test --manifest-path integration-tests/Cargo.toml --test integration_tests ${{ github.event.inputs.test_filter }} -- --ignored
             fi
           fi
         env:

@@ -1,4 +1,4 @@
-# stellar-router [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Language: Rust](https://img.shields.io/badge/language-Rust-orange.svg)](https://www.rust-lang.org/)
+# stellar-router [![CI](https://github.com/Maki-Zeninn/stellar-router/actions/workflows/ci.yml/badge.svg)](https://github.com/Maki-Zeninn/stellar-router/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Language: Rust](https://img.shields.io/badge/language-Rust-orange.svg)](https://www.rust-lang.org/) [![Minimum Rust Version](https://img.shields.io/badge/rust-1.75%2B-blue.svg)](https://www.rust-lang.org/) <!-- [![crates.io](https://img.shields.io/crates/v/stellar-router.svg)](https://crates.io/crates/stellar-router) (not yet published) -->
 
 A modular cross-contract routing infrastructure suite for Stellar/Soroban.
 
@@ -7,29 +7,86 @@ A modular cross-contract routing infrastructure suite for Stellar/Soroban.
 `stellar-router` provides a complete set of infrastructure primitives for building
 composable, upgradeable, and access-controlled multi-contract systems on Soroban.
 
+### System Architecture
+
+```mermaid
+graph TD
+    %% User/External Interaction
+    User([User / Client Application])
+    API[API Server]
+    Metrics[Metrics Exporter]
+
+    %% Core Components
+    subgraph "On-Chain Infrastructure (Soroban)"
+        Core[router-core]
+        Registry[router-registry]
+        Access[router-access]
+        Middleware[router-middleware]
+        Timelock[router-timelock]
+        Multicall[router-multicall]
+        Execution[router-execution]
+        Quote[router-quote]
+    end
+
+    %% External Systems
+    RPC[Stellar RPC Node]
+    Prometheus[(Prometheus / Grafana)]
+
+    %% Connections
+    User --> API
+    API --> RPC
+    RPC <--> Core
+    
+    %% Internal Dependency/Flow
+    Core -->|lookup address| Registry
+    Core -->|verify permissions| Access
+    Core -->|pre/post call hooks| Middleware
+    Core -->|queue sensitive changes| Timelock
+    
+    Execution -->|resolve routes| Core
+    Quote -->|simulate flow| Execution
+    
+    Multicall -->|batch resolution| Core
+    
+    %% Monitoring Flow
+    Metrics -->|poll contract state| RPC
+    Metrics -->|expose metrics| Prometheus
+    API -.->|query for dashboards| Prometheus
+    
+    %% Styling
+    style Core fill:#f9f,stroke:#333,stroke-width:4px
+    style Registry fill:#dfd,stroke:#333
+    style Access fill:#dfd,stroke:#333
+    style Middleware fill:#ffd,stroke:#333
+    style Timelock fill:#ffd,stroke:#333
+    style Execution fill:#ddf,stroke:#333
+    style Quote fill:#ddf,stroke:#333
 ```
-┌─────────────────────────────────────────────────────┐
-│                    router-core                      │
-│         Central dispatcher & route resolver         │
-└────────────┬────────────────────────┬───────────────┘
-             │                        │
-    ┌────────▼────────┐      ┌────────▼────────┐
-    │ router-registry │      │  router-access  │
-    │ Contract address│      │  Role-based ACL │
-    │ versioning      │      │  & whitelisting │
-    └─────────────────┘      └─────────────────┘
-             │                        │
-    ┌────────▼────────┐      ┌────────▼────────┐
-    │router-middleware│      │router-timelock  │
-    │ Rate limiting   │      │ Delayed change  │
-    │ Call logging    │      │ execution queue │
-    └─────────────────┘      └─────────────────┘
-                      │
-             ┌────────▼────────┐
-             │router-multicall │
-             │ Batch calls in  │
-             │ one transaction │
-             └─────────────────┘
+
+### Route Resolution Flow
+
+```mermaid
+sequenceDiagram
+    participant User as Caller
+    participant Core as router-core
+    participant Registry as router-registry
+    participant Access as router-access
+    participant MW as router-middleware
+    participant Target as Target Contract
+
+    User->>Core: resolve(route_name)
+    Core->>Access: check_auth(caller, route)
+    Access-->>Core: authorized
+    Core->>MW: pre_call(route_name)
+    MW-->>Core: ok (rate limit check)
+    Core->>Registry: get_latest(route_name)
+    Registry-->>Core: address: v2.1.0
+    Core-->>User: address
+    
+    Note over User, Target: Optional Execution Flow
+    User->>Target: call(params)
+    Core->>MW: post_call(route_name)
+    MW-->>Core: log event
 ```
 
 ## Contracts
@@ -42,14 +99,7 @@ composable, upgradeable, and access-controlled multi-contract systems on Soroban
 | `router-middleware` | Rate limiting, route enable/disable, and call event logging | 6 |
 | `router-timelock` | Delayed execution queue for sensitive configuration changes | 7 |
 | `router-multicall` | Batch multiple cross-contract calls in one transaction | 6 |
-
-## Metrics & Monitoring
-
-| Component | Description |
-|---|---|
-| `router-metrics-exporter` | Prometheus/OpenTelemetry metrics exporter (off-chain binary) |
-
-The metrics exporter is an off-chain Rust binary that polls the Soroban RPC endpoint and exposes contract metrics in Prometheus format. See [`metrics/README.md`](metrics/README.md) for details.
+| `router-quote` | Configurable fee-based quote calculation and best-route selection | 13 |
 
 ## Architecture
 
@@ -93,6 +143,21 @@ can call it, not just the admin. This is intentional: `router-multicall` is desi
 as a public batching service where any caller can batch their own cross-contract
 calls to reduce round-trips. The admin role is only used for configuration (e.g.,
 setting `max_batch_size`).
+
+### router-quote
+Quote calculation and route comparison. Provides configurable fee-based quote
+calculations and best-route selection for comparing multiple liquidity routes.
+
+Key features:
+- **Configurable fee_bps per route** — each route can have its own fee in basis
+  points (1 bps = 0.01%). Falls back to a configurable default fee if no
+  route-specific fee is set. Replaces the old hardcoded 1% fee.
+- **`get_quote(request)`** — calculates a single quote with the route's configured
+  `fee_bps`, returning `amount_out`, `fee_amount`, and `fee_bps` used.
+- **`get_quotes(requests)`** — calculates quotes for multiple routes at once.
+- **`get_best_quote(requests)`** — calls `get_quotes()` internally and returns the
+  single `QuoteResponse` with the highest `amount_out`. Useful for automatic
+  route comparison and selection.
 
 ## Getting Started
 
@@ -155,7 +220,7 @@ Run integration tests on Stellar testnet:
 cargo test --test integration_tests -- --ignored --test-threads=1 --nocapture
 ```
 
-See [INTEGRATION_TESTS.md](INTEGRATION_TESTS.md) for detailed integration test documentation.
+See [integration-tests/tests/README.md](integration-tests/tests/README.md) for detailed integration test documentation.
 
 ### Build for Deployment (WASM)
 
@@ -203,9 +268,19 @@ stellar contract deploy \
   --wasm target/wasm32-unknown-unknown/release/router_multicall.wasm \
   --network testnet --source <your-account>
 
-# 6. Deploy core last (depends on all others)
+# 6. Deploy core
 stellar contract deploy \
   --wasm target/wasm32-unknown-unknown/release/router_core.wasm \
+  --network testnet --source <your-account>
+
+# 7. Deploy execution (depends on router-core)
+stellar contract deploy \
+  --wasm target/wasm32-unknown-unknown/release/router_execution.wasm \
+  --network testnet --source <your-account>
+
+# 8. Deploy quote last (depends on router-execution)
+stellar contract deploy \
+  --wasm target/wasm32-unknown-unknown/release/router_quote.wasm \
   --network testnet --source <your-account>
 ```
 
