@@ -10,6 +10,14 @@ use soroban_sdk::{
 
 const MAX_HIERARCHY_DEPTH: u32 = 16;
 
+/// Default cap on the total number of distinct role names the system may hold.
+/// Prevents unbounded `AllRoles` growth. Configurable via `set_role_limits`.
+const DEFAULT_MAX_ROLES: u32 = 100;
+
+/// Default cap on the number of addresses that may hold a single role.
+/// Prevents unbounded `RoleMembers` growth. Configurable via `set_role_limits`.
+const DEFAULT_MAX_GRANTS_PER_ROLE: u32 = 1_000;
+
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -26,6 +34,9 @@ pub enum DataKey {
     RoleExpiry(String, Address),
     RoleParent(String), // child role -> parent role
     AllRoles,           // Vec<String> — all roles ever defined in the system
+
+    /// Configurable limits: (max_roles, max_grants_per_role)
+    RoleLimits,
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -44,6 +55,10 @@ pub enum AccessError {
     HierarchyCycle = 9,
     InvalidExpiry = 10,
     HierarchyTooDeep = 11,
+    /// The system has reached its `MaxRoles` cap; no new role names may be introduced.
+    MaxRolesExceeded = 12,
+    /// The role has reached its `MaxGrantsPerRole` cap; no further addresses may be granted this role.
+    MaxGrantsPerRoleExceeded = 13,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -62,6 +77,45 @@ impl RouterAccess {
             .instance()
             .set(&DataKey::SuperAdmin, &super_admin);
         Ok(())
+    }
+
+    /// Configure the role-system limits.
+    ///
+    /// Both limits are enforced at grant/introduction time:
+    /// - `max_roles` — maximum number of *distinct* role names ever introduced
+    ///   into the system (tracked in `AllRoles`).  Pass `0` to restore the
+    ///   default (`DEFAULT_MAX_ROLES`).
+    /// - `max_grants_per_role` — maximum number of addresses that may
+    ///   simultaneously hold a given role (tracked by `RoleMemberCount`).
+    ///   Pass `0` to restore the default (`DEFAULT_MAX_GRANTS_PER_ROLE`).
+    ///
+    /// Only the super-admin may call this function.
+    pub fn set_role_limits(
+        env: Env,
+        caller: Address,
+        max_roles: u32,
+        max_grants_per_role: u32,
+    ) -> Result<(), AccessError> {
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::SuperAdmin, AccessError)?;
+        let effective_max_roles = if max_roles == 0 { DEFAULT_MAX_ROLES } else { max_roles };
+        let effective_max_grants = if max_grants_per_role == 0 {
+            DEFAULT_MAX_GRANTS_PER_ROLE
+        } else {
+            max_grants_per_role
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::RoleLimits, &(effective_max_roles, effective_max_grants));
+        Ok(())
+    }
+
+    /// Return the currently active role limits as `(max_roles, max_grants_per_role)`.
+    ///
+    /// Falls back to the compile-time defaults when no explicit limits have been
+    /// configured via [`set_role_limits`].
+    pub fn get_role_limits(env: Env) -> (u32, u32) {
+        Self::role_limits_internal(&env)
     }
 
     /// Grant a role to an address.
@@ -188,7 +242,7 @@ impl RouterAccess {
             return Err(AccessError::Blacklisted);
         }
         // Track this role in AllRoles if it's the first time we've seen it
-        Self::track_role_in_all_roles(&env, &role);
+        Self::track_role_in_all_roles(&env, &role)?;
         env.storage()
             .instance()
             .set(&DataKey::RoleAdmin(role.clone()), &admin);
@@ -217,8 +271,8 @@ impl RouterAccess {
         router_common::require_admin_simple!(&env, &caller, &DataKey::SuperAdmin, AccessError)?;
         Self::ensure_no_role_parent_cycle(&env, &role, &parent_role)?;
 
-        Self::track_role_in_all_roles(&env, &role);
-        Self::track_role_in_all_roles(&env, &parent_role);
+        Self::track_role_in_all_roles(&env, &role)?;
+        Self::track_role_in_all_roles(&env, &parent_role)?;
 
         env.storage()
             .instance()
@@ -468,7 +522,7 @@ impl RouterAccess {
         }
 
         // Track this role in AllRoles if it's the first time we've seen it.
-        Self::track_role_in_all_roles(&env, &role);
+        Self::track_role_in_all_roles(&env, &role)?;
 
         env.storage()
             .instance()
@@ -632,16 +686,24 @@ impl RouterAccess {
     }
 
     /// Track a role name in the AllRoles list if it hasn't been seen before.
-    fn track_role_in_all_roles(env: &Env, role: &String) {
+    ///
+    /// Returns `Err(AccessError::MaxRolesExceeded)` when the system has already
+    /// reached its configured `max_roles` cap and `role` is a brand-new name.
+    fn track_role_in_all_roles(env: &Env, role: &String) -> Result<(), AccessError> {
         let mut all_roles: Vec<String> = env
             .storage()
             .instance()
             .get(&DataKey::AllRoles)
             .unwrap_or_else(|| Vec::new(env));
         if !all_roles.iter().any(|r| r == *role) {
+            let (max_roles, _) = Self::role_limits_internal(env);
+            if all_roles.len() >= max_roles {
+                return Err(AccessError::MaxRolesExceeded);
+            }
             all_roles.push_back(role.clone());
             env.storage().instance().set(&DataKey::AllRoles, &all_roles);
         }
+        Ok(())
     }
 
     fn access_error_to_batch(env: &Env, err: AccessError) -> router_common::BatchItemError {
@@ -673,7 +735,21 @@ impl RouterAccess {
             AccessError::HierarchyTooDeep => router_common::BatchItemError::Custom(
                 soroban_sdk::String::from_str(env, "HierarchyTooDeep"),
             ),
+            AccessError::MaxRolesExceeded => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "MaxRolesExceeded"),
+            ),
+            AccessError::MaxGrantsPerRoleExceeded => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "MaxGrantsPerRoleExceeded"),
+            ),
         }
+    }
+
+    /// Read `(max_roles, max_grants_per_role)` from storage, falling back to defaults.
+    fn role_limits_internal(env: &Env) -> (u32, u32) {
+        env.storage()
+            .instance()
+            .get::<DataKey, (u32, u32)>(&DataKey::RoleLimits)
+            .unwrap_or((DEFAULT_MAX_ROLES, DEFAULT_MAX_GRANTS_PER_ROLE))
     }
 
     /// Validates a prospective `role -> parent_role` edge: rejects it if it
@@ -755,7 +831,7 @@ impl RouterAccess {
         }
 
         // Track this role in AllRoles if it's the first time we've seen it
-        Self::track_role_in_all_roles(env, role);
+        Self::track_role_in_all_roles(env, role)?;
 
         let expiry_timestamp = match expires_in {
             Some(seconds) => env
@@ -776,6 +852,16 @@ impl RouterAccess {
             .get(&DataKey::RoleMembers(role.clone()))
             .unwrap_or_else(|| Vec::new(env));
         if !members.iter().any(|a| a == *account) {
+            // Enforce MaxGrantsPerRole before adding a new member.
+            let (_, max_grants) = Self::role_limits_internal(env);
+            let current_count: u32 = env
+                .storage()
+                .instance()
+                .get::<DataKey, u32>(&DataKey::RoleMemberCount(role.clone()))
+                .unwrap_or(0u32);
+            if current_count >= max_grants {
+                return Err(AccessError::MaxGrantsPerRoleExceeded);
+            }
             members.push_back(account.clone());
         }
         env.storage()

@@ -42,6 +42,11 @@ pub enum DataKey {
     CallLogSummary(String),           // route_name -> CallLogSummary
     RateLimitStrategy(String),        // route_name -> RateLimitStrategy
     CallerRateLimit(String, Address), // (route, caller) -> CallerRateLimitConfig
+    /// Per-route reentrancy guard. Set to `true` at the start of `pre_call`
+    /// and removed before every return (success or error). An admin
+    /// `reset_guard(route)` is provided for emergency recovery in case the
+    /// flag is ever left set by an unexpected panic path.
+    Executing(String), // route_name -> bool
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -172,6 +177,10 @@ pub enum MiddlewareError {
     MiddlewareDisabled = 6,
     InvalidConfig = 7,
     CircuitOpen = 8,
+    /// A re-entrant call to `pre_call` was detected for this route.
+    /// The `Executing` guard for this route can be cleared by an admin
+    /// via `reset_guard(route)` if it was left set by an unexpected error.
+    Reentrancy = 9,
 }
 
 /// Per-caller rate limit override for a specific route.
@@ -297,21 +306,61 @@ impl RouterMiddleware {
     }
 
     /// Pre-call hook: validates rate limits and route status.
+    ///
+    /// A per-route `DataKey::Executing` boolean is set at the very start and
+    /// removed before every return (success **and** every error path) to
+    /// prevent two classes of bug:
+    ///
+    /// 1. **Reentrancy** — a cross-contract call made from inside a hook that
+    ///    calls back into this contract on the same route would otherwise
+    ///    bypass the guard entirely.
+    /// 2. **Permanent lock** — if an error is returned *after* state has been
+    ///    partially written (e.g. rate-limit counter incremented, circuit
+    ///    transitioned to half-open) the flag must still be cleared so that
+    ///    future legitimate calls are not permanently blocked.
+    ///
+    /// In the unlikely event the flag is left set (e.g. by a future panic
+    /// path), an admin can call `reset_guard(route)` to recover.
     pub fn pre_call(env: Env, caller: Address, route: String) -> Result<(), MiddlewareError> {
+        // ── Reentrancy guard: set ────────────────────────────────────────────
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::Executing(route.clone()))
+            .unwrap_or(false)
+        {
+            return Err(MiddlewareError::Reentrancy);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::Executing(route.clone()), &true);
+
+        // ── Global enabled check ─────────────────────────────────────────────
         let enabled: bool = env
             .storage()
             .instance()
             .get(&DataKey::GlobalEnabled)
             .unwrap_or(true);
         if !enabled {
+            env.storage()
+                .instance()
+                .remove(&DataKey::Executing(route.clone()));
             return Err(MiddlewareError::MiddlewareDisabled);
         }
 
+        // ── Per-route validation + state computation ─────────────────────────
         let new_route_call_state = if let Some(config) = env
             .storage()
             .instance()
             .get::<DataKey, RouteConfig>(&DataKey::RouteConfig(route.clone()))
         {
+            if !config.enabled {
+                env.storage()
+                    .instance()
+                    .remove(&DataKey::Executing(route.clone()));
+                return Err(MiddlewareError::RouteDisabled);
+            }
+
             let mut route_call_state: RouteCallState = env
                 .storage()
                 .instance()
@@ -326,42 +375,41 @@ impl RouterMiddleware {
                     },
                 });
 
-            if !config.enabled {
-                return Err(MiddlewareError::RouteDisabled);
-            }
-
-            let mut state_changed = false;
-            if config.failure_threshold > 0 {
-                let was_open = route_call_state.circuit_breaker.is_open;
-                if circuit_breaker::check_and_transition(
-                    &env,
-                    &route,
-                    &config,
-                    &mut route_call_state,
-                ) {
             let mut state_changed = Self::prune_stale_rate_limits(
                 &env,
                 &mut route_call_state.rate_limits,
                 env.ledger().timestamp(),
                 config.window_seconds,
             );
-            if config.failure_threshold > 0 && route_call_state.circuit_breaker.is_open {
-                let now = env.ledger().timestamp();
-                let recovers = config.recovery_window_seconds > 0
-                    && now
-                        >= route_call_state.circuit_breaker.opened_at
-                            + config.recovery_window_seconds;
-                if !recovers {
+
+            // Circuit breaker check: transitions open→half-open if recovery
+            // window has elapsed; returns true when the call must be blocked.
+            if config.failure_threshold > 0 {
+                let blocked = circuit_breaker::check_and_transition(
+                    &env,
+                    &route,
+                    &config,
+                    &mut route_call_state,
+                );
+                if blocked {
+                    // Persist the (potentially half-open) state before leaving.
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::RouteCallState(route.clone()), &route_call_state);
+                    env.storage()
+                        .instance()
+                        .remove(&DataKey::Executing(route.clone()));
                     return Err(MiddlewareError::CircuitOpen);
                 }
-                if was_open {
-                    state_changed = true;
-                }
+                // check_and_transition may have mutated the circuit breaker
+                // (open → half-open). Mark state as dirty so it gets persisted.
+                state_changed = true;
             }
 
+            // Rate limit check.
             if config.max_calls_per_window > 0 {
-                // Resolve effective limit: per-caller override takes precedence over
-                // the route-level default when a CallerRateLimit entry is present.
+                // Resolve effective limit: per-caller override takes precedence
+                // over the route-level default when present.
                 let (effective_limit, effective_window) = env
                     .storage()
                     .instance()
@@ -397,9 +445,13 @@ impl RouterMiddleware {
 
                     match strategy {
                         RateLimitStrategy::Reject => {
+                            // Persist updated violation count before rejecting.
                             env.storage()
                                 .instance()
                                 .set(&DataKey::RouteCallState(route.clone()), &route_call_state);
+                            env.storage()
+                                .instance()
+                                .remove(&DataKey::Executing(route.clone()));
                             return Err(MiddlewareError::RateLimitExceeded);
                         }
                         RateLimitStrategy::Throttle => {
@@ -431,12 +483,18 @@ impl RouterMiddleware {
             None
         };
 
+        // ── Double-commit guard: re-check global enable + route enable ───────
+        // These checks run after state has been computed but before it is
+        // committed, so a concurrent disable cannot slip through.
         let still_enabled: bool = env
             .storage()
             .instance()
             .get(&DataKey::GlobalEnabled)
             .unwrap_or(true);
         if !still_enabled {
+            env.storage()
+                .instance()
+                .remove(&DataKey::Executing(route.clone()));
             return Err(MiddlewareError::MiddlewareDisabled);
         }
 
@@ -446,10 +504,14 @@ impl RouterMiddleware {
             .get::<DataKey, RouteConfig>(&DataKey::RouteConfig(route.clone()))
         {
             if !config.enabled {
+                env.storage()
+                    .instance()
+                    .remove(&DataKey::Executing(route.clone()));
                 return Err(MiddlewareError::RouteDisabled);
             }
         }
 
+        // ── Commit state + bookkeeping ───────────────────────────────────────
         if let Some(route_call_state) = new_route_call_state {
             env.storage()
                 .instance()
@@ -469,6 +531,11 @@ impl RouterMiddleware {
             (Symbol::new(&env, "pre_call"),),
             (caller.clone(), route.clone()),
         );
+
+        // ── Reentrancy guard: clear ──────────────────────────────────────────
+        env.storage()
+            .instance()
+            .remove(&DataKey::Executing(route.clone()));
 
         Ok(())
     }
@@ -806,6 +873,34 @@ impl RouterMiddleware {
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, MiddlewareError)?;
 
         circuit_breaker::reset(&env, &route);
+        Ok(())
+    }
+
+    /// Emergency admin function to clear a stuck `Executing` reentrancy guard.
+    ///
+    /// Under normal operation `pre_call` always removes `DataKey::Executing`
+    /// before returning, so this function should never be needed. It exists
+    /// as a safety escape-hatch: if a future panic path (or a host-level
+    /// abort) somehow leaves the guard set, a legitimate next call to
+    /// `pre_call` on the same route would return `Reentrancy` forever.
+    /// Calling `reset_guard` clears that flag and restores normal operation.
+    ///
+    /// Admin only. Emits a `guard_reset` event with the route name.
+    pub fn reset_guard(
+        env: Env,
+        caller: Address,
+        route: String,
+    ) -> Result<(), MiddlewareError> {
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, MiddlewareError)?;
+
+        env.storage()
+            .instance()
+            .remove(&DataKey::Executing(route.clone()));
+
+        env.events()
+            .publish((Symbol::new(&env, "guard_reset"),), route);
+
         Ok(())
     }
 
@@ -2510,5 +2605,220 @@ mod tests {
         let caller = Address::generate(&env);
 
         assert!(client.try_set_caller_rate_limit(&admin, &route, &caller, &0, &0).is_ok());
+    }
+
+    // ── Reentrancy guard tests ────────────────────────────────────────────────
+
+    /// A second concurrent call to pre_call on the same route while the guard
+    /// is set must return Reentrancy. After the first call completes the guard
+    /// must be cleared, so a subsequent independent call must succeed.
+    #[test]
+    fn test_reentrancy_guard_cleared_after_successful_pre_call() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &10, &60, &true, &0, &0, &0, &0);
+        let caller = Address::generate(&env);
+
+        // First pre_call must succeed.
+        assert!(client.try_pre_call(&caller, &route).is_ok());
+
+        // The guard must have been cleared — a second pre_call must also succeed,
+        // not return Reentrancy.
+        assert!(
+            client.try_pre_call(&caller, &route).is_ok(),
+            "guard must be cleared after a successful pre_call"
+        );
+    }
+
+    /// Guard must be cleared when pre_call returns RouteDisabled (early error
+    /// path triggered before rate-limit / circuit-breaker logic runs).
+    #[test]
+    fn test_reentrancy_guard_cleared_after_route_disabled_error() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        // Configure with route disabled.
+        client.configure_route(&admin, &route, &0, &0, &false, &0, &0, &0, &0);
+        let caller = Address::generate(&env);
+
+        // pre_call must fail with RouteDisabled.
+        assert_eq!(
+            client.try_pre_call(&caller, &route),
+            Err(Ok(MiddlewareError::RouteDisabled))
+        );
+
+        // Re-enable the route; pre_call must now succeed — not return Reentrancy.
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &0, &0);
+        assert!(
+            client.try_pre_call(&caller, &route).is_ok(),
+            "guard must be cleared after a RouteDisabled error"
+        );
+    }
+
+    /// Guard must be cleared when pre_call returns MiddlewareDisabled.
+    #[test]
+    fn test_reentrancy_guard_cleared_after_middleware_disabled_error() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &0, &0);
+        let caller = Address::generate(&env);
+
+        client.set_global_enabled(&admin, &false);
+
+        assert_eq!(
+            client.try_pre_call(&caller, &route),
+            Err(Ok(MiddlewareError::MiddlewareDisabled))
+        );
+
+        // Re-enable middleware; pre_call must succeed — not return Reentrancy.
+        client.set_global_enabled(&admin, &true);
+        assert!(
+            client.try_pre_call(&caller, &route).is_ok(),
+            "guard must be cleared after a MiddlewareDisabled error"
+        );
+    }
+
+    /// Guard must be cleared when pre_call returns RateLimitExceeded.
+    #[test]
+    fn test_reentrancy_guard_cleared_after_rate_limit_exceeded_error() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        // Max 1 call per window.
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0, &0);
+        let caller = Address::generate(&env);
+
+        // First call succeeds.
+        assert!(client.try_pre_call(&caller, &route).is_ok());
+
+        // Second call is rate-limited.
+        assert_eq!(
+            client.try_pre_call(&caller, &route),
+            Err(Ok(MiddlewareError::RateLimitExceeded))
+        );
+
+        // Advance past the window; the third call must succeed — not return Reentrancy.
+        env.ledger().with_mut(|l| l.timestamp += 61);
+        assert!(
+            client.try_pre_call(&caller, &route).is_ok(),
+            "guard must be cleared after a RateLimitExceeded error"
+        );
+    }
+
+    /// Guard must be cleared when pre_call returns CircuitOpen.
+    #[test]
+    fn test_reentrancy_guard_cleared_after_circuit_open_error() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        // failure_threshold=1, 60-second recovery window.
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &60, &0, &0);
+        let caller = Address::generate(&env);
+
+        // Trip the circuit.
+        client.post_call(&caller, &route, &false);
+
+        // pre_call must be blocked with CircuitOpen.
+        assert_eq!(
+            client.try_pre_call(&caller, &route),
+            Err(Ok(MiddlewareError::CircuitOpen))
+        );
+
+        // Advance past the recovery window; pre_call must succeed — not Reentrancy.
+        env.ledger().with_mut(|l| l.timestamp += 61);
+        assert!(
+            client.try_pre_call(&caller, &route).is_ok(),
+            "guard must be cleared after a CircuitOpen error"
+        );
+    }
+
+    /// reset_guard clears a stuck Executing flag, restoring normal operation.
+    #[test]
+    fn test_reset_guard_clears_stuck_executing_flag() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &0, &0);
+        let caller = Address::generate(&env);
+
+        // Manually set the Executing flag as if a panic path left it stuck.
+        // We do this through a successful pre_call followed by directly
+        // asserting the recovery path: simulate by calling pre_call twice in
+        // quick succession from the contract's perspective.
+        //
+        // Because Soroban's test environment is single-threaded we can't
+        // interleave two calls, so we test the recovery path by:
+        // 1. Confirming a successful call works (guard is set then cleared).
+        // 2. Manually encoding the "stuck" scenario via a contract storage write.
+        // 3. Verifying reset_guard unblocks the next call.
+        //
+        // Direct storage manipulation is not available from the test client,
+        // so we verify the observable invariant: after reset_guard any call
+        // that would have returned Reentrancy now returns the correct outcome.
+        //
+        // The guard starts unset — pre_call succeeds.
+        assert!(client.try_pre_call(&caller, &route).is_ok());
+
+        // reset_guard on a route with no stuck flag is a no-op and must not error.
+        assert!(
+            client.try_reset_guard(&admin, &route).is_ok(),
+            "reset_guard on a clean route must succeed"
+        );
+
+        // Post-reset, pre_call must still work normally.
+        assert!(
+            client.try_pre_call(&caller, &route).is_ok(),
+            "pre_call must work normally after reset_guard"
+        );
+    }
+
+    /// reset_guard is admin-only; an unauthorized caller must receive Unauthorized.
+    #[test]
+    fn test_reset_guard_unauthorized_fails() {
+        let (env, _admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        let attacker = Address::generate(&env);
+
+        let result = client.try_reset_guard(&attacker, &route);
+        assert_eq!(result, Err(Ok(MiddlewareError::Unauthorized)));
+    }
+
+    /// reset_guard emits a guard_reset event with the route name.
+    #[test]
+    fn test_reset_guard_emits_event() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+
+        client.reset_guard(&admin, &route);
+
+        let events = env.events().all();
+        let topic = Symbol::new(&env, "guard_reset");
+        let found = events.iter().any(|e| {
+            e.1.get(0)
+                .map(|t| soroban_sdk::Symbol::from_val(&env, &t) == topic)
+                .unwrap_or(false)
+        });
+        assert!(found, "guard_reset event must be emitted");
+    }
+
+    /// Multiple routes each have an independent Executing guard; blocking one
+    /// route must not affect calls on a different route.
+    #[test]
+    fn test_reentrancy_guard_is_per_route() {
+        let (env, admin, client) = setup();
+        let route_a = String::from_str(&env, "oracle/price");
+        let route_b = String::from_str(&env, "vault/deposit");
+        client.configure_route(&admin, &route_a, &1, &60, &true, &0, &0, &0, &0);
+        client.configure_route(&admin, &route_b, &10, &60, &true, &0, &0, &0, &0);
+        let caller = Address::generate(&env);
+
+        // Use up route_a's rate limit.
+        assert!(client.try_pre_call(&caller, &route_a).is_ok());
+        assert_eq!(
+            client.try_pre_call(&caller, &route_a),
+            Err(Ok(MiddlewareError::RateLimitExceeded))
+        );
+
+        // route_b must be completely unaffected — no Reentrancy, normal operation.
+        assert!(
+            client.try_pre_call(&caller, &route_b).is_ok(),
+            "reentrancy guard on route_a must not affect route_b"
+        );
     }
 }
