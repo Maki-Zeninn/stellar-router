@@ -756,6 +756,50 @@ mod tests {
     }
 
     #[test]
+    fn test_get_route_fee_tiers_returns_empty_when_not_set() {
+        let (env, _admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+        let tiers = client.get_route_fee_tiers(&route);
+        assert!(tiers.is_empty());
+    }
+
+    #[test]
+    fn test_get_route_fee_tiers_returns_sorted_tiers() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+
+        // Create tiers in unsorted order
+        let tiers = vec![
+            &env,
+            FeeTier {
+                min_amount: 100000,
+                fee_bps: 10,
+            },
+            FeeTier {
+                min_amount: 0,
+                fee_bps: 50,
+            },
+            FeeTier {
+                min_amount: 10000,
+                fee_bps: 30,
+            },
+        ];
+
+        client.set_route_fee_tiers(&admin, &route, &tiers);
+
+        let retrieved_tiers = client.get_route_fee_tiers(&route);
+        assert_eq!(retrieved_tiers.len(), 3);
+
+        // Verify tiers are sorted by min_amount ascending
+        assert_eq!(retrieved_tiers.get(0).unwrap().min_amount, 0);
+        assert_eq!(retrieved_tiers.get(0).unwrap().fee_bps, 50);
+        assert_eq!(retrieved_tiers.get(1).unwrap().min_amount, 10000);
+        assert_eq!(retrieved_tiers.get(1).unwrap().fee_bps, 30);
+        assert_eq!(retrieved_tiers.get(2).unwrap().min_amount, 100000);
+        assert_eq!(retrieved_tiers.get(2).unwrap().fee_bps, 10);
+    }
+
+    #[test]
     fn test_get_quote_with_default_fee() {
         let (env, _admin, client) = setup();
         let token_in = Address::generate(&env);
