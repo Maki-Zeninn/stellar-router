@@ -20,6 +20,9 @@
 //!   `surge_pricing`/`high_load` here reflect only the caller's own asserted load
 //!   hint (see `estimate_fee`), not a verified on-chain network-congestion signal.
 //! - `simulation_result` — Pre-execution simulation result (target, function, success)
+//! - `execution_retry` — Retry attempt following a transient network error (target, function, attempts, delay_ms)
+//! - `execution_error` — Execution error logged (target, function, error_code, attempts)
+//! - `admin_transferred` — Admin transferred to a new address (previous_admin, new_admin)
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
@@ -674,6 +677,17 @@ impl RouterExecution {
         Ok(())
     }
 
+    /// Get the global cap on per-request retry attempts.
+    ///
+    /// # Errors
+    /// * [`ExecutionError::NotInitialized`] — if the contract has not been initialized.
+    pub fn max_retries(env: Env) -> Result<u32, ExecutionError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxRetries)
+            .ok_or(ExecutionError::NotInitialized)
+    }
+
     /// Get the current cap on the number of execution history records retained.
     pub fn max_history_size(env: Env) -> u32 {
         env.storage()
@@ -712,6 +726,25 @@ impl RouterExecution {
             }
         }
         Ok(result)
+    }
+
+    /// Get the current count of stored execution history records.
+    ///
+    /// Returns the number of records currently in the execution history without
+    /// materializing the entire vector across the host boundary.
+    ///
+    /// # Errors
+    /// * [`ExecutionError::NotInitialized`] — if the contract is not initialized.
+    pub fn execution_history_len(env: Env) -> Result<u32, ExecutionError> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(ExecutionError::NotInitialized);
+        }
+        let history: Vec<ExecutionRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExecHistory)
+            .unwrap_or(Vec::new(&env));
+        Ok(history.len() as u32)
     }
 
     /// Get the current admin address.
@@ -1048,6 +1081,31 @@ mod tests {
         assert_eq!(result, Err(Ok(ExecutionError::Unauthorized)));
     }
 
+    #[test]
+    fn test_max_retries_returns_initialization_value() {
+        let (_, _, client) = setup();
+        // setup() initializes with max_retries=2
+        assert_eq!(client.max_retries(), 2);
+    }
+
+    #[test]
+    fn test_max_retries_reflects_updates() {
+        let (_, admin, client) = setup();
+        assert_eq!(client.max_retries(), 2);
+        client.set_max_retries(&admin, &3);
+        assert_eq!(client.max_retries(), 3);
+    }
+
+    #[test]
+    fn test_max_retries_uninitialized_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let result = client.try_max_retries();
+        assert_eq!(result, Err(Ok(ExecutionError::NotInitialized)));
+    }
+
     // ── Execution history size limit (#664) ───────────────────────────────────
 
     #[test]
@@ -1118,6 +1176,51 @@ mod tests {
         let (_, _, client) = setup();
         let history = client.get_execution_history(&10);
         assert_eq!(history.len(), 0);
+    }
+
+    #[test]
+    fn test_execution_history_len_fresh_contract_is_zero() {
+        let (_, _, client) = setup();
+        assert_eq!(client.execution_history_len(), 0);
+    }
+
+    #[test]
+    fn test_execution_history_len_reflects_appends() {
+        let (env, _, client) = setup();
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        env.as_contract(&client.address, || {
+            for i in 0..5u32 {
+                RouterExecution::append_history(&env, &target, &function, true, 0);
+                assert_eq!(RouterExecution::execution_history_len(env.clone()), Ok(i + 1));
+            }
+        });
+        assert_eq!(client.execution_history_len(), 5);
+    }
+
+    #[test]
+    fn test_execution_history_len_after_eviction() {
+        let (env, admin, client) = setup();
+        client.set_max_history_size(&admin, &3);
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        env.as_contract(&client.address, || {
+            for _ in 0..5u32 {
+                RouterExecution::append_history(&env, &target, &function, true, 0);
+            }
+        });
+        // Should be capped at 3 due to eviction of oldest entries
+        assert_eq!(client.execution_history_len(), 3);
+    }
+
+    #[test]
+    fn test_execution_history_len_uninitialized_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let result = client.try_execution_history_len();
+        assert_eq!(result, Err(Ok(ExecutionError::NotInitialized)));
     }
 
     #[test]
