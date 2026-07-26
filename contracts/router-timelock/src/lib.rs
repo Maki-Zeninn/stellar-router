@@ -13,6 +13,8 @@
 //! - `op_cancelled`           — Operation cancelled (op_id)
 //! - `op_description_updated` — Operation description updated (op_id, new_description)
 //! - `min_delay_updated`      — Minimum delay updated (old_min_delay, new_min_delay)
+//! - `ops_cleaned`            — Expired/finalized operations cleaned (count)
+//! - `admin_transferred`      — Admin transferred (old_admin, new_admin)
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, xdr::ToXdr, Address, Bytes, Env, String,
@@ -400,6 +402,17 @@ impl RouterTimelock {
         env.storage().instance().get(&DataKey::Op(op_id))
     }
 
+    /// Get the dependency operation IDs stored for `op_id`, if any.
+    ///
+    /// Returns an empty `Vec` when no dependencies were recorded (i.e. the
+    /// operation was queued without deps, or the `op_id` does not exist).
+    pub fn get_dependencies(env: Env, op_id: Bytes) -> Vec<Bytes> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Deps(op_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
     /// Get the human-readable status of an operation.
     ///
     /// # Returns
@@ -551,6 +564,14 @@ impl RouterTimelock {
         }
 
         Ok(result)
+    }
+
+    /// Get the maximum allowed number of pending operations.
+    pub fn get_max_pending_ops(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxPendingOps)
+            .unwrap_or(0)
     }
 
     /// Get the minimum delay.
@@ -787,6 +808,13 @@ mod tests {
         assert_eq!(op.grace_period_seconds, GRACE);
         assert!(!op.executed);
         assert!(!op.cancelled);
+    }
+
+    #[test]
+    fn test_get_op_nonexistent_returns_none() {
+        let (env, _admin, client) = setup();
+        let fake_id = Bytes::from_array(&env, &[0u8; 32]);
+        assert_eq!(client.get_op(&fake_id), None);
     }
 
     #[test]
@@ -1561,6 +1589,17 @@ mod tests {
     // ── QueueFull limit ───────────────────────────────────────────────────────
 
     #[test]
+    fn test_get_max_pending_ops_returns_initialized_value() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterTimelock);
+        let client = RouterTimelockClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &3600, &50);
+        assert_eq!(client.get_max_pending_ops(), 50);
+    }
+
+    #[test]
     fn test_queue_fails_when_pending_limit_reached() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1942,5 +1981,65 @@ mod tests {
         );
         assert_eq!(result, Err(Ok(TimelockError::DependencyTooDeep)));
         let _ = last_id;
+    }
+
+    // ── get_dependencies ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_dependencies_returns_stored_deps() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+
+        // Queue a parent op (no deps)
+        let parent_id = client.queue(
+            &admin,
+            &String::from_str(&env, "parent"),
+            &target,
+            &3600,
+            &GRACE,
+            &Vec::new(&env),
+        );
+
+        // Queue a child op that depends on the parent
+        let mut deps = Vec::new(&env);
+        deps.push_back(parent_id.clone());
+        let child_id = client.queue(
+            &admin,
+            &String::from_str(&env, "child"),
+            &target,
+            &3600,
+            &GRACE,
+            &deps,
+        );
+
+        let stored_deps = client.get_dependencies(&child_id);
+        assert_eq!(stored_deps.len(), 1);
+        assert_eq!(stored_deps.get(0).unwrap(), parent_id);
+    }
+
+    #[test]
+    fn test_get_dependencies_returns_empty_for_op_with_no_deps() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+
+        let op_id = client.queue(
+            &admin,
+            &String::from_str(&env, "no deps"),
+            &target,
+            &3600,
+            &GRACE,
+            &Vec::new(&env),
+        );
+
+        let deps = client.get_dependencies(&op_id);
+        assert_eq!(deps.len(), 0);
+    }
+
+    #[test]
+    fn test_get_dependencies_returns_empty_for_nonexistent_op() {
+        let (env, _admin, client) = setup();
+        let fake_id = Bytes::from_array(&env, &[0u8; 32]);
+        let deps = client.get_dependencies(&fake_id);
+        assert_eq!(deps.len(), 0);
     }
 }
