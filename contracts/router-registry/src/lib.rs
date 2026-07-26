@@ -76,6 +76,18 @@ pub enum RegistryError {
     InvalidHealthFn = 12,
 }
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+/// Maximum byte length of a semver constraint string accepted by
+/// [`RouterRegistry::get_latest_with_constraint`].
+///
+/// `constraint_str_buf` copies the constraint into a fixed-size stack buffer
+/// of exactly this size. Both the length guard (`if len > MAX_CONSTRAINT_LEN`)
+/// and the buffer declaration (`[0u8; MAX_CONSTRAINT_LEN]`) must use this
+/// constant so they stay in sync — a mismatch would cause a panic on
+/// out-of-bounds indexing at runtime.
+const MAX_CONSTRAINT_LEN: usize = 32;
+
 // ── Contract ──────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -297,6 +309,27 @@ impl RouterRegistry {
             .ok_or(RegistryError::NotFound)
     }
 
+    /// Check whether a specific version of a contract has been deprecated.
+    ///
+    /// This is a lightweight view alternative to calling [`get`] and reading
+    /// `.deprecated` off the full [`ContractEntry`]. Callers who only need to
+    /// know the deprecation status (e.g. a UI rendering a deprecation badge)
+    /// can avoid fetching and discarding the rest of the entry.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `name` - The human-readable name of the contract.
+    /// * `version` - The exact version number to query.
+    ///
+    /// # Returns
+    /// `true` if the entry is deprecated, `false` otherwise.
+    ///
+    /// # Errors
+    /// * [`RegistryError::NotFound`] — if no entry exists for `(name, version)`.
+    pub fn is_deprecated(env: Env, name: String, version: u32) -> Result<bool, RegistryError> {
+        Self::get(env, name, version).map(|entry| entry.deprecated)
+    }
+
     /// Get the latest (highest version) non-deprecated entry for a name.
     ///
     /// Iterates registered versions in descending order and returns the first
@@ -316,22 +349,7 @@ impl RouterRegistry {
         if versions.is_empty() {
             return Err(RegistryError::NotFound);
         }
-        // Iterate in reverse to find latest non-deprecated
-        let len = versions.len();
-        let mut i = len;
-        while i > 0 {
-            i -= 1;
-            let v = versions.get(i).ok_or(RegistryError::NotFound)?;
-            let entry: ContractEntry = env
-                .storage()
-                .instance()
-                .get(&DataKey::Entry(name.clone(), v))
-                .ok_or(RegistryError::NotFound)?;
-            if !entry.deprecated {
-                return Ok(entry);
-            }
-        }
-        Err(RegistryError::AllVersionsDeprecated)
+        Self::latest_non_deprecated(&env, &name, &versions)
     }
 
     /// Get the latest non-deprecated entry matching a semver constraint.
@@ -357,23 +375,12 @@ impl RouterRegistry {
     ) -> Result<ContractEntry, RegistryError> {
         let versions = Self::get_versions_list(&env, &name);
 
-        // If no constraint, use get_latest logic
+        // If no constraint, delegate to the shared helper (same semantics as get_latest)
         if constraint.is_none() {
-            let len = versions.len();
-            let mut i = len;
-            while i > 0 {
-                i -= 1;
-                let v = versions.get(i).ok_or(RegistryError::NotFound)?;
-                let entry: ContractEntry = env
-                    .storage()
-                    .instance()
-                    .get(&DataKey::Entry(name.clone(), v))
-                    .ok_or(RegistryError::NotFound)?;
-                if !entry.deprecated {
-                    return Ok(entry);
-                }
+            if versions.is_empty() {
+                return Err(RegistryError::NotFound);
             }
-            return Err(RegistryError::AllVersionsDeprecated);
+            return Self::latest_non_deprecated(&env, &name, &versions);
         }
 
         let constraint_str = constraint.unwrap();
@@ -782,6 +789,40 @@ impl RouterRegistry {
 
 
 
+    /// Iterates `versions` in descending order and returns the first
+    /// [`ContractEntry`] for `name` that is not deprecated.
+    ///
+    /// This is the single shared implementation used by both
+    /// [`get_latest`](Self::get_latest) and the "no constraint" branch of
+    /// [`get_latest_with_constraint`](Self::get_latest_with_constraint).
+    /// Any future change to "how we pick the latest non-deprecated version"
+    /// only needs to be made here.
+    ///
+    /// # Errors
+    /// * [`RegistryError::NotFound`] — if a version index lookup fails.
+    /// * [`RegistryError::AllVersionsDeprecated`] — if every version is deprecated.
+    fn latest_non_deprecated(
+        env: &Env,
+        name: &String,
+        versions: &Vec<u32>,
+    ) -> Result<ContractEntry, RegistryError> {
+        let len = versions.len();
+        let mut i = len;
+        while i > 0 {
+            i -= 1;
+            let v = versions.get(i).ok_or(RegistryError::NotFound)?;
+            let entry: ContractEntry = env
+                .storage()
+                .instance()
+                .get(&DataKey::Entry(name.clone(), v))
+                .ok_or(RegistryError::NotFound)?;
+            if !entry.deprecated {
+                return Ok(entry);
+            }
+        }
+        Err(RegistryError::AllVersionsDeprecated)
+    }
+
     fn get_versions_list(env: &Env, name: &String) -> Vec<u32> {
         env.storage()
             .instance()
@@ -794,12 +835,12 @@ impl RouterRegistry {
     /// `soroban_sdk::String` doesn't implement `Display`/`ToString` on the wasm
     /// target, so constraint strings (which are always short) are read via
     /// `copy_into_slice` instead of allocating.
-    fn constraint_str_buf(constraint: &String) -> Result<([u8; 32], usize), RegistryError> {
+    fn constraint_str_buf(constraint: &String) -> Result<([u8; MAX_CONSTRAINT_LEN], usize), RegistryError> {
         let len = constraint.len() as usize;
-        if len > 32 {
+        if len > MAX_CONSTRAINT_LEN {
             return Err(RegistryError::InvalidConstraint);
         }
-        let mut buf = [0u8; 32];
+        let mut buf = [0u8; MAX_CONSTRAINT_LEN];
         constraint.copy_into_slice(&mut buf[..len]);
         Ok((buf, len))
     }
@@ -936,6 +977,36 @@ mod tests {
         assert_eq!(entry.address, addr);
         assert_eq!(entry.version, 1);
         assert!(!entry.deprecated);
+    }
+
+    #[test]
+    fn test_is_deprecated_returns_false_for_fresh_registration() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register(&admin, &name, &addr, &1);
+        assert!(!client.is_deprecated(&name, &1));
+    }
+
+    #[test]
+    fn test_is_deprecated_returns_true_after_deprecate() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register(&admin, &name, &addr, &1);
+        client.deprecate(&admin, &name, &1, &None::<String>);
+        assert!(client.is_deprecated(&name, &1));
+    }
+
+    #[test]
+    fn test_is_deprecated_returns_not_found_for_unregistered_version() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register(&admin, &name, &addr, &1);
+        // version 99 was never registered
+        let result = client.try_is_deprecated(&name, &99);
+        assert_eq!(result, Err(Ok(RegistryError::NotFound)));
     }
 
     #[test]

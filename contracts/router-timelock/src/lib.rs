@@ -13,6 +13,8 @@
 //! - `op_cancelled`           — Operation cancelled (op_id)
 //! - `op_description_updated` — Operation description updated (op_id, new_description)
 //! - `min_delay_updated`      — Minimum delay updated (old_min_delay, new_min_delay)
+//! - `ops_cleaned`            — Expired/finalized operations cleaned (count)
+//! - `admin_transferred`      — Admin transferred (old_admin, new_admin)
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, xdr::ToXdr, Address, Bytes, Env, String,
@@ -87,6 +89,18 @@ pub enum TimelockError {
     AlreadyQueued = 13,
     /// A dependency of this operation has not yet been executed.
     DependencyNotExecuted = 14,
+    /// `grace_period_seconds` exceeds [`RouterTimelock::MAX_GRACE_PERIOD_SECONDS`].
+    ///
+    /// Very large grace periods (e.g. `u64::MAX`) would cause arithmetic
+    /// overflow in `eta + grace_period_seconds` and create operations that
+    /// can never practically expire.
+    GracePeriodTooLong = 15,
+    /// `eta + grace_period_seconds` overflows `u64`.
+    ///
+    /// Returned by `execute` / status queries if a stored operation somehow
+    /// has values that produce overflow (should not occur after the
+    /// `GracePeriodTooLong` guard was introduced, but kept as a safety net).
+    ExpiryOverflow = 16,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -97,6 +111,18 @@ pub struct RouterTimelock;
 #[contractimpl]
 impl RouterTimelock {
     const MAX_DEPENDENCY_DEPTH: u32 = 8;
+
+    /// Maximum allowed `grace_period_seconds` when queueing an operation.
+    ///
+    /// Set to 30 days (2 592 000 seconds). This prevents:
+    /// - Arithmetic overflow in `eta + grace_period_seconds` (a `u64::MAX`
+    ///   value would wrap around and produce a nonsensical expiry).
+    /// - Effectively permanent operations that can never expire in practice
+    ///   (e.g. grace periods measured in centuries).
+    ///
+    /// Admins who genuinely need a longer window should re-queue the
+    /// operation closer to its intended execution time.
+    const MAX_GRACE_PERIOD_SECONDS: u64 = 30 * 24 * 60 * 60; // 30 days
 
     /// Initialize with an admin, minimum delay (seconds), and maximum pending operations limit.
     pub fn initialize(
@@ -143,6 +169,14 @@ impl RouterTimelock {
 
         if delay < min_delay {
             return Err(TimelockError::DelayTooShort);
+        }
+
+        // Guard against overflow and unreasonably long grace periods.
+        // A value like u64::MAX would wrap eta + grace_period_seconds and make
+        // expiry checks behave unpredictably; a value measured in centuries
+        // creates operations that can never expire in practice.
+        if grace_period_seconds > Self::MAX_GRACE_PERIOD_SECONDS {
+            return Err(TimelockError::GracePeriodTooLong);
         }
 
         let pending: Vec<Bytes> = env
@@ -270,7 +304,14 @@ impl RouterTimelock {
         if now < op.eta {
             return Err(TimelockError::NotReady);
         }
-        if now > op.eta + op.grace_period_seconds {
+        // Use checked_add to guard against overflow on the expiry boundary.
+        // In practice GracePeriodTooLong prevents overflow at queue time, but
+        // checked_add is a defence-in-depth measure for any existing stored ops.
+        let expiry = op
+            .eta
+            .checked_add(op.grace_period_seconds)
+            .ok_or(TimelockError::ExpiryOverflow)?;
+        if now > expiry {
             return Err(TimelockError::Expired);
         }
 
@@ -370,7 +411,13 @@ impl RouterTimelock {
                 .instance()
                 .get::<DataKey, Op>(&DataKey::Op(op_id.clone()))
             {
-                if now > op.eta + op.grace_period_seconds || op.executed || op.cancelled {
+                // Use checked_add: if overflow occurs treat the op as expired
+                // (i.e. clean it up) rather than leaving it stuck in the queue.
+                let is_expired = op
+                    .eta
+                    .checked_add(op.grace_period_seconds)
+                    .map_or(true, |expiry| now > expiry);
+                if is_expired || op.executed || op.cancelled {
                     // It is expired or finalized!
                     cleaned_count += 1;
                 } else {
@@ -400,6 +447,17 @@ impl RouterTimelock {
         env.storage().instance().get(&DataKey::Op(op_id))
     }
 
+    /// Get the dependency operation IDs stored for `op_id`, if any.
+    ///
+    /// Returns an empty `Vec` when no dependencies were recorded (i.e. the
+    /// operation was queued without deps, or the `op_id` does not exist).
+    pub fn get_dependencies(env: Env, op_id: Bytes) -> Vec<Bytes> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Deps(op_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
     /// Get the human-readable status of an operation.
     ///
     /// # Returns
@@ -417,7 +475,7 @@ impl RouterTimelock {
             OperationStatus::Cancelled
         } else if op.executed {
             OperationStatus::Executed
-        } else if now > op.eta + op.grace_period_seconds {
+        } else if op.eta.checked_add(op.grace_period_seconds).map_or(false, |expiry| now > expiry) {
             OperationStatus::Expired
         } else if now >= op.eta {
             OperationStatus::Ready
@@ -453,8 +511,13 @@ impl RouterTimelock {
                 .instance()
                 .get::<DataKey, Op>(&DataKey::Op(op_id))
             {
-                // Only include ops that are genuinely pending (not expired)
-                if !op.executed && !op.cancelled && now <= op.eta + op.grace_period_seconds {
+                // Only include ops that are genuinely pending (not expired).
+                // checked_add: treat overflow as expired (op cannot be executed).
+                let within_grace = op
+                    .eta
+                    .checked_add(op.grace_period_seconds)
+                    .map_or(false, |expiry| now <= expiry);
+                if !op.executed && !op.cancelled && within_grace {
                     result.push_back(op);
                 }
             }
@@ -491,13 +554,18 @@ impl RouterTimelock {
                     OperationStatus::Cancelled => op.cancelled,
                     OperationStatus::Executed => op.executed,
                     OperationStatus::Expired => {
-                        !op.executed && !op.cancelled && now > op.eta + op.grace_period_seconds
+                        let is_expired = op
+                            .eta
+                            .checked_add(op.grace_period_seconds)
+                            .map_or(true, |expiry| now > expiry);
+                        !op.executed && !op.cancelled && is_expired
                     }
                     OperationStatus::Ready => {
-                        !op.executed
-                            && !op.cancelled
-                            && now >= op.eta
-                            && now <= op.eta + op.grace_period_seconds
+                        let within_grace = op
+                            .eta
+                            .checked_add(op.grace_period_seconds)
+                            .map_or(false, |expiry| now <= expiry);
+                        !op.executed && !op.cancelled && now >= op.eta && within_grace
                     }
                     OperationStatus::Queued => !op.executed && !op.cancelled && now < op.eta,
                 };
@@ -533,13 +601,18 @@ impl RouterTimelock {
                     OperationStatus::Cancelled => op.cancelled,
                     OperationStatus::Executed => op.executed,
                     OperationStatus::Expired => {
-                        !op.executed && !op.cancelled && now > op.eta + op.grace_period_seconds
+                        let is_expired = op
+                            .eta
+                            .checked_add(op.grace_period_seconds)
+                            .map_or(true, |expiry| now > expiry);
+                        !op.executed && !op.cancelled && is_expired
                     }
                     OperationStatus::Ready => {
-                        !op.executed
-                            && !op.cancelled
-                            && now >= op.eta
-                            && now <= op.eta + op.grace_period_seconds
+                        let within_grace = op
+                            .eta
+                            .checked_add(op.grace_period_seconds)
+                            .map_or(false, |expiry| now <= expiry);
+                        !op.executed && !op.cancelled && now >= op.eta && within_grace
                     }
                     OperationStatus::Queued => !op.executed && !op.cancelled && now < op.eta,
                 };
@@ -551,6 +624,14 @@ impl RouterTimelock {
         }
 
         Ok(result)
+    }
+
+    /// Get the maximum allowed number of pending operations.
+    pub fn get_max_pending_ops(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxPendingOps)
+            .unwrap_or(0)
     }
 
     /// Get the minimum delay.
@@ -787,6 +868,13 @@ mod tests {
         assert_eq!(op.grace_period_seconds, GRACE);
         assert!(!op.executed);
         assert!(!op.cancelled);
+    }
+
+    #[test]
+    fn test_get_op_nonexistent_returns_none() {
+        let (env, _admin, client) = setup();
+        let fake_id = Bytes::from_array(&env, &[0u8; 32]);
+        assert_eq!(client.get_op(&fake_id), None);
     }
 
     #[test]
@@ -1561,6 +1649,17 @@ mod tests {
     // ── QueueFull limit ───────────────────────────────────────────────────────
 
     #[test]
+    fn test_get_max_pending_ops_returns_initialized_value() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterTimelock);
+        let client = RouterTimelockClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &3600, &50);
+        assert_eq!(client.get_max_pending_ops(), 50);
+    }
+
+    #[test]
     fn test_queue_fails_when_pending_limit_reached() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1942,5 +2041,289 @@ mod tests {
         );
         assert_eq!(result, Err(Ok(TimelockError::DependencyTooDeep)));
         let _ = last_id;
+    }
+
+    // ── get_dependencies ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_dependencies_returns_stored_deps() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+
+        // Queue a parent op (no deps)
+        let parent_id = client.queue(
+            &admin,
+            &String::from_str(&env, "parent"),
+            &target,
+            &3600,
+            &GRACE,
+            &Vec::new(&env),
+        );
+
+        // Queue a child op that depends on the parent
+        let mut deps = Vec::new(&env);
+        deps.push_back(parent_id.clone());
+        let child_id = client.queue(
+            &admin,
+            &String::from_str(&env, "child"),
+            &target,
+            &3600,
+            &GRACE,
+            &deps,
+        );
+
+        let stored_deps = client.get_dependencies(&child_id);
+        assert_eq!(stored_deps.len(), 1);
+        assert_eq!(stored_deps.get(0).unwrap(), parent_id);
+    }
+
+    #[test]
+    fn test_get_dependencies_returns_empty_for_op_with_no_deps() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+
+        let op_id = client.queue(
+            &admin,
+            &String::from_str(&env, "no deps"),
+            &target,
+            &3600,
+            &GRACE,
+            &Vec::new(&env),
+        );
+
+        let deps = client.get_dependencies(&op_id);
+        assert_eq!(deps.len(), 0);
+    }
+
+    #[test]
+    fn test_get_dependencies_returns_empty_for_nonexistent_op() {
+        let (env, _admin, client) = setup();
+        let fake_id = Bytes::from_array(&env, &[0u8; 32]);
+        let deps = client.get_dependencies(&fake_id);
+        assert_eq!(deps.len(), 0);
+    // ── Grace period overflow / cap tests ─────────────────────────────────────
+
+    /// queue() must reject a grace_period_seconds value that exceeds
+    /// MAX_GRACE_PERIOD_SECONDS (30 days = 2_592_000 s).
+    #[test]
+    fn test_queue_rejects_grace_period_exceeding_max() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "long grace");
+        let deps: Vec<Bytes> = Vec::new(&env);
+
+        // One second over the 30-day cap must be rejected.
+        let over_cap: u64 = 30 * 24 * 60 * 60 + 1;
+        let result = client.try_queue(&admin, &desc, &target, &3600, &over_cap, &deps);
+        assert_eq!(result, Err(Ok(TimelockError::GracePeriodTooLong)));
+    }
+
+    /// u64::MAX as grace_period_seconds must be rejected (overflow safety).
+    #[test]
+    fn test_queue_rejects_u64_max_grace_period() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "u64 max grace");
+        let deps: Vec<Bytes> = Vec::new(&env);
+
+        let result = client.try_queue(&admin, &desc, &target, &3600, &u64::MAX, &deps);
+        assert_eq!(result, Err(Ok(TimelockError::GracePeriodTooLong)));
+    }
+
+    /// queue() must accept a grace_period_seconds value exactly equal to
+    /// MAX_GRACE_PERIOD_SECONDS (boundary inclusive).
+    #[test]
+    fn test_queue_accepts_grace_period_at_exact_max() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "exact max grace");
+        let deps: Vec<Bytes> = Vec::new(&env);
+
+        let max_grace: u64 = 30 * 24 * 60 * 60; // 2_592_000
+        let result = client.try_queue(&admin, &desc, &target, &3600, &max_grace, &deps);
+        assert!(
+            result.is_ok(),
+            "grace_period_seconds == MAX_GRACE_PERIOD_SECONDS must be accepted"
+        );
+    }
+
+    /// queue() must accept a grace_period_seconds of zero (no expiry window —
+    /// operation expires immediately after eta).
+    #[test]
+    fn test_queue_accepts_zero_grace_period() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "zero grace");
+        let deps: Vec<Bytes> = Vec::new(&env);
+
+        let result = client.try_queue(&admin, &desc, &target, &3600, &0, &deps);
+        assert!(result.is_ok(), "grace_period_seconds == 0 must be accepted");
+    }
+
+    /// execute() must return Expired when now > eta + grace_period_seconds,
+    /// confirming checked_add works correctly for normal (non-overflow) values.
+    #[test]
+    fn test_execute_rejects_after_grace_period_with_checked_expiry() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "expiry check");
+        let deps: Vec<Bytes> = Vec::new(&env);
+        let grace: u64 = 7200; // 2-hour window
+
+        let op_id = client.queue(&admin, &desc, &target, &3600, &grace, &deps);
+
+        // Jump exactly 1 second past eta + grace_period_seconds.
+        env.ledger().with_mut(|l| l.timestamp += 3600 + grace + 1);
+
+        let result = client.try_execute(&admin, &op_id);
+        assert_eq!(result, Err(Ok(TimelockError::Expired)));
+    }
+
+    /// get_operation_status must return Expired for an op whose
+    /// eta + grace_period_seconds has elapsed (uses checked_add path).
+    #[test]
+    fn test_get_operation_status_expired_uses_checked_add() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "status expiry");
+        let deps: Vec<Bytes> = Vec::new(&env);
+        let grace: u64 = 3600;
+
+        let op_id = client.queue(&admin, &desc, &target, &3600, &grace, &deps);
+        env.ledger().with_mut(|l| l.timestamp += 3600 + grace + 1);
+
+        assert_eq!(
+            client.get_operation_status(&op_id),
+            Some(OperationStatus::Expired)
+        );
+    }
+
+    /// cleanup_expired must remove an op once eta + grace_period_seconds has
+    /// elapsed, confirming the checked_add path in cleanup works correctly.
+    #[test]
+    fn test_cleanup_expired_uses_checked_add_for_expiry() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let deps: Vec<Bytes> = Vec::new(&env);
+        let grace: u64 = 3600;
+
+        client.queue(
+            &admin,
+            &String::from_str(&env, "will expire"),
+            &target,
+            &3600,
+            &grace,
+            &deps,
+        );
+
+        // Advance past eta + grace (3600 + 3600 + 1).
+        env.ledger().with_mut(|l| l.timestamp += 7201);
+
+        let cleaned = client.cleanup_expired(&admin, &10);
+        assert_eq!(cleaned, 1);
+        assert_eq!(client.get_pending_operations().len(), 0);
+    }
+
+    /// get_pending_operations must exclude an op whose checked expiry has
+    /// elapsed, confirming the checked_add path in get_pending_operations.
+    #[test]
+    fn test_get_pending_operations_excludes_checked_expired_ops() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let deps: Vec<Bytes> = Vec::new(&env);
+        let grace: u64 = 3600;
+
+        // Queue one that will expire and one that won't.
+        client.queue(
+            &admin,
+            &String::from_str(&env, "short grace"),
+            &target,
+            &3600,
+            &grace,
+            &deps,
+        );
+        client.queue(
+            &admin,
+            &String::from_str(&env, "long grace"),
+            &target,
+            &3600,
+            &(30 * 24 * 60 * 60), // 30-day grace, well within cap
+            &deps,
+        );
+
+        // Advance past the first op's grace period but not the second's.
+        env.ledger().with_mut(|l| l.timestamp += 3600 + grace + 1);
+
+        let pending = client.get_pending_operations();
+        assert_eq!(pending.len(), 1, "only the long-grace op should remain pending");
+    }
+
+    /// get_operation_count_by_status must correctly count Expired ops using
+    /// the checked_add path.
+    #[test]
+    fn test_get_operation_count_by_status_expired_uses_checked_add() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let deps: Vec<Bytes> = Vec::new(&env);
+        let grace: u64 = 3600;
+
+        client.queue(
+            &admin,
+            &String::from_str(&env, "op a"),
+            &target,
+            &3600,
+            &grace,
+            &deps,
+        );
+        client.queue(
+            &admin,
+            &String::from_str(&env, "op b"),
+            &target,
+            &3600,
+            &grace,
+            &deps,
+        );
+
+        // Both ops expire at the same time.
+        env.ledger().with_mut(|l| l.timestamp += 3600 + grace + 1);
+
+        assert_eq!(
+            client.get_operation_count_by_status(&OperationStatus::Expired),
+            2
+        );
+        assert_eq!(
+            client.get_operation_count_by_status(&OperationStatus::Ready),
+            0
+        );
+    }
+
+    /// A grace period of exactly MAX - 1 seconds must be accepted and the op
+    /// must execute at eta and expire 1 second before the cap.
+    #[test]
+    fn test_queue_one_below_max_grace_period_is_valid() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "one below max");
+        let deps: Vec<Bytes> = Vec::new(&env);
+
+        let grace: u64 = 30 * 24 * 60 * 60 - 1; // MAX_GRACE_PERIOD_SECONDS - 1
+        let op_id = client.queue(&admin, &desc, &target, &3600, &grace, &deps);
+
+        // Should be Queued right after creation.
+        assert_eq!(
+            client.get_operation_status(&op_id),
+            Some(OperationStatus::Queued)
+        );
+
+        // Should become Ready after the delay.
+        env.ledger().with_mut(|l| l.timestamp += 3601);
+        assert_eq!(
+            client.get_operation_status(&op_id),
+            Some(OperationStatus::Ready)
+        );
+
+        // Should execute successfully.
+        client.execute(&admin, &op_id);
+        assert!(client.get_op(&op_id).unwrap().executed);
     }
 }
