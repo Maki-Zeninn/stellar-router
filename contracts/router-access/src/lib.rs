@@ -723,34 +723,34 @@ impl RouterAccess {
             AccessError::Unauthorized => router_common::BatchItemError::Unauthorized,
             AccessError::Blacklisted => router_common::BatchItemError::InvalidMetadata,
             AccessError::InvalidExpiry => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "InvalidExpiry"),
+                soroban_sdk::String::from_str(env, "invalid expiry"),
             ),
             AccessError::AlreadyInitialized => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "AlreadyInitialized"),
+                soroban_sdk::String::from_str(env, "already initialized"),
             ),
             AccessError::NotInitialized => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "NotInitialized"),
+                soroban_sdk::String::from_str(env, "not initialized"),
             ),
             AccessError::RoleNotFound => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "RoleNotFound"),
+                soroban_sdk::String::from_str(env, "role not found"),
             ),
             AccessError::CannotBlacklistAdmin => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "CannotBlacklistAdmin"),
+                soroban_sdk::String::from_str(env, "cannot blacklist admin"),
             ),
             AccessError::DestinationAlreadyHasRole => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "DestinationAlreadyHasRole"),
+                soroban_sdk::String::from_str(env, "destination already has role"),
             ),
             AccessError::HierarchyCycle => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "HierarchyCycle"),
+                soroban_sdk::String::from_str(env, "hierarchy cycle detected"),
             ),
             AccessError::HierarchyTooDeep => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "HierarchyTooDeep"),
+                soroban_sdk::String::from_str(env, "role hierarchy too deep"),
             ),
             AccessError::MaxRolesExceeded => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "MaxRolesExceeded"),
+                soroban_sdk::String::from_str(env, "maximum role count exceeded"),
             ),
             AccessError::MaxGrantsPerRoleExceeded => router_common::BatchItemError::Custom(
-                soroban_sdk::String::from_str(env, "MaxGrantsPerRoleExceeded"),
+                soroban_sdk::String::from_str(env, "maximum grants per role exceeded"),
             ),
         }
     }
@@ -1671,6 +1671,32 @@ mod tests {
         assert_eq!(result.successes.len(), 0);
         assert_eq!(result.failures.len(), 1);
         assert!(!client.has_role(&u2, &role));
+    }
+
+    // ── Issue #876: descriptive access_error_to_batch fallback strings ───────
+
+    #[test]
+    fn test_grant_role_batch_reports_descriptive_error_for_non_specific_variant() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        client.set_role_limits(&admin, &0, &1);
+
+        let u1 = Address::generate(&env);
+        let u2 = Address::generate(&env);
+        let accounts = vec![&env, u1.clone(), u2.clone()];
+
+        // max_grants_per_role=1, so the second grant hits MaxGrantsPerRoleExceeded
+        // — a variant that previously fell through to a generic "Error" string.
+        let result = client.grant_role_batch(&admin, &accounts, &role, &None, &false);
+        assert_eq!(result.successes.len(), 1);
+        assert_eq!(result.failures.len(), 1);
+        assert_eq!(
+            result.failures.get(0).unwrap().error,
+            router_common::BatchItemError::Custom(String::from_str(
+                &env,
+                "maximum grants per role exceeded"
+            ))
+        );
     }
 
     // ── Issue #578: list_all_roles ────────────────────────────────────────────
