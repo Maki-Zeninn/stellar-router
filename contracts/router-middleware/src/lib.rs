@@ -169,13 +169,21 @@ pub struct CallLogSummary {
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum MiddlewareError {
+    /// `initialize` was called on a contract that already has an admin set.
     AlreadyInitialized = 1,
+    /// An admin-gated call was made before `initialize` set up the contract.
     NotInitialized = 2,
+    /// A non-admin caller attempted to invoke an admin-gated function.
     Unauthorized = 3,
+    /// The rate limit for the route has been exceeded for this caller.
     RateLimitExceeded = 4,
+    /// The route is disabled and cannot be called via middleware.
     RouteDisabled = 5,
+    /// Middleware is globally disabled and no calls can proceed.
     MiddlewareDisabled = 6,
+    /// Route configuration is invalid (e.g., window_seconds is 0 with max_calls > 0).
     InvalidConfig = 7,
+    /// The circuit breaker for this route is open (failure threshold exceeded).
     CircuitOpen = 8,
     /// A re-entrant call to `pre_call` was detected for this route.
     /// The `Executing` guard for this route can be cleared by an admin

@@ -322,14 +322,14 @@ impl RouterQuote {
     /// Router name and Fee in basis points.
     pub fn get_all_configured_routes(env: Env) -> Vec<(String, u32)> {
         let routes = Self::read_configured_routes(&env);
-        let mut configures_routes = Vec::new(&env);
+        let mut configured_routes = Vec::new(&env);
 
         for route in routes {
             if let Ok(fee) = Self::get_route_fee(env.clone(), route.clone()) {
-                configures_routes.push_back((route, fee));
+                configured_routes.push_back((route, fee));
             }
         }
-        configures_routes
+        configured_routes
     }
 
     /// Get a quote for a single route with configurable fee.
@@ -756,6 +756,50 @@ mod tests {
     }
 
     #[test]
+    fn test_get_route_fee_tiers_returns_empty_when_not_set() {
+        let (env, _admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+        let tiers = client.get_route_fee_tiers(&route);
+        assert!(tiers.is_empty());
+    }
+
+    #[test]
+    fn test_get_route_fee_tiers_returns_sorted_tiers() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+
+        // Create tiers in unsorted order
+        let tiers = vec![
+            &env,
+            FeeTier {
+                min_amount: 100000,
+                fee_bps: 10,
+            },
+            FeeTier {
+                min_amount: 0,
+                fee_bps: 50,
+            },
+            FeeTier {
+                min_amount: 10000,
+                fee_bps: 30,
+            },
+        ];
+
+        client.set_route_fee_tiers(&admin, &route, &tiers);
+
+        let retrieved_tiers = client.get_route_fee_tiers(&route);
+        assert_eq!(retrieved_tiers.len(), 3);
+
+        // Verify tiers are sorted by min_amount ascending
+        assert_eq!(retrieved_tiers.get(0).unwrap().min_amount, 0);
+        assert_eq!(retrieved_tiers.get(0).unwrap().fee_bps, 50);
+        assert_eq!(retrieved_tiers.get(1).unwrap().min_amount, 10000);
+        assert_eq!(retrieved_tiers.get(1).unwrap().fee_bps, 30);
+        assert_eq!(retrieved_tiers.get(2).unwrap().min_amount, 100000);
+        assert_eq!(retrieved_tiers.get(2).unwrap().fee_bps, 10);
+    }
+
+    #[test]
     fn test_get_quote_with_default_fee() {
         let (env, _admin, client) = setup();
         let token_in = Address::generate(&env);
@@ -1110,6 +1154,33 @@ mod tests {
         let unauthorized = Address::generate(&env);
         let route = String::from_str(&env, "uniswap");
         let result = client.try_set_route_fee(&unauthorized, &route, &50);
+        assert_eq!(result, Err(Ok(QuoteError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_unauthorized_set_default_fee_fails() {
+        let (env, _admin, client) = setup();
+        let unauthorized = Address::generate(&env);
+        let result = client.try_set_default_fee(&unauthorized, &200);
+        assert_eq!(result, Err(Ok(QuoteError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_unauthorized_set_route_fee_tiers_fails() {
+        let (env, _admin, client) = setup();
+        let unauthorized = Address::generate(&env);
+        let route = String::from_str(&env, "uniswap");
+        let tiers = Vec::new(&env);
+        let result = client.try_set_route_fee_tiers(&unauthorized, &route, &tiers);
+        assert_eq!(result, Err(Ok(QuoteError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_unauthorized_transfer_admin_fails() {
+        let (env, _admin, client) = setup();
+        let unauthorized = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        let result = client.try_transfer_admin(&unauthorized, &new_admin);
         assert_eq!(result, Err(Ok(QuoteError::Unauthorized)));
     }
 
