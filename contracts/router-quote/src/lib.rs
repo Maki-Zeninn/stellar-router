@@ -1158,6 +1158,33 @@ mod tests {
     }
 
     #[test]
+    fn test_unauthorized_set_default_fee_fails() {
+        let (env, _admin, client) = setup();
+        let unauthorized = Address::generate(&env);
+        let result = client.try_set_default_fee(&unauthorized, &200);
+        assert_eq!(result, Err(Ok(QuoteError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_unauthorized_set_route_fee_tiers_fails() {
+        let (env, _admin, client) = setup();
+        let unauthorized = Address::generate(&env);
+        let route = String::from_str(&env, "uniswap");
+        let tiers = Vec::new(&env);
+        let result = client.try_set_route_fee_tiers(&unauthorized, &route, &tiers);
+        assert_eq!(result, Err(Ok(QuoteError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_unauthorized_transfer_admin_fails() {
+        let (env, _admin, client) = setup();
+        let unauthorized = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        let result = client.try_transfer_admin(&unauthorized, &new_admin);
+        assert_eq!(result, Err(Ok(QuoteError::Unauthorized)));
+    }
+
+    #[test]
     fn test_admin_getter() {
         let (env, admin, client) = setup();
         assert_eq!(client.admin(), admin);
