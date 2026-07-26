@@ -137,6 +137,12 @@ impl RouterAccess {
     }
 
     /// Check if a role has expired for an address.
+    ///
+    /// Returns `true` only when the current ledger timestamp **strictly exceeds**
+    /// `expires_at`, matching the convention used throughout this suite:
+    /// `expires_at` is the **last valid** timestamp, so the role is still active
+    /// when `current_timestamp == expires_at` and expired only once
+    /// `current_timestamp > expires_at`.
     pub fn is_role_expired(env: Env, role: String, target: Address) -> bool {
         // View helper: counter is maintained for active members, but expiry still
         // uses RoleExpiry storage.
@@ -147,7 +153,7 @@ impl RouterAccess {
             .get::<DataKey, u64>(&DataKey::RoleExpiry(role, target))
         {
             let current_timestamp = env.ledger().timestamp();
-            current_timestamp >= expires_at
+            current_timestamp > expires_at
         } else {
             false
         }
@@ -561,12 +567,6 @@ impl RouterAccess {
     ) -> Result<(), AccessError> {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::SuperAdmin, AccessError)?;
-        env.storage()
-            .instance()
-            .remove(&DataKey::RoleExpiry(role.clone(), target.clone()));
-        env.storage()
-            .instance()
-            .remove(&DataKey::HasRole(role.clone(), target.clone()));
         Self::require_super_admin(&env, &caller)?;
         Self::deactivate_role_grant(&env, &role, &target);
         env.events().publish(
@@ -733,7 +733,8 @@ impl RouterAccess {
         // the requested expiry matches the existing expiry.
         //
         // This allows admins to extend/shorten expiry (or remove it by granting with `None`).
-        if has_raw_assignment && Self::has_role_internal(env, account, role) {
+        let currently_active = has_raw_assignment && Self::has_role_internal(env, account, role);
+        if currently_active {
             let existing_expiry: Option<u64> = env
                 .storage()
                 .instance()
@@ -769,6 +770,22 @@ impl RouterAccess {
         env.storage()
             .instance()
             .set(&DataKey::HasRole(role.clone(), account.clone()), &true);
+
+        // Increment RoleMemberCount when the account transitions from inactive to active.
+        // This covers two cases:
+        //   1. Brand-new grant (no prior assignment).
+        //   2. Re-grant of a previously expired role (raw assignment exists but was inactive).
+        // An expiry update on a live role must NOT increment to avoid double-counting.
+        if !currently_active {
+            let count: u32 = env
+                .storage()
+                .instance()
+                .get::<DataKey, u32>(&DataKey::RoleMemberCount(role.clone()))
+                .unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&DataKey::RoleMemberCount(role.clone()), &(count + 1));
+        }
 
         let mut members: Vec<Address> = env
             .storage()
@@ -885,14 +902,17 @@ impl RouterAccess {
             return false;
         }
 
-        // Check if role has expired
+        // Check if role has expired.
+        // `expires_at` is the last valid timestamp: the role is still active when
+        // `current_timestamp == expires_at` and only expired once it strictly
+        // exceeds `expires_at`, consistent with `is_route_expired` in router-core.
         if let Some(expires_at) = env
             .storage()
             .instance()
             .get::<DataKey, u64>(&DataKey::RoleExpiry(role.clone(), account.clone()))
         {
             let current_timestamp = env.ledger().timestamp();
-            if current_timestamp >= expires_at {
+            if current_timestamp > expires_at {
                 return false;
             }
         }
@@ -948,6 +968,32 @@ mod tests {
         env.ledger().set_timestamp(env.ledger().timestamp() + 5);
 
         assert!(!client.has_role(&user, &role));
+    }
+
+    /// `expires_at` is the **last valid** timestamp: the role must still be
+    /// active when `current_timestamp == expires_at` and only expired once
+    /// `current_timestamp > expires_at`. This mirrors the semantics of
+    /// `is_route_expired` in router-core and makes the boundary consistent
+    /// across the entire suite.
+    #[test]
+    fn test_role_valid_at_exact_expiry_timestamp_expired_one_second_after() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let user = Address::generate(&env);
+
+        let now = env.ledger().timestamp();
+        client.grant_role(&admin, &user, &role, &Some(10));
+        // expires_at == now + 10
+
+        // At exactly expires_at the role is still valid.
+        env.ledger().set_timestamp(now + 10);
+        assert!(client.has_role(&user, &role));
+        assert!(!client.is_role_expired(&role, &user));
+
+        // One second past expires_at the role is expired.
+        env.ledger().set_timestamp(now + 11);
+        assert!(!client.has_role(&user, &role));
+        assert!(client.is_role_expired(&role, &user));
     }
 
     #[test]
