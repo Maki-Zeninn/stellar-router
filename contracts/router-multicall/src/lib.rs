@@ -10,6 +10,9 @@
 //! - Per-call success/failure tracking (non-atomic mode)
 //! - Atomic mode: revert all if any call fails
 //! - Call result storage for async inspection
+//! - `simulate` — dry-run mode: execute all calls without incrementing the batch counter
+//! - `fail_fast` — abort the batch on the first optional-call failure
+//! - `max_total_gas` — pre-flight cumulative instruction-budget cap to reject over-budget batches before execution
 //!
 //! ## Events (following naming convention: past tense verbs in snake_case)
 //! - `call_result` — Individual call result logged (caller, target, function, success)
@@ -278,32 +281,28 @@ impl RouterMulticall {
                 success,
             };
 
+            if store_results && !simulate {
+                env.storage().instance().set(
+                    &DataKey::BatchResult(batch_id, call_index),
+                    &call_result,
+                );
+            }
+
             if success {
                 result.record_success(call_index, call_result);
             } else {
                 let failure_error = if call.instruction_budget.is_some() {
                     router_common::BatchItemError::Custom(soroban_sdk::String::from_str(
                         &env,
-                        "budget_exceeded",
+                        router_common::FAILURE_REASON_BUDGET_EXCEEDED,
                     ))
                 } else {
                     router_common::BatchItemError::Custom(soroban_sdk::String::from_str(
                         &env,
-                        "invoke_failed",
+                        router_common::FAILURE_REASON_INVOKE_FAILED,
                     ))
                 };
                 result.record_failure(call_index, failure_error);
-            }
-
-            if store_results && !simulate {
-                env.storage().instance().set(
-                    &DataKey::BatchResult(batch_id, call_index),
-                    &router_common::CallResult {
-                        target: call.target.clone(),
-                        function: call.function.clone(),
-                        success,
-                    },
-                );
             }
 
             env.events().publish(
@@ -437,7 +436,7 @@ impl RouterMulticall {
             .ok_or(MulticallError::NotInitialized)
     }
 
-    /// Get current admin.
+    /// Get the current admin address.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -445,13 +444,8 @@ impl RouterMulticall {
     /// # Returns
     /// The [`Address`] of the current admin.
     ///
-    /// # Panics
-    /// * Panics if the contract has not been initialized.
-    ///
-    /// Get the current admin address.
-    ///
     /// # Errors
-    /// Returns `MulticallError::NotInitialized` if the contract has not been initialized.
+    /// * [`MulticallError::NotInitialized`] — if the contract has not been initialized.
     pub fn admin(env: Env) -> Result<Address, MulticallError> {
         env.storage()
             .instance()
@@ -603,7 +597,7 @@ mod tests {
     }
 
     fn budget_failure_count(env: &Env, result: &router_common::BatchCallResult) -> u32 {
-        let budget_msg = soroban_sdk::String::from_str(env, "budget_exceeded");
+        let budget_msg = soroban_sdk::String::from_str(env, router_common::FAILURE_REASON_BUDGET_EXCEEDED);
         let mut count = 0u32;
         for i in 0..result.failures.len() {
             let failure = result.failures.get(i).unwrap();
