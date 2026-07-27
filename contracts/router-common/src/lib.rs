@@ -297,7 +297,10 @@ pub struct BatchFailure {
     pub error: BatchItemError,
 }
 
-/// Standardized per-index batch operation result for void operations (`T = BatchUnit`).
+/// Standardized per-index batch operation result for void operations.
+///
+/// Tracks indexed successes ([`BatchSuccess`]) and indexed failures ([`BatchFailure`])
+/// for batch operations whose items do not return a value.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct BatchResult {
@@ -305,7 +308,10 @@ pub struct BatchResult {
     pub failures: Vec<BatchFailure>,
 }
 
-/// Standardized per-index batch operation result for call operations (`T = CallResult`).
+/// Standardized per-index batch operation result for call operations.
+///
+/// Tracks indexed successes ([`BatchCallSuccess`]) and indexed failures
+/// ([`BatchFailure`]) for batch operations whose items return a [`CallResult`].
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct BatchCallResult {
@@ -426,6 +432,7 @@ pub fn is_whitespace_only(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::{contract, contracterror, testutils::Address as _, Env};
 
     #[test]
     fn test_empty_string_is_whitespace_only() {
@@ -465,6 +472,189 @@ mod tests {
     #[test]
     fn test_name_with_surrounding_spaces_is_not_whitespace_only() {
         assert!(!is_whitespace_only(" oracle "));
+    }
+
+    // ── require_admin! tests ──────────────────────────────────────────────────
+
+    /// Shared contract stub and error type used by the require_admin! tests below.
+    #[contract]
+    struct AdminTestContract;
+
+    #[contracterror]
+    #[derive(Copy, Clone, Debug, PartialEq)]
+    enum AdminTestError {
+        NotInitialized = 1,
+        Unauthorized = 2,
+    }
+
+    /// require_admin! returns Ok(()) when the caller matches the stored admin.
+    #[test]
+    fn require_admin_passes_for_correct_admin() {
+        let env = Env::default();
+        let id = env.register_contract(None, AdminTestContract);
+        env.as_contract(&id, || {
+            let admin = Address::generate(&env);
+            env.storage()
+                .instance()
+                .set(&CommonDataKey::Admin, &admin);
+
+            let result = require_admin!(
+                &env,
+                &admin,
+                &CommonDataKey::Admin,
+                AdminTestError::NotInitialized,
+                AdminTestError::Unauthorized
+            );
+            assert_eq!(result, Ok(()));
+        });
+    }
+
+    /// require_admin! returns Err(Unauthorized) when the caller is not the admin.
+    #[test]
+    fn require_admin_rejects_non_admin_caller() {
+        let env = Env::default();
+        let id = env.register_contract(None, AdminTestContract);
+        env.as_contract(&id, || {
+            let admin = Address::generate(&env);
+            let attacker = Address::generate(&env);
+            env.storage()
+                .instance()
+                .set(&CommonDataKey::Admin, &admin);
+
+            let result = require_admin!(
+                &env,
+                &attacker,
+                &CommonDataKey::Admin,
+                AdminTestError::NotInitialized,
+                AdminTestError::Unauthorized
+            );
+            assert_eq!(result, Err(AdminTestError::Unauthorized));
+        });
+    }
+
+    /// require_admin! returns Err(NotInitialized) when no admin key is present in storage.
+    #[test]
+    fn require_admin_returns_not_initialized_when_key_absent() {
+        let env = Env::default();
+        let id = env.register_contract(None, AdminTestContract);
+        env.as_contract(&id, || {
+            let caller = Address::generate(&env);
+
+            let result = require_admin!(
+                &env,
+                &caller,
+                &CommonDataKey::Admin,
+                AdminTestError::NotInitialized,
+                AdminTestError::Unauthorized
+            );
+            assert_eq!(result, Err(AdminTestError::NotInitialized));
+        });
+    }
+
+    // ── require_admin_simple! tests ───────────────────────────────────────────
+
+    /// require_admin_simple! is a convenience wrapper over require_admin! that
+    /// automatically uses NotInitialized and Unauthorized from the error type.
+    /// It must pass for the correct admin.
+    #[test]
+    fn require_admin_simple_passes_for_correct_admin() {
+        let env = Env::default();
+        let id = env.register_contract(None, AdminTestContract);
+        env.as_contract(&id, || {
+            let admin = Address::generate(&env);
+            env.storage()
+                .instance()
+                .set(&CommonDataKey::Admin, &admin);
+
+            let result =
+                require_admin_simple!(&env, &admin, &CommonDataKey::Admin, AdminTestError);
+            assert_eq!(result, Ok(()));
+        });
+    }
+
+    /// require_admin_simple! must return Err(Unauthorized) for a non-admin caller.
+    #[test]
+    fn require_admin_simple_rejects_non_admin_caller() {
+        let env = Env::default();
+        let id = env.register_contract(None, AdminTestContract);
+        env.as_contract(&id, || {
+            let admin = Address::generate(&env);
+            let attacker = Address::generate(&env);
+            env.storage()
+                .instance()
+                .set(&CommonDataKey::Admin, &admin);
+
+            let result =
+                require_admin_simple!(&env, &attacker, &CommonDataKey::Admin, AdminTestError);
+            assert_eq!(result, Err(AdminTestError::Unauthorized));
+        });
+    }
+
+    /// require_admin_simple! must return Err(NotInitialized) when no admin is stored.
+    #[test]
+    fn require_admin_simple_returns_not_initialized_when_key_absent() {
+        let env = Env::default();
+        let id = env.register_contract(None, AdminTestContract);
+        env.as_contract(&id, || {
+            let caller = Address::generate(&env);
+
+            let result =
+                require_admin_simple!(&env, &caller, &CommonDataKey::Admin, AdminTestError);
+            assert_eq!(result, Err(AdminTestError::NotInitialized));
+        });
+    }
+
+    /// require_admin_simple! and require_admin! are equivalent: both must return
+    /// the same result for the same inputs (key absent, caller is admin, caller
+    /// is not admin).
+    #[test]
+    fn require_admin_simple_matches_require_admin_for_all_cases() {
+        let env = Env::default();
+        let id = env.register_contract(None, AdminTestContract);
+        env.as_contract(&id, || {
+            let admin = Address::generate(&env);
+            let other = Address::generate(&env);
+
+            // ── Case 1: key absent ────────────────────────────────────────────
+            let r_full = require_admin!(
+                &env,
+                &admin,
+                &CommonDataKey::Admin,
+                AdminTestError::NotInitialized,
+                AdminTestError::Unauthorized
+            );
+            let r_simple =
+                require_admin_simple!(&env, &admin, &CommonDataKey::Admin, AdminTestError);
+            assert_eq!(r_full, r_simple);
+
+            // ── Case 2: key present, caller is admin ──────────────────────────
+            env.storage()
+                .instance()
+                .set(&CommonDataKey::Admin, &admin);
+
+            let r_full = require_admin!(
+                &env,
+                &admin,
+                &CommonDataKey::Admin,
+                AdminTestError::NotInitialized,
+                AdminTestError::Unauthorized
+            );
+            let r_simple =
+                require_admin_simple!(&env, &admin, &CommonDataKey::Admin, AdminTestError);
+            assert_eq!(r_full, r_simple);
+
+            // ── Case 3: key present, caller is not admin ──────────────────────
+            let r_full = require_admin!(
+                &env,
+                &other,
+                &CommonDataKey::Admin,
+                AdminTestError::NotInitialized,
+                AdminTestError::Unauthorized
+            );
+            let r_simple =
+                require_admin_simple!(&env, &other, &CommonDataKey::Admin, AdminTestError);
+            assert_eq!(r_full, r_simple);
+        });
     }
 }
 

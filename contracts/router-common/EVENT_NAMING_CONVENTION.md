@@ -61,11 +61,14 @@ All smart contracts in the stellar-router suite follow a consistent event naming
 - `admin_transferred` — (old_admin, new_admin)
 
 ### router-middleware
+- `pre_call` — (caller, route)
+- `post_call` — (caller, route, success)
 - `rate_limit_exceeded` — (caller, route)
-- `call_logged` — (caller, route, timestamp, success)
+- `rate_limit_throttled` — (caller, route)
 - `middleware_enabled` — (enabled)
-- `route_config_updated` — (route_name, config)
-- `circuit_breaker_opened` — (route_name)
+- `circuit_opened` — (route_name)
+- `circuit_closed` — (route_name)
+- `call_log_cleared` — (route_name)
 - `admin_transferred` — (old_admin, new_admin)
 
 ### router-execution
