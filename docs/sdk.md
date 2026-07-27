@@ -3,9 +3,14 @@
 A client library for interacting with the stellar-router contracts from JS/TS.
 
 ## Installation
+
+```bash
 npm install stellar-router-sdk
+```
 
 ## Quick Start
+
+```typescript
 import { RouterClient } from "stellar-router-sdk";
 
 const client = new RouterClient({
@@ -16,6 +21,7 @@ const client = new RouterClient({
 
 const address = await client.resolve("oracle");
 await client.registerRoute("oracle", "C...", { description: "Price feed" });
+```
 
 ## API
 - resolve(name) → Promise<string>
@@ -31,4 +37,7 @@ await client.registerRoute("oracle", "C...", { description: "Price feed" });
 All methods throw RouterSdkError with a .code (e.g. "RouteNotFound") on failure.
 
 ## Publishing
+
+```bash
 npm version patch && npm publish
+```
