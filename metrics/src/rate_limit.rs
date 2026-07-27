@@ -33,6 +33,8 @@ pub struct RateLimitConfig {
     pub max_requests: u32,
     /// Duration of the sliding window.
     pub window: Duration,
+    /// Maximum number of tracked buckets to retain in memory.
+    pub max_buckets: usize,
 }
 
 impl Default for RateLimitConfig {
@@ -40,6 +42,7 @@ impl Default for RateLimitConfig {
         Self {
             max_requests: 60,
             window: Duration::from_secs(60),
+            max_buckets: 1024,
         }
     }
 }
@@ -57,13 +60,18 @@ struct BucketEntry {
 pub struct RateLimiter {
     config: RateLimitConfig,
     buckets: Arc<DashMap<String, BucketEntry>>,
+    eviction_order: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl RateLimiter {
     pub fn new(config: RateLimitConfig) -> Self {
         Self {
-            config,
+            config: RateLimitConfig {
+                max_buckets: config.max_buckets.max(1),
+                ..config
+            },
             buckets: Arc::new(DashMap::new()),
+            eviction_order: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -71,19 +79,45 @@ impl RateLimiter {
     /// rejected (limit exceeded).
     pub fn check(&self, key: &str) -> bool {
         let now = Instant::now();
-        let mut entry = self.buckets.entry(key.to_string()).or_insert(BucketEntry {
-            count: 0,
-            window_start: now,
-        });
+        let key_owned = key.to_string();
+        let inserted = self.buckets.get(&key_owned).is_none();
 
-        // Reset window if expired
-        if now.duration_since(entry.window_start) >= self.config.window {
-            entry.count = 0;
-            entry.window_start = now;
+        if inserted {
+            self.buckets.insert(
+                key_owned.clone(),
+                BucketEntry {
+                    count: 0,
+                    window_start: now,
+                },
+            );
         }
 
-        entry.count += 1;
-        entry.count <= self.config.max_requests
+        let should_allow = {
+            let mut entry = self.buckets.get_mut(&key_owned).unwrap();
+
+            // Reset window if expired
+            if now.duration_since(entry.window_start) >= self.config.window {
+                entry.count = 0;
+                entry.window_start = now;
+            }
+
+            entry.count += 1;
+            entry.count <= self.config.max_requests
+        };
+
+        if inserted {
+            let mut order = self.eviction_order.lock().unwrap();
+            order.push_back(key_owned.clone());
+            while order.len() > self.config.max_buckets {
+                if let Some(oldest) = order.pop_front() {
+                    self.buckets.remove(&oldest);
+                } else {
+                    break;
+                }
+            }
+        }
+
+        should_allow
     }
 
     /// Seconds remaining in the current window for a given key.
@@ -158,6 +192,7 @@ pub fn config_from_env() -> RateLimitConfig {
     RateLimitConfig {
         max_requests,
         window: Duration::from_secs(window_secs),
+        max_buckets: 1024,
     }
 }
 
@@ -169,6 +204,7 @@ mod tests {
         RateLimiter::new(RateLimitConfig {
             max_requests: max,
             window: Duration::from_secs(window_secs),
+            max_buckets: 1024,
         })
     }
 
@@ -194,5 +230,21 @@ mod tests {
         assert!(rl.check("192.168.1.1"));
         assert!(rl.check("192.168.1.2")); // different key — should pass
         assert!(!rl.check("192.168.1.1")); // same key — should fail
+    }
+
+    #[test]
+    fn evicts_oldest_entries_when_max_buckets_is_exceeded() {
+        let rl = RateLimiter::new(RateLimitConfig {
+            max_requests: 10,
+            window: Duration::from_secs(60),
+            max_buckets: 2,
+        });
+
+        assert!(rl.check("one"));
+        assert!(rl.check("two"));
+        assert!(rl.check("three"));
+
+        assert!(rl.buckets.contains_key("three"));
+        assert!(!rl.buckets.contains_key("one"));
     }
 }

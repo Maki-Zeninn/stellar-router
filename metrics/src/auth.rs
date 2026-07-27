@@ -15,6 +15,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use std::env;
+use subtle::ConstantTimeEq;
 use tracing::warn;
 
 /// Authentication configuration.
@@ -80,6 +81,10 @@ pub async fn auth_middleware(
         }
         None => Err(AuthError::MissingKey),
     }
+}
+
+fn constant_time_equals(lhs: &str, rhs: &str) -> bool {
+    lhs.as_bytes().ct_eq(rhs.as_bytes()).into()
 }
 
 /// Extract API key from request headers.
@@ -163,5 +168,10 @@ mod tests {
 
         let key = extract_api_key(&headers);
         assert_eq!(key, Some("bearer-key".to_string()));
+    }
+
+    #[test]
+    fn test_constant_time_compare_rejects_prefix_mismatch() {
+        assert!(!constant_time_equals("super-secret", "super-guess"));
     }
 }
