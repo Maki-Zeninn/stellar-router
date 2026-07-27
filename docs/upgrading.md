@@ -172,14 +172,167 @@ If you need to change a storage type, use a two-phase upgrade:
 
 ---
 
+## Zero-Downtime Upgrade Path
+
+In-place WASM replacement (described above) is the preferred path because it
+preserves all storage and requires no state migration. Use it whenever your
+changes are backward-compatible (new functions, new `DataKey` variants, bug
+fixes that do not change stored types).
+
+When a breaking storage change is unavoidable, you must deploy a **new contract
+instance** and migrate state. This is more disruptive but can still be done with
+minimal downtime:
+
+### Phase A — Deploy and populate the new contract
+
+1. Deploy a fresh contract instance with the new WASM:
+
+```bash
+stellar contract deploy \
+  --wasm target/wasm32-unknown-unknown/release/router_core.wasm \
+  --network mainnet \
+  --source admin
+```
+
+Save the new `<NEW_CONTRACT_ID>`.
+
+2. Initialize it:
+
+```bash
+stellar contract invoke --id <NEW_CONTRACT_ID> --network mainnet --source admin \
+  -- initialize --admin <ADMIN_ADDRESS>
+```
+
+3. Run your off-chain migration script to copy all routes, aliases, scores, and
+   metadata from the old contract to the new one. Keep the old contract alive
+   and accepting reads during this window.
+
+Example migration script using the Stellar CLI:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+OLD_ID="<OLD_CONTRACT_ID>"
+NEW_ID="<NEW_CONTRACT_ID>"
+NETWORK="mainnet"
+SOURCE="admin"
+
+# Fetch all route names from the old contract
+NAMES=$(stellar contract invoke --id "$OLD_ID" --network "$NETWORK" --source "$SOURCE" \
+  -- get_route_names 2>/dev/null | jq -r '.[]')
+
+for name in $NAMES; do
+  # Read route entry
+  ADDR=$(stellar contract invoke --id "$OLD_ID" --network "$NETWORK" --source "$SOURCE" \
+    -- resolve --name "$name" 2>/dev/null)
+
+  # Register on new contract
+  stellar contract invoke --id "$NEW_ID" --network "$NETWORK" --source "$SOURCE" \
+    -- register --caller "$ADMIN_ADDRESS" --name "$name" --address "$ADDR"
+
+  echo "Migrated route: $name -> $ADDR"
+done
+
+# Fetch and migrate aliases
+ALIASES=$(stellar contract invoke --id "$OLD_ID" --network "$NETWORK" --source "$SOURCE" \
+  -- get_aliases 2>/dev/null | jq -r '.[]')
+
+for alias in $ALIASES; do
+  TARGET=$(stellar contract invoke --id "$OLD_ID" --network "$NETWORK" --source "$SOURCE" \
+    -- get_alias --alias_name "$alias" 2>/dev/null)
+
+  stellar contract invoke --id "$NEW_ID" --network "$NETWORK" --source "$SOURCE" \
+    -- add_alias --caller "$ADMIN_ADDRESS" --existing_name "$TARGET" --alias_name "$alias"
+
+  echo "Migrated alias: $alias -> $TARGET"
+done
+
+echo "Migration complete."
+```
+
+### Phase B — Atomic cutover
+
+Once the new contract is fully populated:
+
+1. Point your off-chain registry and any router-registry entries to
+   `<NEW_CONTRACT_ID>`.
+2. Pause the old contract to prevent stale writes:
+
+```bash
+stellar contract invoke --id <OLD_CONTRACT_ID> --network mainnet --source admin \
+  -- set_paused --caller <ADMIN_ADDRESS> --paused true
+```
+
+3. Verify the new contract is serving traffic correctly (see verification steps
+   below).
+
+### Phase C — Decommission the old contract
+
+After a monitoring window (at least 24 hours), you may stop routing traffic to
+the old contract. Because Soroban contracts cannot be deleted, simply cease
+calling it. Update all documentation and tooling to reference `<NEW_CONTRACT_ID>`
+only.
+
+---
+
+## Pre/Post-Upgrade Verification
+
+### Before upgrading
+
+Confirm the current state is readable and the contract responds correctly:
+
+```bash
+# Verify admin is set
+stellar contract invoke --id <CONTRACT_ID> --network mainnet --source admin \
+  -- admin
+
+# Verify route count is non-zero
+stellar contract invoke --id <CONTRACT_ID> --network mainnet --source admin \
+  -- get_route_count
+
+# Spot-check a known route
+stellar contract invoke --id <CONTRACT_ID> --network mainnet --source admin \
+  -- resolve --name <KNOWN_ROUTE_NAME>
+```
+
+### After upgrading
+
+Run the same checks immediately after the upgrade executes:
+
+```bash
+# Same three checks above — if any fail, initiate rollback immediately
+
+# Additionally verify the new WASM hash matches what was uploaded
+stellar contract info --id <CONTRACT_ID> --network mainnet | grep wasm_hash
+```
+
+---
+
 ## Rollback
 
 Soroban does not support automatic rollback of a WASM upgrade. If an upgrade
 introduces a bug:
 
 1. Build the previous WASM version.
-2. Upload it to the network (step 3 above).
-3. Call `upgrade()` with the old WASM hash.
+2. Upload it to the network:
+
+```bash
+stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/router_core_previous.wasm \
+  --network mainnet \
+  --source admin
+```
+
+3. Call `upgrade()` with the old WASM hash:
+
+```bash
+stellar contract invoke --id <CONTRACT_ID> --network mainnet --source admin \
+  -- upgrade --caller <ADMIN_ADDRESS> --new_wasm_hash <PREVIOUS_WASM_HASH>
+```
+
+**Always upload the rollback WASM before the upgrade executes** (step 3 of the
+upgrade strategy) so the hash is available immediately if something goes wrong.
 
 This is why all upgrades should be queued through router-timelock — the delay
 window gives time to test the new WASM on testnet and cancel the upgrade if
@@ -189,6 +342,8 @@ issues are found before it executes on mainnet.
 
 ## Upgrade Checklist
 
+### General (all contracts)
+
 Before upgrading any contract on mainnet:
 
 - [ ] New WASM tested on testnet with production-like data
@@ -197,7 +352,71 @@ Before upgrading any contract on mainnet:
 - [ ] Upgrade queued via router-timelock with at least 24h delay
 - [ ] Migration function (if needed) tested on testnet
 - [ ] Rollback WASM uploaded and hash noted
+- [ ] Pre-upgrade verification commands pass (see Pre/Post-Upgrade Verification)
 - [ ] On-chain monitoring active during upgrade window
+- [ ] Post-upgrade verification commands pass; rollback initiated immediately if any fail
+
+### router-core
+
+- [ ] Confirmed no changes to `RouteEntry` field types (XDR incompatibility)
+- [ ] Confirmed `DataKey` variants not reordered
+- [ ] All aliases resolve correctly after upgrade
+- [ ] Scored routes return the expected best-route after upgrade
+
+### router-registry
+
+- [ ] `ContractEntry` fields unchanged or two-phase migration prepared
+- [ ] Version lists (`DataKey::Versions`) remain `Vec<u32>`
+
+### router-access
+
+- [ ] Role hierarchy entries still readable (check `DataKey::RoleParent`)
+- [ ] `DataKey::HasRole` type unchanged
+
+### router-middleware
+
+- [ ] `RouteConfig` struct fields not removed or reordered
+- [ ] Circuit breaker state (`DataKey::CircuitState`) readable after upgrade
+
+### router-timelock
+
+- [ ] `TimelockOp.is_critical` field still present
+- [ ] No pending timelock operations that would be invalidated by the schema change
+- [ ] Cancel any in-flight operations before a schema-breaking upgrade
+
+### router-multicall
+
+- [ ] `CallDescriptor` changes are safe (it is not persisted, so field additions are safe)
+
+---
+
+## Registry Version Coordination
+
+`router-registry` tracks deployed contract versions in `DataKey::Versions`
+(a `Vec<u32>`). When you deploy a new WASM version via in-place upgrade, register
+the new version in the registry immediately after the upgrade executes:
+
+```bash
+stellar contract invoke --id <REGISTRY_ID> --network mainnet --source admin \
+  -- register_version \
+  --caller <ADMIN_ADDRESS> \
+  --contract_id <CORE_CONTRACT_ID> \
+  --version <NEW_VERSION_NUMBER>
+```
+
+When you deploy a completely new contract instance (state-migration path), register
+it as a new entry rather than a new version of the old contract:
+
+```bash
+stellar contract invoke --id <REGISTRY_ID> --network mainnet --source admin \
+  -- register \
+  --caller <ADMIN_ADDRESS> \
+  --name "router-core-v2" \
+  --address <NEW_CONTRACT_ID>
+```
+
+Keep both the old and new entries in the registry until the old contract is fully
+decommissioned, so tooling and dashboards can reference either address by name.
 
 ---
 

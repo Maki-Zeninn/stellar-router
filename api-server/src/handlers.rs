@@ -4,15 +4,13 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use serde_json::json;
 use tracing::{error, info};
-use utoipa::ToSchema;
 
 use crate::{
     state::AppState,
     types::{
-        ErrorCode, ErrorResponse, FeeEstimate, HealthResponse, RouteListResponse, RouteEntryResponse,
-        SimulateRequest, SimulateResponse, SimulationDetail,
+        ErrorCode, ErrorResponse, FeeEstimate, HealthResponse, RouteEntryResponse,
+        RouteListResponse, SimulateRequest, SimulateResponse, SimulationDetail,
     },
 };
 
@@ -146,11 +144,8 @@ pub async fn get_route(
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new(
                 ErrorCode::NotFound,
-                format!("route '{}' not found", name),
+                format!("route '{name}' not found"),
             )),
-            Json(ErrorResponse {
-                error: format!("route '{}' not found", name),
-            }),
         )),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -6,7 +6,6 @@
 //!
 //! ## Macros
 //! - [`require_admin!`] — inline admin check used across router contracts
-//! - [`require_admin_simple!`] — convenience version with standard error variants
 //! - [`require_admin_simple!`] — convenience macro for standard DataKey::Admin and error variants
 //! - [`admin_transfer_complete!`] — shared admin transfer pattern (storage set + event emit)
 //!
@@ -81,6 +80,9 @@ pub const EVENT_ALIAS_ADDED: &str = "alias_added";
 
 /// Standard event topic for alias removals
 pub const EVENT_ALIAS_REMOVED: &str = "alias_removed";
+
+/// Standard event topic for alias resolution (emitted when resolve goes through an alias)
+pub const EVENT_ALIAS_RESOLVED: &str = "alias_resolved";
 
 /// Standard event topic for route removals
 pub const EVENT_ROUTE_REMOVED: &str = "route_removed";
@@ -202,6 +204,11 @@ pub const EVENT_INITIALIZED: &str = "initialized";
 /// Standard event topic for per-route fee configuration
 pub const EVENT_ROUTE_FEE_SET: &str = "route_fee_set";
 
+/// Standard event topic for removing a custom per-route fee (reverts to default)
+pub const EVENT_ROUTE_FEE_UNSET: &str = "route_fee_unset";
+/// Standard event topic for per-route tiered fee schedule updates
+pub const EVENT_ROUTE_FEE_TIERS_SET: &str = "route_fee_tiers_set";
+
 /// Standard event topic for a quote being calculated
 pub const EVENT_QUOTE_CALCULATED: &str = "quote_calculated";
 
@@ -254,12 +261,26 @@ pub struct BatchCallSuccess {
     pub result: CallResult,
 }
 
+/// Structured error variants for batch item failures.
+///
+/// Clients can match on these variants instead of string-comparing error messages,
+/// enabling reliable programmatic error handling across contract versions.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum BatchItemError {
+    AlreadyExists,
+    InvalidName,
+    Unauthorized,
+    InvalidMetadata,
+    Custom(String),
+}
+
 /// Indexed failure entry for batch operations.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct BatchFailure {
     pub index: u32,
-    pub message: String,
+    pub error: BatchItemError,
 }
 
 /// Standardized per-index batch operation result for void operations (`T = BatchUnit`).
@@ -290,11 +311,8 @@ impl BatchResult {
         self.successes.push_back(BatchSuccess { index });
     }
 
-    pub fn record_failure(&mut self, env: &Env, index: u32, message: &str) {
-        self.failures.push_back(BatchFailure {
-            index,
-            message: String::from_str(env, message),
-        });
+    pub fn record_failure(&mut self, index: u32, error: BatchItemError) {
+        self.failures.push_back(BatchFailure { index, error });
     }
 
     pub fn has_failures(&self) -> bool {
@@ -317,11 +335,8 @@ impl BatchCallResult {
         });
     }
 
-    pub fn record_failure(&mut self, env: &Env, index: u32, message: &str) {
-        self.failures.push_back(BatchFailure {
-            index,
-            message: String::from_str(env, message),
-        });
+    pub fn record_failure(&mut self, index: u32, error: BatchItemError) {
+        self.failures.push_back(BatchFailure { index, error });
     }
 
     pub fn has_failures(&self) -> bool {

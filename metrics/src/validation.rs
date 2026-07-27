@@ -54,6 +54,10 @@ pub fn validate_contract_id(id: &str) -> Result<(), ValidationError> {
 }
 
 /// Validate a route name: non-empty, max 64 chars, alphanumeric + underscore/hyphen.
+///
+/// Not yet called from any handler — kept for validating route-name query
+/// params once an endpoint accepts one.
+#[allow(dead_code)]
 pub fn validate_route_name(name: &str) -> Result<(), ValidationError> {
     if name.is_empty() {
         return Err(ValidationError::new("route name must not be empty"));
@@ -93,7 +97,9 @@ pub fn validate_scrape_interval(secs: u64) -> Result<(), ValidationError> {
 pub fn validate_listen_addr(addr: &str) -> Result<(), ValidationError> {
     addr.parse::<std::net::SocketAddr>()
         .map(|_| ())
-        .map_err(|_| ValidationError::new("listen address must be a valid host:port (e.g. 0.0.0.0:9090)"))
+        .map_err(|_| {
+            ValidationError::new("listen address must be a valid host:port (e.g. 0.0.0.0:9090)")
+        })
 }
 
 #[cfg(test)]

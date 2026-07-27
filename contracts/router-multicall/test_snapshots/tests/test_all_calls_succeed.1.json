@@ -113,7 +113,8 @@
                 },
                 {
                   "bool": false
-                }
+                },
+                "void"
               ]
             }
           },
@@ -464,7 +465,8 @@
                 },
                 {
                   "bool": false
-                }
+                },
+                "void"
               ]
             }
           }
@@ -626,6 +628,42 @@
                 },
                 {
                   "u32": 1
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "batch_executed"
+              }
+            ],
+            "data": {
+              "vec": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                },
+                {
+                  "u64": 0
+                },
+                {
+                  "u32": 2
+                },
+                {
+                  "u32": 0
+                },
+                {
+                  "u32": 2
                 }
               ]
             }

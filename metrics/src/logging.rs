@@ -13,16 +13,16 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 ///
 /// Log level is read from `RUST_LOG`; defaults to `info` for this crate.
 pub fn init_logging(default_level: &str) -> Result<()> {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(default_level));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
 
     tracing_subscriber::registry()
         .with(
             fmt::layer()
-                .json()                        // JSON format
-                .with_current_span(true)       // include active span fields
+                .json() // JSON format
+                .with_current_span(true) // include active span fields
                 .with_span_list(false)
-                .with_target(true)             // module path
+                .with_target(true) // module path
                 .with_file(false)
                 .with_line_number(false),
         )

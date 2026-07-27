@@ -68,15 +68,27 @@ pub struct FeeBreakdown {
     pub fee_estimated: bool,
     /// `true` only when fees were derived from a live RPC simulation.
     /// `false` when the heuristic fallback was used (RPC unreachable).
+    #[allow(dead_code)]
     pub simulated: bool,
 }
 
 impl SorobanRpcClient {
-    pub fn new(rpc_url: impl Into<String>, router_core_contract_id: Option<String>) -> Self {
+    pub fn with_timeout(
+        rpc_url: impl Into<String>,
+        router_core_contract_id: Option<String>,
+        rpc_timeout_secs: u64,
+    ) -> Self {
+        let rpc_timeout = std::time::Duration::from_secs(rpc_timeout_secs);
+        let connect_timeout = std::time::Duration::from_secs(5);
+
         Self {
             rpc_url: rpc_url.into(),
             router_core_contract_id,
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .connect_timeout(connect_timeout)
+                .timeout(rpc_timeout)
+                .build()
+                .expect("failed to build HTTP client"),
         }
     }
 
@@ -94,7 +106,7 @@ impl SorobanRpcClient {
             .json(&req)
             .send()
             .await
-            .map_err(|e| anyhow!("RPC unreachable: {}", e))?;
+            .map_err(|e| anyhow!("RPC unreachable: {e}"))?;
         if !resp.status().is_success() {
             return Err(anyhow!("RPC returned status {}", resp.status()));
         }
@@ -144,7 +156,7 @@ impl SorobanRpcClient {
     }
 
     pub async fn get_all_routes(&self, contract_id: &str) -> Result<Vec<String>> {
-        let placeholder_xdr = format!("AAAAAgAAAAEAAAAA{}get_all_routesAAAAAAAAAAAA=", contract_id);
+        let placeholder_xdr = format!("AAAAAgAAAAEAAAAA{contract_id}get_all_routesAAAAAAAAAAAA=");
 
         let req = JsonRpcRequest {
             jsonrpc: "2.0",
@@ -159,10 +171,10 @@ impl SorobanRpcClient {
             .json(&req)
             .send()
             .await
-            .map_err(|e| anyhow!("RPC request failed: {}", e))?
+            .map_err(|e| anyhow!("RPC request failed: {e}"))?
             .json()
             .await
-            .map_err(|e| anyhow!("Failed to parse RPC response: {}", e))?;
+            .map_err(|e| anyhow!("Failed to parse RPC response: {e}"))?;
 
         if let Some(err) = resp.error {
             return Err(anyhow!("RPC error: {}", err.message));
@@ -171,7 +183,7 @@ impl SorobanRpcClient {
         let result = resp.result.ok_or_else(|| anyhow!("empty RPC result"))?;
 
         if let Some(err) = result.error {
-            return Err(anyhow!("contract error: {}", err));
+            return Err(anyhow!("contract error: {err}"));
         }
 
         let routes = result
@@ -190,7 +202,7 @@ impl SorobanRpcClient {
             .as_deref()
             .ok_or_else(|| anyhow!("ROUTER_CORE_CONTRACT_ID not configured"))?;
 
-        let placeholder_xdr = format!("get_route:{}:{}", contract_id, name);
+        let placeholder_xdr = format!("get_route:{contract_id}:{name}");
 
         let req = JsonRpcRequest {
             jsonrpc: "2.0",
@@ -353,7 +365,7 @@ impl SorobanRpcClient {
         target: &str,
         function: &str,
     ) -> Result<SimulateTransactionResult> {
-        let placeholder_xdr = format!("AAAAAgAAAAEAAAAA{}{}AAAAAAAAAAA=", target, function);
+        let placeholder_xdr = format!("AAAAAgAAAAEAAAAA{target}{function}AAAAAAAAAAA=");
         let req = JsonRpcRequest {
             jsonrpc: "2.0",
             id: 1,

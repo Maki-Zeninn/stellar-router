@@ -24,11 +24,8 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-
       - name: Build WASM artifacts
-        run: wasm-pack build --target web --out-dir pkg
+        run: cargo build --target wasm32-unknown-unknown --release
 
       - name: Generate changelog from conventional commits
         id: changelog
@@ -46,8 +43,6 @@ jobs:
           name: Release ${{ github.ref_name }}
           body: ${{ steps.changelog.outputs.content }}
           files: |
-            pkg/*.wasm
-            pkg/*.js
-            pkg/*.ts
+            target/wasm32-unknown-unknown/release/*.wasm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

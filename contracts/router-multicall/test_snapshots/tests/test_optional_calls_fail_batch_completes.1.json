@@ -155,7 +155,8 @@
                 },
                 {
                   "bool": false
-                }
+                },
+                "void"
               ]
             }
           },
@@ -548,7 +549,8 @@
                 },
                 {
                   "bool": false
-                }
+                },
+                "void"
               ]
             }
           }
@@ -862,6 +864,42 @@
       "event": {
         "ext": "v0",
         "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "batch_executed"
+              }
+            ],
+            "data": {
+              "vec": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                },
+                {
+                  "u64": 0
+                },
+                {
+                  "u32": 2
+                },
+                {
+                  "u32": 1
+                },
+                {
+                  "u32": 3
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
         "type_": "diagnostic",
         "body": {
           "v0": {
@@ -885,18 +923,25 @@
                         "map": [
                           {
                             "key": {
-                              "symbol": "index"
+                              "symbol": "error"
                             },
                             "val": {
-                              "u32": 1
+                              "vec": [
+                                {
+                                  "symbol": "Custom"
+                                },
+                                {
+                                  "string": "invoke_failed"
+                                }
+                              ]
                             }
                           },
                           {
                             "key": {
-                              "symbol": "message"
+                              "symbol": "index"
                             },
                             "val": {
-                              "string": "invoke_failed"
+                              "u32": 1
                             }
                           }
                         ]

@@ -14,7 +14,6 @@
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
 };
-use router_common;
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -86,9 +85,28 @@ pub enum QuoteError {
     NoQuotesProvided = 6,
     RouteNotFound = 7,
     ArithmeticOverflow = 8,
+    /// The configured-routes index has reached [`MAX_TRACKED_ROUTES`]; cannot add more.
+    TooManyRoutes = 9,
+    /// A [`FeeTier`] has an invalid `min_amount` (e.g. negative).
+    InvalidFeeTier = 9,
 }
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+/// Basis-points denominator: 10000 bps = 100%.
+///
+/// Used in every fee validation (`fee_bps > BPS_DENOMINATOR`) and in the
+/// fee calculation (`fee_amount = amount_in * fee_bps / BPS_DENOMINATOR`).
+/// A single source of truth prevents the literal from diverging across sites.
+const BPS_DENOMINATOR: u32 = 10_000;
+
 // ── Contract ──────────────────────────────────────────────────────────────────
+
+/// Maximum number of routes that can be tracked in the configured-routes index.
+///
+/// `track_configured_route` returns [`QuoteError::TooManyRoutes`] once this
+/// limit is reached to prevent unbounded storage growth.
+const MAX_TRACKED_ROUTES: u32 = 500;
 
 #[contract]
 pub struct RouterQuote;
@@ -116,7 +134,7 @@ impl RouterQuote {
             return Err(QuoteError::AlreadyInitialized);
         }
 
-        if default_fee_bps > 10000 {
+        if default_fee_bps > BPS_DENOMINATOR {
             return Err(QuoteError::InvalidFeeBps);
         }
 
@@ -157,20 +175,58 @@ impl RouterQuote {
         fee_bps: u32,
     ) -> Result<(), QuoteError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, QuoteError)?;
 
-        if fee_bps > 10000 {
+        if fee_bps > BPS_DENOMINATOR {
             return Err(QuoteError::InvalidFeeBps);
         }
 
-        Self::track_configured_route(&env, &route);
+        Self::track_configured_route(&env, &route)?;
 
         env.storage()
             .instance()
             .set(&DataKey::RouteFee(route.clone()), &fee_bps);
 
-        env.events()
-            .publish((Symbol::new(&env, router_common::EVENT_ROUTE_FEE_SET),), (route, fee_bps));
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROUTE_FEE_SET),),
+            (route, fee_bps),
+        );
+
+        Ok(())
+    }
+
+    /// Remove the custom fee for a specific route, reverting it to the default fee.
+    ///
+    /// After this call, `get_route_fee` for this route returns the contract's
+    /// default fee. If no custom fee was set for this route, this is a no-op
+    /// (the route continues using the default fee). Caller must be the admin.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `caller` - The address initiating the call; must be the admin.
+    /// * `route` - The route name whose custom fee should be removed.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`QuoteError::Unauthorized`] — if caller is not the admin.
+    pub fn unset_route_fee(
+        env: Env,
+        caller: Address,
+        route: String,
+    ) -> Result<(), QuoteError> {
+        caller.require_auth();
+        Self::require_admin(&env, &caller)?;
+
+        env.storage()
+            .instance()
+            .remove(&DataKey::RouteFee(route.clone()));
+
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROUTE_FEE_UNSET),),
+            route,
+        );
 
         Ok(())
     }
@@ -187,11 +243,14 @@ impl RouterQuote {
         tiers: Vec<FeeTier>,
     ) -> Result<(), QuoteError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, QuoteError)?;
 
-        let mut sorted_tiers = Vec::new(&env);
+        let mut sorted_tiers: Vec<FeeTier> = Vec::new(&env);
         for tier in tiers.iter() {
-            if tier.fee_bps > 10000 {
+            if tier.min_amount < 0 {
+                return Err(QuoteError::InvalidFeeTier);
+            }
+            if tier.fee_bps > BPS_DENOMINATOR {
                 return Err(QuoteError::InvalidFeeBps);
             }
 
@@ -206,10 +265,15 @@ impl RouterQuote {
             sorted_tiers.insert(position, tier.clone());
         }
 
-        Self::track_configured_route(&env, &route);
+        Self::track_configured_route(&env, &route)?;
         env.storage()
             .instance()
             .set(&DataKey::RouteFeeTiers(route.clone()), &sorted_tiers);
+
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROUTE_FEE_TIERS_SET),),
+            (route, sorted_tiers),
+        );
 
         Ok(())
     }
@@ -258,14 +322,14 @@ impl RouterQuote {
     /// Router name and Fee in basis points.
     pub fn get_all_configured_routes(env: Env) -> Vec<(String, u32)> {
         let routes = Self::read_configured_routes(&env);
-        let mut configures_routes = Vec::new(&env);
+        let mut configured_routes = Vec::new(&env);
 
         for route in routes {
             if let Ok(fee) = Self::get_route_fee(env.clone(), route.clone()) {
-                configures_routes.push_back((route, fee));
+                configured_routes.push_back((route, fee));
             }
         }
-        configures_routes
+        configured_routes
     }
 
     /// Get a quote for a single route with configurable fee.
@@ -288,17 +352,14 @@ impl RouterQuote {
             return Err(QuoteError::InvalidAmount);
         }
 
-        let fee_bps = Self::resolve_route_fee_bps(
-            env.clone(),
-            request.route.clone(),
-            request.amount_in,
-        )?;
+        let fee_bps =
+            Self::resolve_route_fee_bps(env.clone(), request.route.clone(), request.amount_in)?;
 
-        // Calculate fee: fee_amount = amount_in * fee_bps / 10000
+        // Calculate fee: fee_amount = amount_in * fee_bps / BPS_DENOMINATOR
         let fee_amount = request
             .amount_in
             .checked_mul(fee_bps as i128)
-            .and_then(|v| v.checked_div(10000))
+            .and_then(|v| v.checked_div(BPS_DENOMINATOR as i128))
             .ok_or(QuoteError::ArithmeticOverflow)?;
 
         // Calculate output: amount_out = amount_in - fee_amount
@@ -455,16 +516,18 @@ impl RouterQuote {
     /// * [`QuoteError::InvalidFeeBps`] — if fee_bps > 10000.
     pub fn set_default_fee(env: Env, caller: Address, fee_bps: u32) -> Result<(), QuoteError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, QuoteError)?;
 
-        if fee_bps > 10000 {
+        if fee_bps > BPS_DENOMINATOR {
             return Err(QuoteError::InvalidFeeBps);
         }
 
         env.storage().instance().set(&DataKey::DefaultFee, &fee_bps);
 
-        env.events()
-            .publish((Symbol::new(&env, router_common::EVENT_DEFAULT_FEE_UPDATED),), fee_bps);
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_DEFAULT_FEE_UPDATED),),
+            fee_bps,
+        );
 
         Ok(())
     }
@@ -526,7 +589,7 @@ impl RouterQuote {
         new_admin: Address,
     ) -> Result<(), QuoteError> {
         current.require_auth();
-        Self::require_admin(&env, &current)?;
+        router_common::require_admin_simple!(&env, &current, &DataKey::Admin, QuoteError)?;
         env.storage().instance().set(&DataKey::Admin, &new_admin);
 
         env.events().publish(
@@ -539,13 +602,7 @@ impl RouterQuote {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    fn require_admin(env: &Env, caller: &Address) -> Result<(), QuoteError> {
-        let admin = Self::admin(env.clone())?;
-        if &admin != caller {
-            return Err(QuoteError::Unauthorized);
-        }
-        Ok(())
-    }
+
 
     fn read_configured_routes(env: &Env) -> Vec<String> {
         env.storage()
@@ -560,12 +617,16 @@ impl RouterQuote {
             .set(&DataKey::ConfiguredRoutes, routes);
     }
 
-    fn track_configured_route(env: &Env, route: &String) {
+    fn track_configured_route(env: &Env, route: &String) -> Result<(), QuoteError> {
         let mut routes = Self::read_configured_routes(env);
         if !routes.contains(route) {
+            if routes.len() >= MAX_TRACKED_ROUTES {
+                return Err(QuoteError::TooManyRoutes);
+            }
             routes.push_back(route.clone());
             Self::write_configured_routes(env, &routes);
         }
+        Ok(())
     }
 
     fn resolve_route_fee_bps(env: Env, route: String, amount_in: i128) -> Result<u32, QuoteError> {
@@ -692,6 +753,50 @@ mod tests {
         let (env, _admin, client) = setup();
         let route = String::from_str(&env, "uniswap");
         assert_eq!(client.get_route_fee(&route), 100); // Default 1%
+    }
+
+    #[test]
+    fn test_get_route_fee_tiers_returns_empty_when_not_set() {
+        let (env, _admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+        let tiers = client.get_route_fee_tiers(&route);
+        assert!(tiers.is_empty());
+    }
+
+    #[test]
+    fn test_get_route_fee_tiers_returns_sorted_tiers() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+
+        // Create tiers in unsorted order
+        let tiers = vec![
+            &env,
+            FeeTier {
+                min_amount: 100000,
+                fee_bps: 10,
+            },
+            FeeTier {
+                min_amount: 0,
+                fee_bps: 50,
+            },
+            FeeTier {
+                min_amount: 10000,
+                fee_bps: 30,
+            },
+        ];
+
+        client.set_route_fee_tiers(&admin, &route, &tiers);
+
+        let retrieved_tiers = client.get_route_fee_tiers(&route);
+        assert_eq!(retrieved_tiers.len(), 3);
+
+        // Verify tiers are sorted by min_amount ascending
+        assert_eq!(retrieved_tiers.get(0).unwrap().min_amount, 0);
+        assert_eq!(retrieved_tiers.get(0).unwrap().fee_bps, 50);
+        assert_eq!(retrieved_tiers.get(1).unwrap().min_amount, 10000);
+        assert_eq!(retrieved_tiers.get(1).unwrap().fee_bps, 30);
+        assert_eq!(retrieved_tiers.get(2).unwrap().min_amount, 100000);
+        assert_eq!(retrieved_tiers.get(2).unwrap().fee_bps, 10);
     }
 
     #[test]
@@ -1053,6 +1158,33 @@ mod tests {
     }
 
     #[test]
+    fn test_unauthorized_set_default_fee_fails() {
+        let (env, _admin, client) = setup();
+        let unauthorized = Address::generate(&env);
+        let result = client.try_set_default_fee(&unauthorized, &200);
+        assert_eq!(result, Err(Ok(QuoteError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_unauthorized_set_route_fee_tiers_fails() {
+        let (env, _admin, client) = setup();
+        let unauthorized = Address::generate(&env);
+        let route = String::from_str(&env, "uniswap");
+        let tiers = Vec::new(&env);
+        let result = client.try_set_route_fee_tiers(&unauthorized, &route, &tiers);
+        assert_eq!(result, Err(Ok(QuoteError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_unauthorized_transfer_admin_fails() {
+        let (env, _admin, client) = setup();
+        let unauthorized = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        let result = client.try_transfer_admin(&unauthorized, &new_admin);
+        assert_eq!(result, Err(Ok(QuoteError::Unauthorized)));
+    }
+
+    #[test]
     fn test_admin_getter() {
         let (env, admin, client) = setup();
         assert_eq!(client.admin(), admin);
@@ -1102,8 +1234,8 @@ mod tests {
         let route2 = String::from_str(&env, "sushiswap");
         let route3 = String::from_str(&env, "pancakeswap");
         client.set_route_fee(&admin, &route1, &100); // 1%   -> out 9900
-        client.set_route_fee(&admin, &route2, &30);  // 0.3% -> out 9970 (best)
-        client.set_route_fee(&admin, &route3, &50);  // 0.5% -> out 9950
+        client.set_route_fee(&admin, &route2, &30); // 0.3% -> out 9970 (best)
+        client.set_route_fee(&admin, &route3, &50); // 0.5% -> out 9950
 
         let token_in = Address::generate(&env);
         let token_out = Address::generate(&env);
@@ -1155,7 +1287,10 @@ mod tests {
 
         let sorted = client.get_quotes_sorted(&requests);
         assert_eq!(sorted.len(), 1);
-        assert_eq!(sorted.get(0).unwrap().route, String::from_str(&env, "uniswap"));
+        assert_eq!(
+            sorted.get(0).unwrap().route,
+            String::from_str(&env, "uniswap")
+        );
     }
 
     #[test]

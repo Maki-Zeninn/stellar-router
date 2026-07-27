@@ -36,15 +36,11 @@
 //! - Each test creates fresh accounts via Friendbot
 //! - Tests clean up after themselves but may leave contracts on testnet
 
-mod integration {
-    pub mod failure_scenarios;
-    pub mod full_flow_test;
-}
+mod integration;
 
 #[cfg(test)]
 mod quick_tests {
-    use integration_tests::TestAccount;
-    use super::integration::testnet_setup::{DeployedContract, TestAccount};
+    use integration_tests::{DeployedContract, TestAccount};
 
     #[test]
     #[ignore]
@@ -116,7 +112,7 @@ mod quick_tests {
         let core = DeployedContract::deploy(wasm, "router-core", &admin, network)
             .expect("deploy router-core");
 
-        core.invoke("initialize", &["--admin", &admin.address], &admin, network)
+        core.invoke("initialize", &["--admin", &admin.address], &admin)
             .expect("initialize router-core");
 
         // Use a freshly generated address as the mock contract target
@@ -131,12 +127,11 @@ mod quick_tests {
                 "--metadata", "null",
             ],
             &admin,
-            network,
         )
         .expect("register_route");
 
         let resolved = core
-            .invoke("resolve", &["--name", "oracle"], &admin, network)
+            .invoke("resolve", &["--name", "oracle"], &admin)
             .expect("resolve");
 
         assert!(
@@ -167,7 +162,7 @@ mod quick_tests {
         let mw = DeployedContract::deploy(wasm, "router-middleware", &admin, network)
             .expect("deploy router-middleware");
 
-        mw.invoke("initialize", &["--admin", &admin.address], &admin, network)
+        mw.invoke("initialize", &["--admin", &admin.address], &admin)
             .expect("initialize");
 
         // Configure route: max 2 calls per 60-second window
@@ -184,7 +179,6 @@ mod quick_tests {
                 "--log_retention", "0",
             ],
             &admin,
-            network,
         )
         .expect("configure_route");
 
@@ -192,16 +186,16 @@ mod quick_tests {
         caller.fund(network).expect("fund caller");
 
         // Call 1 — should succeed
-        mw.invoke("pre_call", &["--caller", &caller.address, "--route", "oracle/get_price"], &caller, network)
+        mw.invoke("pre_call", &["--caller", &caller.address, "--route", "oracle/get_price"], &caller)
             .expect("pre_call 1");
 
         // Call 2 — should succeed
-        mw.invoke("pre_call", &["--caller", &caller.address, "--route", "oracle/get_price"], &caller, network)
+        mw.invoke("pre_call", &["--caller", &caller.address, "--route", "oracle/get_price"], &caller)
             .expect("pre_call 2");
 
         // Call 3 — must fail with RateLimitExceeded
         let err = mw
-            .try_invoke("pre_call", &["--caller", &caller.address, "--route", "oracle/get_price"], &caller, network)
+            .try_invoke("pre_call", &["--caller", &caller.address, "--route", "oracle/get_price"], &caller)
             .expect_err("pre_call 3 should fail with RateLimitExceeded");
         assert!(
             err.contains("RateLimitExceeded") || err.contains("4"),

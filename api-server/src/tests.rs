@@ -1,6 +1,7 @@
 use axum::{
     body::Body,
     http::{Request, StatusCode},
+    middleware,
     routing::{get, post},
     Router,
 };
@@ -9,6 +10,7 @@ use tower::util::ServiceExt;
 
 use crate::{
     handlers,
+    rate_limit::{RateLimitConfig, RateLimiter},
     state::AppState,
     types::{
         RouteDetails, SimulateRequest, SimulateResponse, TransactionStatus, TransactionStatusEvent,
@@ -19,17 +21,87 @@ use crate::{
 const VALID_CONTRACT_ID: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
 
 fn test_app() -> Router {
+    let rate_limiter = RateLimiter::new(RateLimitConfig::default());
     let state = AppState::new(
         "http://localhost:1".to_string(),
         "".to_string(),
         "".to_string(),
+        rate_limiter,
+        10,
     );
 
     Router::new()
-        .route("/health", get(handlers::health))
         .route("/simulate", post(handlers::simulate))
+        .route("/health", get(handlers::health))
+        .route("/routes", get(handlers::list_routes))
         .route("/routes/:name", get(handlers::get_route))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::rate_limit::rate_limit_middleware,
+        ))
         .with_state(state)
+}
+
+/// Like `test_app`, but with a non-empty `router_core_contract_id` so
+/// `list_routes` takes the RPC-call path instead of the 503 short-circuit.
+fn test_app_with_core_contract() -> Router {
+    let rate_limiter = RateLimiter::new(RateLimitConfig::default());
+    let state = AppState::new(
+        "http://localhost:1".to_string(),
+        "".to_string(),
+        VALID_CONTRACT_ID.to_string(),
+        rate_limiter,
+        10,
+    );
+
+    Router::new()
+        .route("/routes", get(handlers::list_routes))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::rate_limit::rate_limit_middleware,
+        ))
+        .with_state(state)
+}
+
+#[tokio::test]
+async fn test_list_routes_returns_503_when_core_not_configured() {
+    let app = test_app();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/routes")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(json["error"]["code"].is_string());
+    assert!(json["error"]["message"].is_string());
+}
+
+#[tokio::test]
+async fn test_list_routes_returns_500_on_rpc_error() {
+    let app = test_app_with_core_contract();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/routes")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["error"]["code"].as_str().unwrap(), "RPC_ERROR");
 }
 
 #[tokio::test]
@@ -114,6 +186,36 @@ async fn test_simulate_response_has_fee_fields() {
     assert!(parsed.estimated_fees.total_fee >= parsed.estimated_fees.base_fee);
     assert_eq!(parsed.simulation.target, VALID_CONTRACT_ID);
     assert_eq!(parsed.simulation.function, "transfer");
+}
+
+#[tokio::test]
+async fn test_simulate_rate_limit_headers_and_rejects_after_limit() {
+    let app = test_app();
+    let body = json!({ "target": VALID_CONTRACT_ID, "function": "transfer" });
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/simulate")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    };
+
+    for _ in 0..100 {
+        let resp = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["x-rate-limit-limit"], "100");
+    }
+
+    let resp = app.clone().oneshot(request()).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(resp.headers().get("retry-after").is_some());
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["error"].as_str().unwrap(), "rate_limit_exceeded");
 }
 
 #[tokio::test]
@@ -388,10 +490,13 @@ fn test_error_code_serialization() {
 
 /// Helper: create an AppState with a real broadcast channel for WebSocket tests.
 fn ws_app_state() -> AppState {
+    let rate_limiter = RateLimiter::new(RateLimitConfig::default());
     AppState::new(
         "http://localhost:1".to_string(),
         "".to_string(),
         "".to_string(),
+        rate_limiter,
+        10,
     )
 }
 
@@ -549,7 +654,10 @@ fn test_valid_subscribe_message_parses_correctly() {
 fn test_malformed_json_returns_parse_error() {
     let bad_json = "not valid json {{{{";
     let result: Result<crate::types::SubscribeMessage, _> = serde_json::from_str(bad_json);
-    assert!(result.is_err(), "malformed JSON must not parse successfully");
+    assert!(
+        result.is_err(),
+        "malformed JSON must not parse successfully"
+    );
 }
 
 /// An object that is valid JSON but missing required fields must also fail.
@@ -646,9 +754,7 @@ fn test_broadcast_channel_has_adequate_capacity() {
     // and that the channel is functional after creation.
     let state = ws_app_state();
     // Subscribing up to a representative number of simultaneous connections must not panic.
-    let _receivers: Vec<_> = (0..100)
-        .map(|_| state.tx_status_tx.subscribe())
-        .collect();
+    let _receivers: Vec<_> = (0..100).map(|_| state.tx_status_tx.subscribe()).collect();
     // All 100 subscriptions succeeded without panic — channel capacity is adequate.
 }
 
@@ -710,4 +816,43 @@ fn test_status_event_round_trips_through_json() {
     assert_eq!(decoded.status, event.status);
     assert_eq!(decoded.timestamp, event.timestamp);
     assert_eq!(decoded.message, event.message);
+}
+
+// ── Issue #720: CORS invalid origin warning ───────────────────────────────────
+
+#[test]
+fn test_build_cors_layer_valid_origins_accepted() {
+    use crate::build_cors_layer;
+    // Should not panic with valid HTTP origins
+    let origins = vec![
+        "http://localhost:3000".to_string(),
+        "https://example.com".to_string(),
+    ];
+    let _ = build_cors_layer(&origins);
+}
+
+#[test]
+fn test_build_cors_layer_empty_origins() {
+    use crate::build_cors_layer;
+    let _ = build_cors_layer(&[]);
+}
+
+#[test]
+fn test_build_cors_layer_wildcard() {
+    use crate::build_cors_layer;
+    let origins = vec!["*".to_string()];
+    let _ = build_cors_layer(&origins);
+}
+
+#[test]
+fn test_build_cors_layer_invalid_origin_does_not_panic() {
+    use crate::build_cors_layer;
+    // Invalid origins (missing scheme, trailing slash, etc.) must be skipped
+    // with a warning rather than causing a panic.
+    let origins = vec![
+        "not-a-valid-origin".to_string(),
+        "https://example.com".to_string(),
+    ];
+    // Must complete without panicking; the invalid entry is dropped + warned.
+    let _ = build_cors_layer(&origins);
 }

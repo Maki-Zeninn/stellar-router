@@ -1,4 +1,5 @@
 mod handlers;
+mod rate_limit;
 mod rpc;
 mod state;
 mod types;
@@ -19,12 +20,15 @@ use axum::{
 use clap::Parser;
 use std::net::SocketAddr;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use tracing::{info, warn};
 use tracing::{info, info_span, warn, Instrument};
+
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::state::AppState;
+use crate::{
+    rate_limit::{RateLimitConfig, RateLimiter},
+    state::AppState,
+};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -82,9 +86,19 @@ struct Args {
     /// Omit to disable cross-origin requests (production default).
     #[arg(long, env = "CORS_ORIGINS", value_delimiter = ',')]
     cors_origins: Vec<String>,
+    /// Maximum number of /simulate requests allowed per window.
+    #[arg(long, env = "RATE_LIMIT_MAX_REQUESTS", default_value = "100")]
+    rate_limit_max_requests: u32,
+    /// Sliding window for rate limiting in seconds.
+    #[arg(long, env = "RATE_LIMIT_WINDOW_SECS", default_value = "60")]
+    rate_limit_window_secs: u64,
     /// Seconds to wait for in-flight requests to complete on shutdown (default: 30)
     #[arg(long, env = "SHUTDOWN_TIMEOUT_SECS", default_value = "30")]
     shutdown_timeout_secs: u64,
+
+    /// Soroban RPC request timeout in seconds. Wired through to SorobanRpcClient::with_timeout.
+    #[arg(long, env = "RPC_TIMEOUT_SECS", default_value = "10")]
+    rpc_timeout_secs: u64,
 }
 
 #[tokio::main]
@@ -102,10 +116,18 @@ async fn main() -> Result<()> {
     info!("Listen address: {}", args.listen);
     info!("RPC URL: {}", args.rpc_url);
 
+    let rate_limiter = RateLimiter::new(RateLimitConfig {
+        max_requests: args.rate_limit_max_requests,
+        window: std::time::Duration::from_secs(args.rate_limit_window_secs),
+    });
+    rate_limiter.spawn_sweeper();
+
     let state = AppState::new(
         args.rpc_url,
         args.execution_contract_id,
         args.router_core_contract_id,
+        rate_limiter,
+        args.rpc_timeout_secs,
     );
 
     let cors = build_cors_layer(&args.cors_origins);
@@ -120,6 +142,10 @@ async fn main() -> Result<()> {
         .route("/ws", get(websocket::ws_handler))
         .route("/openapi.json", get(openapi_json))
         .merge(docs)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::rate_limit_middleware,
+        ))
         .layer(middleware::from_fn(request_id_middleware))
         .layer(cors)
         .layer(DefaultBodyLimit::max(1024 * 1024))
@@ -135,7 +161,11 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     let drain_timeout = std::time::Duration::from_secs(args.shutdown_timeout_secs);
-    let serve = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
+    let serve = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal());
 
     match tokio::time::timeout(drain_timeout, serve).await {
         Ok(result) => result?,
@@ -186,7 +216,7 @@ async fn request_id_middleware(req: Request<axum::body::Body>, next: Next) -> Re
     .await
 }
 
-fn build_cors_layer(origins: &[String]) -> CorsLayer {
+pub(crate) fn build_cors_layer(origins: &[String]) -> CorsLayer {
     let allow_methods = [Method::GET, Method::POST, Method::OPTIONS];
     let allow_headers = [header::CONTENT_TYPE, header::AUTHORIZATION];
 
@@ -197,8 +227,14 @@ fn build_cors_layer(origins: &[String]) -> CorsLayer {
     let allow_origin = if origins.iter().any(|o| o == "*") {
         AllowOrigin::any()
     } else {
-        let parsed: Vec<_> = origins.iter().filter_map(|o| o.parse().ok()).collect();
-        AllowOrigin::list(parsed)
+        let mut allowed = Vec::new();
+        for origin in origins {
+            match origin.parse::<HeaderValue>() {
+                Ok(v) => allowed.push(v),
+                Err(e) => warn!("Ignoring invalid CORS origin '{}': {}", origin, e),
+            }
+        }
+        AllowOrigin::list(allowed)
     };
 
     CorsLayer::new()

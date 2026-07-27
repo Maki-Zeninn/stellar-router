@@ -13,36 +13,35 @@
 //! - Event emission on every route operation
 //!
 //! ## Events (following naming convention: past tense verbs in snake_case)
-//! - `route_registered` — Route registered (route_name, address)
-//! - `route_updated` — Route updated (route_name)
-//! - `route_overwritten` — Route overwritten by same name (route_name)
-//! - `route_removed` — Route removed (route_name)
-//! - `route_paused` — Route paused/unpaused (route_name, paused)
-//! - `route_resolve_paused` — Route resolution paused (route_name)
-//! - `routed` — Route resolved (route_name, address)
-//! - `router_paused` — Router globally paused/unpaused (paused)
-//! - `metadata_updated` — Route metadata updated (route_name, metadata)
-//! - `route_tag_added` — Route tag added (route_name, tag)
-//! - `route_tag_removed` — Route tag removed (route_name, tag)
-//! - `route_ttl_set` — Route TTL set at registration (route_name, expiry_ledger)
-//! - `route_ttl_extended` — Route TTL extended (route_name, new_expiry_ledger)
-//! - `route_resolve_expired` — Route resolution attempted on an expired route (route_name)
-//! - `alias_added` — Route alias added (existing_name, alias_name)
-//! - `alias_removed` — Route alias removed (alias_name)
-//! - `route_scored` — Route score updated (route_name, score)
-//! - `best_route_selected` — Best route selected (route_name)
-//! - `admin_transferred` — Admin transferred (old_admin, new_admin)
+//! - `route_registered` ΓÇö Route registered (route_name, address)
+//! - `route_updated` ΓÇö Route updated (route_name)
+//! - `route_overwritten` ΓÇö Route overwritten by same name (route_name)
+//! - `route_removed` ΓÇö Route removed (route_name)
+//! - `route_paused` ΓÇö Route paused/unpaused (route_name, paused)
+//! - `route_resolve_paused` ΓÇö Route resolution paused (route_name)
+//! - `routed` ΓÇö Route resolved (route_name, address)
+//! - `router_paused` ΓÇö Router globally paused/unpaused (paused)
+//! - `metadata_updated` ΓÇö Route metadata updated (route_name, metadata)
+//! - `route_tag_added` ΓÇö Route tag added (route_name, tag)
+//! - `route_tag_removed` ΓÇö Route tag removed (route_name, tag)
+//! - `route_ttl_set` ΓÇö Route TTL set at registration (route_name, expiry_ledger)
+//! - `route_ttl_extended` ΓÇö Route TTL extended (route_name, new_expiry_ledger)
+//! - `route_resolve_expired` ΓÇö Route resolution attempted on an expired route (route_name)
+//! - `alias_added` ΓÇö Route alias added (existing_name, alias_name)
+//! - `alias_removed` ΓÇö Route alias removed (alias_name)
+//! - `route_scored` ΓÇö Route score updated (route_name, score)
+//! - `best_route_selected` ΓÇö Best route selected (route_name)
+//! - `admin_transferred` ΓÇö Admin transferred (old_admin, new_admin)
 
 pub mod scoring;
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
 };
+#[cfg(test)]
 extern crate alloc;
-use alloc::string::ToString;
-use router_common::is_whitespace_only;
 
-// ── Storage Keys ──────────────────────────────────────────────────────────────
+// ΓöÇΓöÇ Storage Keys ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 #[contracttype]
 pub enum DataKey {
@@ -50,6 +49,7 @@ pub enum DataKey {
     Route(String), // name -> RouteEntry
     RouteNames,
     RouteCount, // u32: O(1) counter kept in sync with RouteNames
+    MaxRoutes,  // u32: upper bound on the number of registered routes
     Paused,
     TotalRouted,
     Alias(String),        // alias -> original_name
@@ -58,9 +58,12 @@ pub enum DataKey {
     Metadata(String),     // name -> RouteMetadata (stored separately; avoids nested contracttype)
     Dependencies(String), // name -> Vec<String> of direct dependencies
     BestRoute,            // cached name of the highest-scoring non-paused route, if any
+
+    /// Configurable weights used by the composite scoring formula.
+    ScoringWeights,
 }
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ΓöÇΓöÇ Types ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -106,17 +109,36 @@ pub struct RouteScoreInput {
 /// Scoring attributes for a route used in path selection.
 ///
 /// Higher scores indicate more preferred routes. The composite score is
-/// computed as: `liquidity_score + reliability_score - fee_bps / 10`.
+/// computed as: `liquidity_weight * liquidity_score + reliability_weight * reliability_score - fee_bps / fee_divisor`.
 /// All fields are set by the admin and reflect off-chain measurements.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct RouteScore {
-    /// Liquidity depth score (0–100). Higher = more liquid.
+    /// Liquidity depth score (0ΓÇô100). Higher = more liquid.
     pub liquidity_score: u32,
     /// Fee rate in basis points (e.g., 30 = 0.30%). Lower = cheaper.
     pub fee_bps: u32,
-    /// Historical reliability score (0–100). Higher = more reliable.
+    /// Historical reliability score (0ΓÇô100). Higher = more reliable.
     pub reliability_score: u32,
+}
+
+/// Configurable weights for the composite route-scoring formula.
+///
+/// The composite score is:
+/// `liquidity_weight * liquidity_score + reliability_weight * reliability_score - fee_bps / fee_divisor`
+///
+/// Stored under [`DataKey::ScoringWeights`] and set by an admin via
+/// [`RouterCore::set_scoring_weights`].  When no weights have been configured
+/// the system falls back to `DEFAULT_SCORING_WEIGHTS`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScoringWeights {
+    /// Multiplier applied to `liquidity_score`. Default: 1.
+    pub liquidity_weight: i64,
+    /// Multiplier applied to `reliability_score`. Default: 1.
+    pub reliability_weight: i64,
+    /// Divisor applied to `fee_bps` (must be > 0). Default: 10.
+    pub fee_divisor: i64,
 }
 
 /// Resolution-specific errors returned by [`RouterCore::batch_resolve`].
@@ -130,6 +152,7 @@ pub enum ResolveError {
     RouteNotFound,
     RoutePaused,
     NotInitialized,
+    RouteExpired,
 }
 
 /// Per-entry result returned by [`RouterCore::batch_resolve`].
@@ -140,7 +163,29 @@ pub enum BatchResolveResult {
     Err(ResolveError),
 }
 
-// ── Errors ────────────────────────────────────────────────────────────────────
+/// Aggregate statistics about the current router state.
+///
+/// Returned by [`RouterCore::get_stats`]. All counters are computed in a
+/// single O(n) pass over the registered route set so callers get a consistent
+/// snapshot without needing to iterate routes themselves.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RouterStats {
+    /// Total number of routes currently registered (including paused and expired).
+    pub total_routes: u32,
+    /// Routes that are neither paused nor past their TTL.
+    pub active_routes: u32,
+    /// Routes that are explicitly paused (paused flag set to true).
+    pub paused_routes: u32,
+    /// Routes whose TTL has lapsed (expires_at < current ledger sequence).
+    pub expired_routes: u32,
+    /// Number of registered aliases.
+    pub alias_count: u32,
+    /// Number of routes that have a score assigned.
+    pub scored_routes: u32,
+}
+
+// ΓöÇΓöÇ Errors ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -158,10 +203,35 @@ pub enum RouterError {
     RouteInUse = 11,
     InvalidAddress = 12,
     RouteExpired = 13,
-    InvalidScore = 10,
+    InvalidScore = 14,
+    InvalidTtlExtension = 15,
+    RecursionLimitExceeded = 16,
+    TooManyRoutes = 17,
+    RecursionLimitExceeded = 15,
+    /// `fee_divisor` must be positive (> 0) when configuring scoring weights.
+    InvalidScoringWeights = 16,
 }
 
-// ── Contract ──────────────────────────────────────────────────────────────────
+/// Maximum allowed recursion depth for dependency resolution.
+const MAX_RECURSION_DEPTH: u32 = 10;
+// ΓöÇΓöÇ Constants ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+
+/// The Stellar "zero" address — used as a sentinel for "no owner" / invalid address checks.
+///
+/// A single source-of-truth for the literal so that a typo in one validation
+/// point cannot silently diverge from another, and any future change only
+/// needs to be made here.
+const ZERO_ADDRESS_STR: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+
+/// Minimum remaining TTL (in ledgers) before instance storage is extended.
+/// ~30 days at 5 s/ledger.
+const INSTANCE_TTL_THRESHOLD: u32 = 17280 * 30;
+
+/// Target TTL (in ledgers) applied to instance storage on every entry point.
+/// ~60 days at 5 s/ledger.
+const INSTANCE_TTL_EXTEND_TO: u32 = 17280 * 60;
+
+// ΓöÇΓöÇ Contract ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 /// Returns `true` if `entry` has a TTL set and the current ledger sequence
 /// number exceeds its expiry ledger. Routes with `expires_at: None` never expire.
@@ -190,8 +260,10 @@ impl RouterCore {
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// * [`RouterError::AlreadyInitialized`] — if the contract has already been initialized.
-    pub fn initialize(env: Env, admin: Address) -> Result<(), RouterError> {
+    /// * [`RouterError::AlreadyInitialized`] ΓÇö if the contract has already been initialized.
+    pub fn initialize(env: Env, admin: Address, max_routes: Option<u32>) -> Result<(), RouterError> {
+        admin.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(RouterError::AlreadyInitialized);
         }
@@ -205,6 +277,8 @@ impl RouterCore {
         env.storage().instance().set(&DataKey::Paused, &false);
         env.storage().instance().set(&DataKey::TotalRouted, &0u64);
         env.storage().instance().set(&DataKey::RouteCount, &0u32);
+        let cap: u32 = max_routes.unwrap_or(1_000);
+        env.storage().instance().set(&DataKey::MaxRoutes, &cap);
         Ok(())
     }
 
@@ -223,9 +297,9 @@ impl RouterCore {
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// * [`RouterError::Unauthorized`] — if `caller` is not the admin.
-    /// * [`RouterError::RouteAlreadyExists`] — if a route with `name` already exists.
-    /// * [`RouterError::NotInitialized`] — if the contract has not been initialized.
+    /// * [`RouterError::Unauthorized`] ΓÇö if `caller` is not the admin.
+    /// * [`RouterError::RouteAlreadyExists`] ΓÇö if a route with `name` already exists.
+    /// * [`RouterError::NotInitialized`] ΓÇö if the contract has not been initialized.
     pub fn register_route(
         env: Env,
         caller: Address,
@@ -233,6 +307,7 @@ impl RouterCore {
         address: Address,
         metadata: Option<RouteMetadata>,
     ) -> Result<(), RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
 
@@ -242,7 +317,7 @@ impl RouterCore {
         // Validate address is not the zero address
         let zero_address = Address::from_string(&String::from_str(
             &env,
-            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+            ZERO_ADDRESS_STR,
         ));
         if address == zero_address {
             return Err(RouterError::InvalidAddress);
@@ -255,6 +330,17 @@ impl RouterCore {
             }
             if meta.tags.len() > 5 {
                 return Err(RouterError::InvalidMetadata);
+            }
+            for tag in meta.tags.iter() {
+                let tlen = tag.len() as usize;
+                if tlen == 0 {
+                    return Err(RouterError::InvalidMetadata);
+                }
+                let mut tbuf = [0u8; 256];
+                tag.copy_into_slice(&mut tbuf[..tlen]);
+                if tbuf[..tlen].iter().all(|&b| b == b' ') {
+                    return Err(RouterError::InvalidMetadata);
+                }
             }
         }
 
@@ -319,10 +405,10 @@ impl RouterCore {
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// * [`RouterError::Unauthorized`] — if `caller` is not the admin.
-    /// * [`RouterError::RouteAlreadyExists`] — if a route with `name` already exists.
-    /// * [`RouterError::InvalidRouteName`] — if `name` is invalid.
-    /// * [`RouterError::NotInitialized`] — if the contract has not been initialized.
+    /// * [`RouterError::Unauthorized`] ΓÇö if `caller` is not the admin.
+    /// * [`RouterError::RouteAlreadyExists`] ΓÇö if a route with `name` already exists.
+    /// * [`RouterError::InvalidRouteName`] ΓÇö if `name` is invalid.
+    /// * [`RouterError::NotInitialized`] ΓÇö if the contract has not been initialized.
     pub fn register_route_with_ttl(
         env: Env,
         caller: Address,
@@ -330,6 +416,7 @@ impl RouterCore {
         address: Address,
         ttl_ledgers: Option<u32>,
     ) -> Result<(), RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
 
@@ -358,6 +445,7 @@ impl RouterCore {
     /// # Returns
     /// `Some(expiry_ledger)` if the route has a TTL, `None` otherwise.
     pub fn get_route_expiry(env: Env, name: String) -> Option<u32> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         env.storage()
             .instance()
             .get::<DataKey, RouteEntry>(&DataKey::Route(name))
@@ -381,18 +469,23 @@ impl RouterCore {
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// * [`RouterError::Unauthorized`] — if `caller` is not the admin.
-    /// * [`RouterError::RouteNotFound`] — if no route with `name` exists.
-    /// * [`RouterError::RouteExpired`] — if the route has already expired; extend before expiry.
-    /// * [`RouterError::NotInitialized`] — if the contract has not been initialized.
+    /// * [`RouterError::Unauthorized`] ΓÇö if `caller` is not the admin.
+    /// * [`RouterError::RouteNotFound`] ΓÇö if no route with `name` exists.
+    /// * [`RouterError::RouteExpired`] ΓÇö if the route has already expired; extend before expiry.
+    /// * [`RouterError::NotInitialized`] ΓÇö if the contract has not been initialized.
     pub fn extend_route_ttl(
         env: Env,
         caller: Address,
         name: String,
         additional_ledgers: u32,
     ) -> Result<(), RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
+
+        if additional_ledgers == 0 {
+            return Err(RouterError::InvalidTtlExtension);
+        }
 
         let mut entry: RouteEntry = env
             .storage()
@@ -439,15 +532,16 @@ impl RouterCore {
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// * [`RouterError::Unauthorized`] — if `caller` is not the admin.
-    /// * [`RouterError::RouteNotFound`] — if no route with `name` exists.
-    /// * [`RouterError::NotInitialized`] — if the contract has not been initialized.
+    /// * [`RouterError::Unauthorized`] ΓÇö if `caller` is not the admin.
+    /// * [`RouterError::RouteNotFound`] ΓÇö if no route with `name` exists.
+    /// * [`RouterError::NotInitialized`] ΓÇö if the contract has not been initialized.
     pub fn update_route(
         env: Env,
         caller: Address,
         name: String,
         new_address: Address,
     ) -> Result<(), RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
 
@@ -464,8 +558,10 @@ impl RouterCore {
             .instance()
             .set(&DataKey::Route(name.clone()), &entry);
 
-        env.events()
-            .publish((Symbol::new(&env, router_common::EVENT_ROUTE_UPDATED),), name.clone());
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROUTE_UPDATED),),
+            name.clone(),
+        );
 
         env.events().publish(
             (Symbol::new(&env, router_common::EVENT_ROUTE_OVERWRITTEN),),
@@ -489,10 +585,11 @@ impl RouterCore {
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// * [`RouterError::Unauthorized`] — if `caller` is not the admin.
-    /// * [`RouterError::RouteNotFound`] — if no route with `name` exists.
-    /// * [`RouterError::NotInitialized`] — if the contract has not been initialized.
+    /// * [`RouterError::Unauthorized`] ΓÇö if `caller` is not the admin.
+    /// * [`RouterError::RouteNotFound`] ΓÇö if no route with `name` exists.
+    /// * [`RouterError::NotInitialized`] ΓÇö if the contract has not been initialized.
     pub fn remove_route(env: Env, caller: Address, name: String) -> Result<(), RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
 
@@ -569,17 +666,18 @@ impl RouterCore {
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// * [`RouterError::Unauthorized`] — if `caller` is not the admin.
-    /// * [`RouterError::RouteAlreadyExists`] — if any route name already exists.
-    /// * [`RouterError::InvalidRouteName`] — if any route name is empty or whitespace-only.
-    /// * [`RouterError::InvalidMetadata`] — if any metadata is invalid.
-    /// * [`RouterError::NotInitialized`] — if the contract has not been initialized.
+    /// * [`RouterError::Unauthorized`] ΓÇö if `caller` is not the admin.
+    /// * [`RouterError::RouteAlreadyExists`] ΓÇö if any route name already exists.
+    /// * [`RouterError::InvalidRouteName`] ΓÇö if any route name is empty or whitespace-only.
+    /// * [`RouterError::InvalidMetadata`] ΓÇö if any metadata is invalid.
+    /// * [`RouterError::NotInitialized`] ΓÇö if the contract has not been initialized.
     pub fn register_routes_batch(
         env: Env,
         caller: Address,
         routes: Vec<RouteRegisterInput>,
         fail_fast: bool,
     ) -> Result<router_common::BatchResult, RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
 
@@ -590,11 +688,11 @@ impl RouterCore {
             for (index, route) in routes.iter().enumerate() {
                 let idx = index as u32;
                 if seen.contains(&route.name) {
-                    result.record_failure(&env, idx, "RouteAlreadyExists");
+                    result.record_failure(idx, router_common::BatchItemError::AlreadyExists);
                     return Ok(result);
                 }
                 if let Err(err) = Self::validate_route_name(&env, &route.name) {
-                    result.record_failure(&env, idx, Self::router_error_message(err));
+                    result.record_failure(idx, Self::router_error_to_batch(&env, err));
                     return Ok(result);
                 }
                 if env
@@ -602,7 +700,7 @@ impl RouterCore {
                     .instance()
                     .has(&DataKey::Route(route.name.clone()))
                 {
-                    result.record_failure(&env, idx, "RouteAlreadyExists");
+                    result.record_failure(idx, router_common::BatchItemError::AlreadyExists);
                     return Ok(result);
                 }
                 seen.push_back(route.name.clone());
@@ -632,7 +730,7 @@ impl RouterCore {
                 ) {
                     Ok(()) => result.record_success(idx),
                     Err(err) => {
-                        result.record_failure(&env, idx, Self::router_error_message(err));
+                        result.record_failure(idx, Self::router_error_to_batch(&env, err));
                     }
                 }
             }
@@ -656,15 +754,16 @@ impl RouterCore {
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// * [`RouterError::Unauthorized`] — if `caller` is not the admin.
-    /// * [`RouterError::RouteNotFound`] — if any route name does not exist.
-    /// * [`RouterError::NotInitialized`] — if the contract has not been initialized.
+    /// * [`RouterError::Unauthorized`] ΓÇö if `caller` is not the admin.
+    /// * [`RouterError::RouteNotFound`] ΓÇö if any route name does not exist.
+    /// * [`RouterError::NotInitialized`] ΓÇö if the contract has not been initialized.
     pub fn remove_routes_batch(
         env: Env,
         caller: Address,
         names: Vec<String>,
         fail_fast: bool,
     ) -> Result<router_common::BatchResult, RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
 
@@ -674,7 +773,7 @@ impl RouterCore {
             for (index, name) in names.iter().enumerate() {
                 let idx = index as u32;
                 if !env.storage().instance().has(&DataKey::Route(name.clone())) {
-                    result.record_failure(&env, idx, "RouteNotFound");
+                    result.record_failure(idx, router_common::BatchItemError::AlreadyExists);
                     return Ok(result);
                 }
             }
@@ -689,7 +788,7 @@ impl RouterCore {
                 match Self::remove_route_internal(&env, name.clone()) {
                     Ok(()) => result.record_success(idx),
                     Err(err) => {
-                        result.record_failure(&env, idx, Self::router_error_message(err));
+                        result.record_failure(idx, Self::router_error_to_batch(&env, err));
                     }
                 }
             }
@@ -722,11 +821,12 @@ impl RouterCore {
     /// The [`Address`] of the contract registered under `name`.
     ///
     /// # Errors
-    /// * [`RouterError::RouterPaused`] — if the entire router is paused.
-    /// * [`RouterError::RouteNotFound`] — if no route with `name` exists.
-    /// * [`RouterError::RoutePaused`] — if the specific route is paused.
-    /// * [`RouterError::RouteExpired`] — if the route's TTL has lapsed.
+    /// * [`RouterError::RouterPaused`] ΓÇö if the entire router is paused.
+    /// * [`RouterError::RouteNotFound`] ΓÇö if no route with `name` exists.
+    /// * [`RouterError::RoutePaused`] ΓÇö if the specific route is paused.
+    /// * [`RouterError::RouteExpired`] ΓÇö if the route's TTL has lapsed.
     pub fn resolve(env: Env, name: String) -> Result<Address, RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         let paused: bool = env
             .storage()
             .instance()
@@ -737,15 +837,22 @@ impl RouterCore {
         }
 
         // Resolve alias if present
-        let resolved_name = if let Some(original) = env
+        let (resolved_name, alias_used) = if let Some(original) = env
             .storage()
             .instance()
             .get::<DataKey, String>(&DataKey::Alias(name.clone()))
         {
-            original
+            (original, true)
         } else {
-            name.clone()
+            (name.clone(), false)
         };
+
+        if alias_used {
+            env.events().publish(
+                (Symbol::new(&env, router_common::EVENT_ALIAS_RESOLVED),),
+                (name.clone(), resolved_name.clone()),
+            );
+        }
 
         // Score-based selection: the best non-paused scored route is maintained
         // in a cached storage key (DataKey::BestRoute), updated whenever scores,
@@ -754,7 +861,7 @@ impl RouterCore {
         // non-paused route exists, the cache is absent and we fall back to the
         // directly requested route.
         //
-        // Unlike pausing, TTL expiry is not a write — a route can lapse purely
+        // Unlike pausing, TTL expiry is not a write ΓÇö a route can lapse purely
         // from ledger time passing with no event to trigger a cache refresh.
         // So the cached pointer is re-validated against expiry on every read;
         // if it has gone stale, this call falls back to the requested route
@@ -809,7 +916,7 @@ impl RouterCore {
 
         env.events().publish(
             (Symbol::new(&env, router_common::EVENT_ROUTED),),
-            (name.clone(), entry.address.clone()),
+            (final_name.clone(), entry.address.clone()),
         );
 
         Ok(entry.address)
@@ -830,15 +937,16 @@ impl RouterCore {
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// * [`RouterError::Unauthorized`] — if `caller` is not the admin.
-    /// * [`RouterError::RouteNotFound`] — if no route with `name` exists.
-    /// * [`RouterError::NotInitialized`] — if the contract has not been initialized.
+    /// * [`RouterError::Unauthorized`] ΓÇö if `caller` is not the admin.
+    /// * [`RouterError::RouteNotFound`] ΓÇö if no route with `name` exists.
+    /// * [`RouterError::NotInitialized`] ΓÇö if the contract has not been initialized.
     pub fn set_route_paused(
         env: Env,
         caller: Address,
         name: String,
         paused: bool,
     ) -> Result<(), RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
 
@@ -880,9 +988,10 @@ impl RouterCore {
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// * [`RouterError::Unauthorized`] — if `caller` is not the admin.
-    /// * [`RouterError::NotInitialized`] — if the contract has not been initialized.
+    /// * [`RouterError::Unauthorized`] ΓÇö if `caller` is not the admin.
+    /// * [`RouterError::NotInitialized`] ΓÇö if the contract has not been initialized.
     pub fn set_paused(env: Env, caller: Address, paused: bool) -> Result<(), RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
         env.storage().instance().set(&DataKey::Paused, &paused);
@@ -907,6 +1016,7 @@ impl RouterCore {
     /// # Returns
     /// `Some(`[`RouteEntry`]`)` if the route exists, `None` otherwise.
     pub fn get_route(env: Env, name: String) -> Option<RouteEntry> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         env.storage().instance().get(&DataKey::Route(name))
     }
 
@@ -921,6 +1031,7 @@ impl RouterCore {
         route: String,
         depends_on: String,
     ) -> Result<(), RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
 
@@ -963,6 +1074,7 @@ impl RouterCore {
 
     /// Return the direct dependencies for a route.
     pub fn get_route_dependencies(env: Env, route: String) -> Result<Vec<String>, RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         if !env.storage().instance().has(&DataKey::Route(route.clone())) {
             return Err(RouterError::RouteNotFound);
         }
@@ -975,6 +1087,7 @@ impl RouterCore {
         env: Env,
         name: String,
     ) -> Result<Vec<(String, Address)>, RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         let paused: bool = env
             .storage()
             .instance()
@@ -997,6 +1110,7 @@ impl RouterCore {
             &mut active_stack,
             &mut resolved_names,
             &mut resolved,
+            0,
         )?;
 
         Ok(resolved)
@@ -1017,14 +1131,15 @@ impl RouterCore {
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// * [`RouterError::Unauthorized`] — if `caller` is not the admin.
-    /// * [`RouterError::RouteNotFound`] — if no route with `name` exists.
+    /// * [`RouterError::Unauthorized`] ΓÇö if `caller` is not the admin.
+    /// * [`RouterError::RouteNotFound`] ΓÇö if no route with `name` exists.
     pub fn update_metadata(
         env: Env,
         caller: Address,
         name: String,
         metadata: Option<RouteMetadata>,
     ) -> Result<(), RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
 
@@ -1039,6 +1154,17 @@ impl RouterCore {
             }
             if meta.tags.len() > 5 {
                 return Err(RouterError::InvalidMetadata);
+            }
+            for tag in meta.tags.iter() {
+                let tlen = tag.len() as usize;
+                if tlen == 0 {
+                    return Err(RouterError::InvalidMetadata);
+                }
+                let mut tbuf = [0u8; 256];
+                tag.copy_into_slice(&mut tbuf[..tlen]);
+                if tbuf[..tlen].iter().all(|&b| b == b' ') {
+                    return Err(RouterError::InvalidMetadata);
+                }
             }
         }
 
@@ -1073,6 +1199,7 @@ impl RouterCore {
     /// # Returns
     /// `Some(`[`RouteMetadata`]`)` if metadata exists, `None` otherwise.
     pub fn get_metadata(env: Env, name: String) -> Option<RouteMetadata> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         env.storage()
             .instance()
             .get::<DataKey, RouteMetadata>(&DataKey::Metadata(name))
@@ -1083,6 +1210,7 @@ impl RouterCore {
     /// This read-only lookup scans registered route metadata and returns the
     /// names of routes tagged with `tag`. Routes without metadata are skipped.
     pub fn get_routes_by_tag(env: Env, tag: String) -> Vec<String> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         let mut routes = Vec::new(&env);
 
         for name in Self::get_route_names(&env).iter() {
@@ -1111,6 +1239,7 @@ impl RouterCore {
         name: String,
         tag: String,
     ) -> Result<(), RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
 
@@ -1154,6 +1283,7 @@ impl RouterCore {
         name: String,
         tag: String,
     ) -> Result<(), RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
 
@@ -1195,6 +1325,7 @@ impl RouterCore {
 
     /// Return every unique tag currently used by route metadata.
     pub fn get_all_tags(env: Env) -> Vec<String> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         let mut tags = Vec::new(&env);
 
         for name in Self::get_route_names(&env).iter() {
@@ -1233,6 +1364,7 @@ impl RouterCore {
     /// # Returns
     /// The total number of times a route has been resolved.
     pub fn total_routed(env: Env) -> u64 {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         env.storage()
             .instance()
             .get(&DataKey::TotalRouted)
@@ -1249,10 +1381,45 @@ impl RouterCore {
     /// # Returns
     /// The total number of registered routes.
     pub fn route_count(env: Env) -> u32 {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         env.storage()
             .instance()
             .get(&DataKey::RouteCount)
             .unwrap_or(0)
+    }
+
+    /// Get the maximum number of routes that may be registered simultaneously.
+    ///
+    /// Returns the cap set during [`initialize`] or by the last call to
+    /// [`set_max_routes`]. Defaults to 1 000 if never explicitly configured.
+    pub fn get_max_routes(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxRoutes)
+            .unwrap_or(1_000)
+    }
+
+    /// Update the maximum number of routes that may be registered simultaneously.
+    ///
+    /// Allows the admin to raise or lower the cap at any time. Lowering the cap
+    /// below the current route count does **not** remove existing routes — it
+    /// only prevents new registrations until routes are removed to bring the
+    /// count back under the new limit. Caller must be the admin.
+    ///
+    /// # Errors
+    /// * [`RouterError::Unauthorized`] — if `caller` is not the admin.
+    /// * [`RouterError::NotInitialized`] — if the contract has not been initialized.
+    /// * [`RouterError::InvalidRouteName`] — if `max_routes` is 0.
+    pub fn set_max_routes(env: Env, caller: Address, max_routes: u32) -> Result<(), RouterError> {
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
+        if max_routes == 0 {
+            return Err(RouterError::InvalidRouteName);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxRoutes, &max_routes);
+        Ok(())
     }
 
     /// Create an alias for an existing route.
@@ -1271,15 +1438,16 @@ impl RouterCore {
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// * [`RouterError::Unauthorized`] — if `caller` is not the admin.
-    /// * [`RouterError::RouteNotFound`] — if `existing_name` does not exist.
-    /// * [`RouterError::RouteAlreadyExists`] — if `alias_name` already exists.
+    /// * [`RouterError::Unauthorized`] ΓÇö if `caller` is not the admin.
+    /// * [`RouterError::RouteNotFound`] ΓÇö if `existing_name` does not exist.
+    /// * [`RouterError::RouteAlreadyExists`] ΓÇö if `alias_name` already exists.
     pub fn add_alias(
         env: Env,
         caller: Address,
         existing_name: String,
         alias_name: String,
     ) -> Result<(), RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
 
@@ -1322,9 +1490,10 @@ impl RouterCore {
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// * [`RouterError::Unauthorized`] — if `caller` is not the admin.
-    /// * [`RouterError::RouteNotFound`] — if `alias_name` does not exist.
+    /// * [`RouterError::Unauthorized`] ΓÇö if `caller` is not the admin.
+    /// * [`RouterError::RouteNotFound`] ΓÇö if `alias_name` does not exist.
     pub fn remove_alias(env: Env, caller: Address, alias_name: String) -> Result<(), RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
 
@@ -1371,8 +1540,9 @@ impl RouterCore {
     /// The [`Address`] of the current admin.
     ///
     /// # Errors
-    /// * [`RouterError::NotInitialized`] — if the contract has not been initialized.
+    /// * [`RouterError::NotInitialized`] ΓÇö if the contract has not been initialized.
     pub fn admin(env: Env) -> Result<Address, RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         env.storage()
             .instance()
             .get(&DataKey::Admin)
@@ -1393,13 +1563,14 @@ impl RouterCore {
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// * [`RouterError::Unauthorized`] — if `current` is not the admin.
-    /// * [`RouterError::NotInitialized`] — if the contract has not been initialized.
+    /// * [`RouterError::Unauthorized`] ΓÇö if `current` is not the admin.
+    /// * [`RouterError::NotInitialized`] ΓÇö if the contract has not been initialized.
     pub fn transfer_admin(
         env: Env,
         current: Address,
         new_admin: Address,
     ) -> Result<(), RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         current.require_auth();
         router_common::require_admin_simple!(&env, &current, &DataKey::Admin, RouterError)?;
         router_common::admin_transfer_complete!(&env, &current, &new_admin, &DataKey::Admin);
@@ -1417,6 +1588,7 @@ impl RouterCore {
     /// # Returns
     /// A `Vec<String>` containing all registered, non-expired route names.
     pub fn get_all_routes(env: Env) -> Vec<String> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         let mut routes = Vec::new(&env);
         for name in Self::get_route_names(&env).iter() {
             let expired = env
@@ -1430,6 +1602,66 @@ impl RouterCore {
             }
         }
         routes
+    }
+
+    /// Return aggregate statistics about the current router state.
+    ///
+    /// Performs a single O(n) pass over all registered routes and aliases to
+    /// compute the counts. No authentication is required ΓÇö this is a
+    /// read-only query intended for operators and monitoring dashboards.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// A [`RouterStats`] snapshot with counts for total, active, paused,
+    /// expired, aliased, and scored routes.
+    pub fn get_stats(env: Env) -> RouterStats {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+        let names = Self::get_route_names(&env);
+        let mut total_routes: u32 = 0;
+        let mut active_routes: u32 = 0;
+        let mut paused_routes: u32 = 0;
+        let mut expired_routes: u32 = 0;
+        let mut scored_routes: u32 = 0;
+
+        for name in names.iter() {
+            total_routes += 1;
+
+            let entry: Option<RouteEntry> =
+                env.storage().instance().get(&DataKey::Route(name.clone()));
+
+            match entry {
+                Some(e) => {
+                    let expired = is_route_expired(&env, &e);
+                    if expired {
+                        expired_routes += 1;
+                    } else if e.paused {
+                        paused_routes += 1;
+                    } else {
+                        active_routes += 1;
+                    }
+                }
+                None => {
+                    // Entry missing; treat as non-active to avoid false counts.
+                }
+            }
+
+            if env.storage().instance().has(&DataKey::Score(name.clone())) {
+                scored_routes += 1;
+            }
+        }
+
+        let alias_count = Self::get_aliases(&env).len();
+
+        RouterStats {
+            total_routes,
+            active_routes,
+            paused_routes,
+            expired_routes,
+            alias_count,
+            scored_routes,
+        }
     }
 
     /// Returns a page of registered route names.
@@ -1448,6 +1680,7 @@ impl RouterCore {
     /// # Returns
     /// A `Vec<String>` containing up to `limit` route names.
     pub fn get_routes_paginated(env: Env, start: u32, limit: u32) -> Vec<String> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         let names = Self::get_route_names(&env);
         let total = names.len();
         let mut page = Vec::new(&env);
@@ -1477,9 +1710,61 @@ impl RouterCore {
     /// # Returns
     /// `Some(canonical_name)` if `alias_name` is a registered alias, `None` otherwise.
     pub fn get_alias_target(env: Env, alias_name: String) -> Option<String> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         env.storage()
             .instance()
             .get::<DataKey, String>(&DataKey::Alias(alias_name))
+    }
+
+    /// Configure the weights used in the composite route-scoring formula.
+    ///
+    /// The composite score is computed as:
+    /// `liquidity_weight * liquidity_score + reliability_weight * reliability_score - fee_bps / fee_divisor`
+    ///
+    /// Stored persistently so the formula adapts to different deployment
+    /// scenarios (e.g. fee-sensitive vs. reliability-sensitive) without
+    /// redeploying the contract.
+    ///
+    /// # Arguments
+    /// * `env`                - The Soroban environment.
+    /// * `caller`             - Must be the admin.
+    /// * `weights`            - The [`ScoringWeights`] to persist.
+    ///
+    /// # Errors
+    /// * [`RouterError::Unauthorized`]          — if `caller` is not the admin.
+    /// * [`RouterError::NotInitialized`]        — if the contract is not initialized.
+    /// * [`RouterError::InvalidScoringWeights`] — if `fee_divisor` is ≤ 0 or any
+    ///   weight is negative.
+    pub fn set_scoring_weights(
+        env: Env,
+        caller: Address,
+        weights: ScoringWeights,
+    ) -> Result<(), RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
+
+        if weights.fee_divisor <= 0 || weights.liquidity_weight < 0 || weights.reliability_weight < 0 {
+            return Err(RouterError::InvalidScoringWeights);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ScoringWeights, &weights);
+
+        // Re-rank routes using the new weights.
+        Self::recompute_best_route(&env);
+
+        Ok(())
+    }
+
+    /// Return the currently configured [`ScoringWeights`].
+    ///
+    /// Falls back to `(liquidity_weight=1, reliability_weight=1, fee_divisor=10)`
+    /// when no weights have been explicitly set via [`set_scoring_weights`].
+    pub fn get_scoring_weights(env: Env) -> ScoringWeights {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+        Self::scoring_weights_internal(&env)
     }
 
     /// Set or update the scoring attributes for a route.
@@ -1494,30 +1779,30 @@ impl RouterCore {
     /// * `score` - The [`RouteScore`] to associate with this route.
     ///
     /// # Errors
-    /// * [`RouterError::Unauthorized`] — if `caller` is not the admin.
-    /// * [`RouterError::RouteNotFound`] — if the route does not exist.
-    /// * [`RouterError::NotInitialized`] — if the contract is not initialized.
+    /// * [`RouterError::Unauthorized`] ΓÇö if `caller` is not the admin.
+    /// * [`RouterError::RouteNotFound`] ΓÇö if the route does not exist.
+    /// * [`RouterError::NotInitialized`] ΓÇö if the contract is not initialized.
     pub fn set_route_score(
-    env: Env,
-    caller: Address,
-    name: String,
-    score: RouteScore,
-) -> Result<(), RouterError> {
-    caller.require_auth();
-    router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
+        env: Env,
+        caller: Address,
+        name: String,
+        score: RouteScore,
+    ) -> Result<(), RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
 
-    if !env.storage().instance().has(&DataKey::Route(name.clone())) {
-        return Err(RouterError::RouteNotFound);
-    }
+        if !env.storage().instance().has(&DataKey::Route(name.clone())) {
+            return Err(RouterError::RouteNotFound);
+        }
 
-    // Scores are expected to be normalized in the range 0..=100.
-    if score.liquidity_score > 100 || score.reliability_score > 100 {
-        return Err(RouterError::InvalidScore);
-    }
+        if score.liquidity_score > 100 || score.reliability_score > 100 {
+            return Err(RouterError::InvalidScore);
+        }
 
-    env.storage()
-        .instance()
-        .set(&DataKey::Score(name.clone()), &score);
+        env.storage()
+            .instance()
+            .set(&DataKey::Score(name.clone()), &score);
         env.events().publish(
             (Symbol::new(&env, router_common::EVENT_ROUTE_SCORED),),
             (
@@ -1528,21 +1813,24 @@ impl RouterCore {
             ),
         );
 
-        // Scoring can change which route is best; refresh the cache.
         Self::recompute_best_route(&env);
 
         Ok(())
     }
+
     /// Set scores for multiple routes in a single transaction.
+    ///
+    /// Validates every route and score before applying anything, then updates
+    /// each score and recomputes the cached best route once.
     pub fn set_route_scores_batch(
         env: Env,
         caller: Address,
         scores: Vec<RouteScoreInput>,
     ) -> Result<(), RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
 
-        // Validate every route first.
         for item in scores.iter() {
             if !env
                 .storage()
@@ -1551,16 +1839,19 @@ impl RouterCore {
             {
                 return Err(RouterError::RouteNotFound);
             }
+
+            if item.score.liquidity_score > 100 || item.score.reliability_score > 100 {
+                return Err(RouterError::InvalidScore);
+            }
         }
 
-        // Apply every score.
         for item in scores.iter() {
             env.storage()
                 .instance()
                 .set(&DataKey::Score(item.name.clone()), &item.score);
 
             env.events().publish(
-                (Symbol::new(&env, "route_scored"),),
+                (Symbol::new(&env, router_common::EVENT_ROUTE_SCORED),),
                 (
                     item.name.clone(),
                     item.score.liquidity_score,
@@ -1569,31 +1860,17 @@ impl RouterCore {
                 ),
             );
         }
-    env.events().publish(
-        (Symbol::new(&env, "route_scored"),),
-        (
-            name,
-            score.liquidity_score,
-            score.fee_bps,
-            score.reliability_score,
-        ),
-    );
 
-    // Scoring can change which route is best; refresh the cache.
-    scoring::recompute_best_route(&env);
-
-    Ok(())
-}
-
-        // Refresh the cached best route once.
         Self::recompute_best_route(&env);
 
         Ok(())
     }
+
     /// Get the score for a route.
     ///
     /// Returns `None` if no score has been set for the route.
     pub fn get_route_score(env: Env, name: String) -> Option<RouteScore> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         env.storage().instance().get(&DataKey::Score(name))
     }
 
@@ -1617,13 +1894,14 @@ impl RouterCore {
     /// or `None` if no scoreable, unpaused route exists and no fallback is set.
     ///
     /// # Errors
-    /// * [`RouterError::RouterPaused`] — if the entire router is paused.
+    /// * [`RouterError::RouterPaused`] ΓÇö if the entire router is paused.
     pub fn get_best_route(
         env: Env,
         candidates: Vec<String>,
         min_score: i64,
         fallback_name: Option<String>,
     ) -> Result<Option<String>, RouterError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         let paused: bool = env
             .storage()
             .instance()
@@ -1695,6 +1973,7 @@ impl RouterCore {
     /// # Returns
     /// A `Vec<BatchResolveResult>` with one entry per input name, preserving order.
     pub fn batch_resolve(env: Env, names: Vec<String>) -> Vec<BatchResolveResult> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         let mut results = Vec::new(&env);
         for name in names.iter() {
             let outcome = match Self::resolve(env.clone(), name) {
@@ -1706,6 +1985,9 @@ impl RouterCore {
                 Err(RouterError::NotInitialized) => {
                     BatchResolveResult::Err(ResolveError::NotInitialized)
                 }
+                Err(RouterError::RouteExpired) => {
+                    BatchResolveResult::Err(ResolveError::RouteExpired)
+                }
                 Err(_) => BatchResolveResult::Err(ResolveError::RouteNotFound),
             };
             results.push_back(outcome);
@@ -1713,7 +1995,7 @@ impl RouterCore {
         results
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇ Helpers ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     fn get_route_names(env: &Env) -> Vec<String> {
         env.storage()
@@ -1777,7 +2059,12 @@ impl RouterCore {
         active_stack: &mut Vec<String>,
         resolved_names: &mut Vec<String>,
         resolved: &mut Vec<(String, Address)>,
+        depth: u32,
     ) -> Result<(), RouterError> {
+        if depth > MAX_RECURSION_DEPTH {
+            return Err(RouterError::RecursionLimitExceeded);
+        }
+
         for existing in active_stack.iter() {
             if existing == *name {
                 return Err(RouterError::CircularDependency);
@@ -1805,6 +2092,7 @@ impl RouterCore {
                 active_stack,
                 resolved_names,
                 resolved,
+                depth + 1,
             )?;
         }
 
@@ -1830,7 +2118,7 @@ impl RouterCore {
         depends_on: &String,
     ) -> Result<(), RouterError> {
         let mut stack = Vec::new(env);
-        Self::visit_dependencies(env, depends_on, route, &mut stack)
+        Self::visit_dependencies(env, depends_on, route, &mut stack, 0)
     }
 
     fn visit_dependencies(
@@ -1838,7 +2126,12 @@ impl RouterCore {
         current: &String,
         target: &String,
         stack: &mut Vec<String>,
+        depth: u32,
     ) -> Result<(), RouterError> {
+        if depth > MAX_RECURSION_DEPTH {
+            return Err(RouterError::RecursionLimitExceeded);
+        }
+
         for existing in stack.iter() {
             if existing == *current {
                 return Err(RouterError::CircularDependency);
@@ -1852,7 +2145,7 @@ impl RouterCore {
         stack.push_back(current.clone());
         let dependencies = Self::get_dependencies_for_route(env, current.clone());
         for dependency in dependencies.iter() {
-            Self::visit_dependencies(env, &dependency, target, stack)?;
+            Self::visit_dependencies(env, &dependency, target, stack, depth + 1)?;
         }
         stack.pop_back();
 
@@ -1864,12 +2157,15 @@ impl RouterCore {
     /// Performs a single O(n) scan over all routes and stores the winner under
     /// [`DataKey::BestRoute`] (or removes the key when no scored, non-paused
     /// route exists). This is called only from write paths that can change the
-    /// outcome — scoring, pausing, and route removal — so that the hot
+    /// outcome ΓÇö scoring, pausing, and route removal ΓÇö so that the hot
     /// [`resolve`] path can read the result in O(1).
     fn recompute_best_route(env: &Env) {
         let names = Self::get_route_names(env);
         let mut best_name: Option<String> = None;
         let mut best_score: i64 = i64::MIN;
+
+        // Load configurable weights (falls back to defaults when not set).
+        let weights = Self::scoring_weights_internal(env);
 
         for name in names.iter() {
             // Skip missing or paused routes
@@ -1889,11 +2185,13 @@ impl RouterCore {
                     None => continue,
                 };
 
-            // Composite score: liquidity + reliability - fee_bps/10
-            let composite = (score.liquidity_score as i64)
-                .checked_add(score.reliability_score as i64)
-                .unwrap()
-                - (score.fee_bps as i64 / 10);
+            // Composite score using configurable weights:
+            //   liquidity_weight * liquidity_score
+            // + reliability_weight * reliability_score
+            // - fee_bps / fee_divisor
+            let composite = weights.liquidity_weight * (score.liquidity_score as i64)
+                + weights.reliability_weight * (score.reliability_score as i64)
+                - (score.fee_bps as i64 / weights.fee_divisor);
 
             if composite > best_score {
                 best_score = composite;
@@ -1913,20 +2211,23 @@ impl RouterCore {
         }
     }
 
-    /// Returns `true` if `name` is empty or consists entirely of ASCII whitespace
-    /// characters (space 0x20, tab 0x09, newline 0x0A, vertical tab 0x0B,
-    /// form feed 0x0C, carriage return 0x0D).
-    fn is_empty_or_whitespace(name: &String) -> bool {
-        if name.len() == 0 {
-            return true;
-        }
-        let s = name.to_string();
-        s.bytes().all(|b| matches!(b, 9 | 10 | 11 | 12 | 13 | 32))
+    /// Return the active [`ScoringWeights`], falling back to safe defaults
+    /// `(liquidity_weight=1, reliability_weight=1, fee_divisor=10)` when no
+    /// explicit weights have been stored via [`set_scoring_weights`].
+    fn scoring_weights_internal(env: &Env) -> ScoringWeights {
+        env.storage()
+            .instance()
+            .get::<DataKey, ScoringWeights>(&DataKey::ScoringWeights)
+            .unwrap_or(ScoringWeights {
+                liquidity_weight: 1,
+                reliability_weight: 1,
+                fee_divisor: 10,
+            })
     }
 
     /// Validates a route name for use in register_route and add_alias.
     ///
-    /// Valid names are 1–64 characters, containing only ASCII alphanumeric
+    /// Valid names are 1ΓÇô64 characters, containing only ASCII alphanumeric
     /// characters, hyphens (`-`), and forward slashes (`/`).
     ///
     /// # Arguments
@@ -1937,21 +2238,21 @@ impl RouterCore {
     /// `Ok(())` if the name is valid and available.
     ///
     /// # Errors
-    /// * [`RouterError::InvalidRouteName`] — if the name is empty, whitespace-only, longer than 64 chars, or contains disallowed characters.
-    /// * [`RouterError::RouteAlreadyExists`] — if the name conflicts with an existing route or alias.
+    /// * [`RouterError::InvalidRouteName`] ΓÇö if the name is empty, whitespace-only, longer than 64 chars, or contains disallowed characters.
+    /// * [`RouterError::RouteAlreadyExists`] ΓÇö if the name conflicts with an existing route or alias.
     fn validate_route_name(env: &Env, name: &String) -> Result<(), RouterError> {
-        let s = name.to_string();
-        if is_whitespace_only(&s) {
+        // Empty or longer than 64 characters is invalid.
+        let len = name.len();
+        if len == 0 || len > 64 {
             return Err(RouterError::InvalidRouteName);
         }
 
-        // Max 64 characters
-        if s.len() > 64 {
-            return Err(RouterError::InvalidRouteName);
-        }
-
-        // Only alphanumeric, '-', and '/' are allowed
-        for b in s.bytes() {
+        // Only alphanumeric, '-', and '/' are allowed (this also rejects
+        // whitespace-only names, since whitespace bytes aren't in the allow-list).
+        let mut buf = [0u8; 64];
+        let slice = &mut buf[..len as usize];
+        name.copy_into_slice(slice);
+        for &b in slice.iter() {
             if !matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'/') {
                 return Err(RouterError::InvalidRouteName);
             }
@@ -1974,21 +2275,65 @@ impl RouterCore {
         if meta.description.len() > 256 || meta.tags.len() > 5 {
             return Err(RouterError::InvalidMetadata);
         }
+        for tag in meta.tags.iter() {
+            let tlen = tag.len() as usize;
+            if tlen == 0 {
+                return Err(RouterError::InvalidMetadata);
+            }
+            let mut tbuf = [0u8; 256];
+            tag.copy_into_slice(&mut tbuf[..tlen]);
+            if tbuf[..tlen].iter().all(|&b| b == b' ') {
+                return Err(RouterError::InvalidMetadata);
+            }
+        }
         Ok(())
     }
 
-    fn router_error_message(err: RouterError) -> &'static str {
+    fn router_error_to_batch(env: &Env, err: RouterError) -> router_common::BatchItemError {
         match err {
-            RouterError::AlreadyInitialized => "AlreadyInitialized",
-            RouterError::NotInitialized => "NotInitialized",
-            RouterError::Unauthorized => "Unauthorized",
-            RouterError::RouteNotFound => "RouteNotFound",
-            RouterError::RoutePaused => "RoutePaused",
-            RouterError::RouterPaused => "RouterPaused",
-            RouterError::RouteAlreadyExists => "RouteAlreadyExists",
-            RouterError::InvalidRouteName => "InvalidRouteName",
-            RouterError::InvalidMetadata => "InvalidMetadata",
-            RouterError::InvalidScore => "InvalidScore",
+            RouterError::RouteAlreadyExists => router_common::BatchItemError::AlreadyExists,
+            RouterError::InvalidRouteName => router_common::BatchItemError::InvalidName,
+            RouterError::InvalidMetadata => router_common::BatchItemError::InvalidMetadata,
+            RouterError::Unauthorized => router_common::BatchItemError::Unauthorized,
+            RouterError::RouteNotFound => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "RouteNotFound"),
+            ),
+            RouterError::AlreadyInitialized => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "AlreadyInitialized"),
+            ),
+            RouterError::NotInitialized => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "NotInitialized"),
+            ),
+            RouterError::RoutePaused => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "RoutePaused"),
+            ),
+            RouterError::RouterPaused => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "RouterPaused"),
+            ),
+            RouterError::CircularDependency => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "CircularDependency"),
+            ),
+            RouterError::RouteInUse => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "RouteInUse"),
+            ),
+            RouterError::InvalidAddress => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "InvalidAddress"),
+            ),
+            RouterError::RouteExpired => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "RouteExpired"),
+            ),
+            RouterError::InvalidScore => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "InvalidScore"),
+            ),
+            RouterError::TooManyRoutes => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "TooManyRoutes"),
+            ),
+            RouterError::InvalidTtlExtension => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "InvalidTtlExtension"),
+            ),
+            RouterError::RecursionLimitExceeded => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "RecursionLimitExceeded"),
+            ),
         }
     }
 
@@ -2005,7 +2350,7 @@ impl RouterCore {
         // Validate address is not the zero address
         let zero_address = Address::from_string(&String::from_str(
             env,
-            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+            ZERO_ADDRESS_STR,
         ));
         if address == zero_address {
             return Err(RouterError::InvalidAddress);
@@ -2013,6 +2358,20 @@ impl RouterCore {
 
         if let Some(ref meta) = metadata {
             Self::validate_metadata(meta)?;
+        }
+        // Enforce the route cap
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RouteCount)
+            .unwrap_or(0);
+        let max: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxRoutes)
+            .unwrap_or(1_000);
+        if count >= max {
+            return Err(RouterError::TooManyRoutes);
         }
 
         let entry = RouteEntry {
@@ -2037,18 +2396,14 @@ impl RouterCore {
         env.storage()
             .instance()
             .set(&DataKey::RouteNames, &route_names);
-
-        let count: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::RouteCount)
-            .unwrap_or(0);
         env.storage()
             .instance()
             .set(&DataKey::RouteCount, &(count + 1));
 
-        env.events()
-            .publish((Symbol::new(env, router_common::EVENT_ROUTE_REGISTERED),), (name, address));
+        env.events().publish(
+            (Symbol::new(env, router_common::EVENT_ROUTE_REGISTERED),),
+            (name, address),
+        );
 
         Ok(())
     }
@@ -2116,12 +2471,14 @@ impl RouterCore {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// ΓöÇΓöÇ Tests ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 #[cfg(test)]
 mod tests {
     extern crate std;
     use super::*;
+    use alloc::format;
+    use alloc::string::ToString;
     use soroban_sdk::{
         testutils::{Address as _, Events, Ledger},
         vec, Env, IntoVal, String,
@@ -2133,7 +2490,7 @@ mod tests {
         let contract_id = env.register_contract(None, RouterCore);
         let client = RouterCoreClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&admin, &None);
         (env, admin, client)
     }
 
@@ -2166,14 +2523,79 @@ mod tests {
     }
 
     #[test]
-    fn test_set_route_score_rejects_liquidity_above_100()
+    fn test_set_route_score_rejects_liquidity_above_100() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        let result = client.try_set_route_score(
+            &admin,
+            &name,
+            &RouteScore {
+                liquidity_score: 101,
+                fee_bps: 10,
+                reliability_score: 90,
+            },
+        );
+
+        assert_eq!(result, Err(Ok(RouterError::InvalidScore)));
+    }
 
     #[test]
-    fn test_set_route_score_rejects_reliability_above_100()
-    
+    fn test_set_route_score_rejects_reliability_above_100() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        let result = client.try_set_route_score(
+            &admin,
+            &name,
+            &RouteScore {
+                liquidity_score: 80,
+                fee_bps: 10,
+                reliability_score: 101,
+            },
+        );
+
+        assert_eq!(result, Err(Ok(RouterError::InvalidScore)));
+    }
+
     #[test]
-    fn test_best_route_score_calculation_still_works()
-    
+    fn test_best_route_score_calculation_still_works() {
+        let (env, admin, client) = setup();
+        let route_a = String::from_str(&env, "route-a");
+        let route_b = String::from_str(&env, "route-b");
+        let addr_a = Address::generate(&env);
+        let addr_b = Address::generate(&env);
+
+        client.register_route(&admin, &route_a, &addr_a, &None);
+        client.register_route(&admin, &route_b, &addr_b, &None);
+        client.set_route_score(
+            &admin,
+            &route_a,
+            &RouteScore {
+                liquidity_score: 80,
+                fee_bps: 10,
+                reliability_score: 90,
+            },
+        );
+        client.set_route_score(
+            &admin,
+            &route_b,
+            &RouteScore {
+                liquidity_score: 90,
+                fee_bps: 20,
+                reliability_score: 70,
+            },
+        );
+
+        let candidates = vec![&env, route_a.clone(), route_b.clone()];
+        let best = client.get_best_route(&candidates, &0, &None);
+        assert_eq!(best, Some(route_a));
+    }
+
     #[test]
     fn test_update_route() {
         let (env, admin, client) = setup();
@@ -2366,7 +2788,7 @@ mod tests {
             event.1,
             vec![
                 &env,
-                Symbol::new(&env, "route_resolve_paused").into_val(&env)
+                Symbol::new(&env, router_common::EVENT_ROUTE_RESOLVE_PAUSED).into_val(&env)
             ]
         );
         let (emitted_name,): (String,) = event.2.into_val(&env);
@@ -2496,7 +2918,7 @@ mod tests {
     fn test_initialize_twice_fails() {
         let (env, _, client) = setup();
         let second_admin = Address::generate(&env);
-        let result = client.try_initialize(&second_admin);
+        let result = client.try_initialize(&second_admin, &None);
         assert_eq!(result, Err(Ok(RouterError::AlreadyInitialized)));
     }
 
@@ -2609,7 +3031,7 @@ mod tests {
     fn test_register_name_too_long_fails() {
         let (env, admin, client) = setup();
         let addr = Address::generate(&env);
-        // 65 alphanumeric chars — exceeds max length of 64
+        // 65 alphanumeric chars ΓÇö exceeds max length of 64
         let long_name = String::from_str(&env, &"a".repeat(65));
         let result = client.try_register_route(&admin, &long_name, &addr, &None);
         assert_eq!(result, Err(Ok(RouterError::InvalidRouteName)));
@@ -2619,7 +3041,7 @@ mod tests {
     fn test_register_name_at_max_length_succeeds() {
         let (env, admin, client) = setup();
         let addr = Address::generate(&env);
-        // Exactly 64 chars — must succeed
+        // Exactly 64 chars ΓÇö must succeed
         let name = String::from_str(&env, &"a".repeat(64));
         assert!(client
             .try_register_route(&admin, &name, &addr, &None)
@@ -2751,7 +3173,7 @@ mod tests {
         assert_eq!(result, Err(Ok(RouterError::RouteNotFound)));
     }
 
-    // ── Issue #630: alias changes must trigger best-route recomputation ─────
+    // ΓöÇΓöÇ Issue #630: alias changes must trigger best-route recomputation ΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     /// add_alias must call recompute_best_route so the cached best route is
     /// fresh after an alias is created. Verified by confirming that resolve()
@@ -2894,7 +3316,7 @@ mod tests {
         client.register_route(&admin, &name, &addr, &None);
         client.remove_route(&admin, &name);
 
-        // Should fail — target route no longer exists
+        // Should fail ΓÇö target route no longer exists
         assert_eq!(
             client.try_add_alias(&admin, &name, &alias),
             Err(Ok(RouterError::RouteNotFound))
@@ -3056,7 +3478,7 @@ mod tests {
         );
     }
 
-    // ── RouteMetadata validation tests (issues #180 & #191) ──────────────────
+    // ΓöÇΓöÇ RouteMetadata validation tests (issues #180 & #191) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
     fn test_update_metadata_description_too_long_returns_invalid_metadata() {
@@ -3065,7 +3487,7 @@ mod tests {
         let addr = Address::generate(&env);
         client.register_route(&admin, &name, &addr, &None);
 
-        // 257-char description — must fail
+        // 257-char description ΓÇö must fail
         let long_desc = String::from_str(&env, &"a".repeat(257));
         let metadata = Some(RouteMetadata {
             description: long_desc,
@@ -3085,7 +3507,7 @@ mod tests {
         let addr = Address::generate(&env);
         client.register_route(&admin, &name, &addr, &None);
 
-        // 6 tags — must fail
+        // 6 tags ΓÇö must fail
         let mut tags = Vec::new(&env);
         for i in 0..6u32 {
             tags.push_back(String::from_str(&env, &i.to_string()));
@@ -3122,7 +3544,7 @@ mod tests {
             event.1,
             vec![
                 &env,
-                Symbol::new(&env, "route_resolve_paused").into_val(&env)
+                Symbol::new(&env, router_common::EVENT_ROUTE_RESOLVE_PAUSED).into_val(&env)
             ]
         );
         let (emitted_name,): (String,) = event.2.into_val(&env);
@@ -3173,7 +3595,7 @@ mod tests {
         let addr = Address::generate(&env);
         client.register_route(&admin, &name, &addr, &None);
 
-        // Exactly 256 chars — must succeed
+        // Exactly 256 chars ΓÇö must succeed
         let desc = String::from_str(&env, &"a".repeat(256));
         let metadata = Some(RouteMetadata {
             description: desc,
@@ -3190,7 +3612,7 @@ mod tests {
         let addr = Address::generate(&env);
         client.register_route(&admin, &name, &addr, &None);
 
-        // 257 chars — must fail
+        // 257 chars ΓÇö must fail
         let desc = String::from_str(&env, &"a".repeat(257));
         let metadata = Some(RouteMetadata {
             description: desc,
@@ -3210,7 +3632,7 @@ mod tests {
         let addr = Address::generate(&env);
         client.register_route(&admin, &name, &addr, &None);
 
-        // Exactly 5 tags — must succeed
+        // Exactly 5 tags ΓÇö must succeed
         let mut tags = Vec::new(&env);
         for i in 0..5u32 {
             tags.push_back(String::from_str(&env, &i.to_string()));
@@ -3230,7 +3652,7 @@ mod tests {
         let addr = Address::generate(&env);
         client.register_route(&admin, &name, &addr, &None);
 
-        // 6 tags — must fail
+        // 6 tags ΓÇö must fail
         let mut tags = Vec::new(&env);
         for i in 0..6u32 {
             tags.push_back(String::from_str(&env, &i.to_string()));
@@ -3337,11 +3759,11 @@ mod tests {
         assert_eq!(client.get_alias_target(&name), None);
     }
 
-    // ── Issue #453: alias edge cases ─────────────────────────────────────────
+    // ΓöÇΓöÇ Issue #453: alias edge cases ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
     fn test_alias_chain_resolves_to_original_address() {
-        // alias_b → oracle (alias pointing to another alias is not supported;
+        // alias_b ΓåÆ oracle (alias pointing to another alias is not supported;
         // add_alias only accepts existing *routes*, not aliases, as the target).
         // This test verifies that an alias of an alias is rejected with RouteNotFound
         // because the intermediate alias is not a registered route.
@@ -3397,7 +3819,7 @@ mod tests {
         assert_eq!(result, Err(Ok(RouterError::RouteAlreadyExists)));
     }
 
-    // ── Route scoring / path selection tests (#330) ───────────────────────────
+    // ΓöÇΓöÇ Route scoring / path selection tests (#330) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
     fn test_set_and_get_route_score() {
@@ -3535,7 +3957,7 @@ mod tests {
                 reliability_score: 70,
             },
         );
-        // route_b: 90 + 95 - 10/10 = 184  ← best
+        // route_b: 90 + 95 - 10/10 = 184  ΓåÉ best
         client.set_route_score(
             &admin,
             &r2,
@@ -3637,7 +4059,7 @@ mod tests {
         );
 
         let candidates = vec![&env, r1];
-        // min_score = 200 — route_a (99) doesn't qualify → fallback returned
+        // min_score = 200 ΓÇö route_a (99) doesn't qualify ΓåÆ fallback returned
         let best = client.get_best_route(&candidates, &200, &Some(fallback.clone()));
         assert_eq!(best, Some(fallback));
     }
@@ -3659,12 +4081,12 @@ mod tests {
         );
 
         let candidates = vec![&env, r1];
-        // min_score = 1000 — no route qualifies, no fallback
+        // min_score = 1000 ΓÇö no route qualifies, no fallback
         let best = client.get_best_route(&candidates, &1000, &None);
         assert_eq!(best, None);
     }
 
-    // ── Issue #506: get_all_routes after remove and re-register ──────────────
+    // ΓöÇΓöÇ Issue #506: get_all_routes after remove and re-register ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
     fn test_get_all_routes_count_decrements_after_remove() {
@@ -3755,7 +4177,7 @@ mod tests {
         assert_eq!(swap_count, 1, "swap should appear exactly once");
     }
 
-    // ── Issue #511: Route validation tests ───────────────────────────────────
+    // ΓöÇΓöÇ Issue #511: Route validation tests ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
     fn test_validate_route_name_rejects_empty_string() {
@@ -3845,7 +4267,7 @@ mod tests {
         assert_eq!(result, Err(Ok(RouterError::InvalidRouteName)));
     }
 
-    // ── Issue #645: remove_route alias cleanup ────────────────────────────────
+    // ΓöÇΓöÇ Issue #645: remove_route alias cleanup ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
     fn test_remove_route_cleans_up_multiple_aliases() {
@@ -3873,6 +4295,9 @@ mod tests {
         assert_eq!(
             client.try_resolve(&price_feed),
             Err(Ok(RouterError::RouteNotFound))
+        );
+    }
+
     #[test]
     fn test_route_count() {
         let (env, admin, client) = setup();
@@ -3909,7 +4334,7 @@ mod tests {
         assert_eq!(client.route_count(), 1);
     }
 
-    // ── batch_resolve tests ───────────────────────────────────────────────────
+    // ΓöÇΓöÇ batch_resolve tests ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
     fn test_batch_resolve_all_succeed() {
@@ -3979,8 +4404,8 @@ mod tests {
         let (env, admin, client) = setup();
         let oracle = String::from_str(&env, "oracle");
         let dex = String::from_str(&env, "dex");
-        let oracle_alias = String::from_str(&env, "oracle_v1");
-        let dex_alias = String::from_str(&env, "dex_v1");
+        let oracle_alias = String::from_str(&env, "oracle-v1");
+        let dex_alias = String::from_str(&env, "dex-v1");
         let addr1 = Address::generate(&env);
         let addr2 = Address::generate(&env);
 
@@ -4016,7 +4441,7 @@ mod tests {
     fn test_reregister_after_remove_does_not_resurrect_aliases() {
         let (env, admin, client) = setup();
         let oracle = String::from_str(&env, "oracle");
-        let alias = String::from_str(&env, "oracle_v1");
+        let alias = String::from_str(&env, "oracle-v1");
         let addr1 = Address::generate(&env);
         let addr2 = Address::generate(&env);
 
@@ -4042,8 +4467,8 @@ mod tests {
     fn test_remove_route_alias_count_consistency() {
         let (env, admin, client) = setup();
         let oracle = String::from_str(&env, "oracle");
-        let alias1 = String::from_str(&env, "oracle_v1");
-        let alias2 = String::from_str(&env, "oracle_v2");
+        let alias1 = String::from_str(&env, "oracle-v1");
+        let alias2 = String::from_str(&env, "oracle-v2");
         let addr = Address::generate(&env);
 
         client.register_route(&admin, &oracle, &addr, &None);
@@ -4057,6 +4482,9 @@ mod tests {
         assert!(client.get_alias_target(&alias2).is_none());
         // Route itself is gone
         assert!(client.get_route(&oracle).is_none());
+    }
+
+    #[test]
     fn test_batch_resolve_paused_route_returns_err() {
         let (env, admin, client) = setup();
         let oracle = String::from_str(&env, "oracle");
@@ -4147,11 +4575,14 @@ mod tests {
     }
 
     /// Issue #628: batch_resolve wraps NotInitialized from resolve() correctly
-    /// — the BatchResolveResult::Err variant can hold ResolveError::NotInitialized.
+    /// ΓÇö the BatchResolveResult::Err variant can hold ResolveError::NotInitialized.
     #[test]
     fn test_batch_resolve_result_can_hold_not_initialized() {
         let result = BatchResolveResult::Err(ResolveError::NotInitialized);
-        assert_eq!(result, BatchResolveResult::Err(ResolveError::NotInitialized));
+        assert_eq!(
+            result,
+            BatchResolveResult::Err(ResolveError::NotInitialized)
+        );
         assert_ne!(result, BatchResolveResult::Err(ResolveError::RouteNotFound));
     }
 
@@ -4199,8 +4630,8 @@ mod tests {
         assert_eq!(result.successes.get(0).unwrap().index, 1);
         assert_eq!(result.failures.len(), 1);
         assert_eq!(
-            result.failures.get(0).unwrap().message,
-            String::from_str(&env, "RouteAlreadyExists")
+            result.failures.get(0).unwrap().error,
+            router_common::BatchItemError::AlreadyExists
         );
     }
 
@@ -4215,14 +4646,14 @@ mod tests {
         assert_eq!(result.successes.len(), 1);
         assert_eq!(result.failures.len(), 1);
         assert_eq!(
-            result.failures.get(0).unwrap().message,
-            String::from_str(&env, "RouteNotFound")
+            result.failures.get(0).unwrap().error,
+            router_common::BatchItemError::Custom(String::from_str(&env, "RouteNotFound"))
         );
         let resolve_result = client.try_resolve(&name);
         assert_eq!(resolve_result, Err(Ok(RouterError::RouteNotFound)));
     }
 
-    // ── Issue #582: cached best-route selection & pagination ──────────────────
+    // ΓöÇΓöÇ Issue #582: cached best-route selection & pagination ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
     fn test_resolve_uses_cached_best_route() {
@@ -4521,7 +4952,7 @@ mod tests {
         assert!(tags.contains(&beta));
     }
 
-    // ── Issue #632: get_all_tags O(n²) deduplication ────────────────────────
+    // ΓöÇΓöÇ Issue #632: get_all_tags O(n┬▓) deduplication ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
     fn test_get_all_tags_deduplicates_efficiently() {
@@ -4569,8 +5000,8 @@ mod tests {
         let tags = client.get_all_tags();
         // Should have: common (shared), unique1, unique2
         assert_eq!(tags.len(), 3);
-        
-        // Count occurrences of "common" — should be exactly 1
+
+        // Count occurrences of "common" ΓÇö should be exactly 1
         let mut common_count = 0;
         for tag in tags.iter() {
             if tag == common {
@@ -4580,7 +5011,7 @@ mod tests {
         assert_eq!(common_count, 1, "common_tag should appear exactly once");
     }
 
-    // ── Issue #631: get_routes_by_tag O(n²) complexity ──────────────────────
+    // ΓöÇΓöÇ Issue #631: get_routes_by_tag O(n┬▓) complexity ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
     fn test_get_routes_by_tag_with_many_routes() {
@@ -4666,7 +5097,7 @@ mod tests {
         );
     }
 
-    // ── TTL / expiry tests ───────────────────────────────────────────────────
+    // ΓöÇΓöÇ TTL / expiry tests ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
     fn test_register_route_with_ttl_and_resolve_before_expiry() {
@@ -4685,7 +5116,7 @@ mod tests {
         client.register_route_with_ttl(&admin, &name, &addr, &None);
         assert_eq!(client.get_route_expiry(&name), None);
 
-        env.ledger().with_mut(|li| li.sequence_number += 1_000_000);
+        env.ledger().with_mut(|li| li.sequence_number += 100);
         assert_eq!(client.resolve(&name), addr);
     }
 
@@ -4931,5 +5362,366 @@ mod tests {
         // unrelated routes: this call should fall back to the requested route.
         env.ledger().with_mut(|li| li.sequence_number += 6);
         assert_eq!(client.resolve(&other), addr2);
+    }
+
+    // ΓöÇΓöÇ Issue #590: concurrent alias and route removal interactions ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+
+    /// Remove a route that has multiple aliases: verifies that all aliases are
+    /// cleaned up atomically and that resolving any of them returns RouteNotFound.
+    /// Also verifies that `get_alias_target` returns None for all removed aliases.
+    #[test]
+    fn test_remove_route_with_multiple_aliases_cleans_all() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let alias_a = String::from_str(&env, "oracle-v1");
+        let alias_b = String::from_str(&env, "price-feed");
+        let alias_c = String::from_str(&env, "oracle-latest");
+        let addr = Address::generate(&env);
+
+        client.register_route(&admin, &oracle, &addr, &None);
+        client.add_alias(&admin, &oracle, &alias_a);
+        client.add_alias(&admin, &oracle, &alias_b);
+        client.add_alias(&admin, &oracle, &alias_c);
+
+        // All three aliases resolve before removal
+        assert_eq!(client.resolve(&alias_a), addr);
+        assert_eq!(client.resolve(&alias_b), addr);
+        assert_eq!(client.resolve(&alias_c), addr);
+
+        // Remove the underlying route
+        client.remove_route(&admin, &oracle);
+
+        // All aliases must be cleaned up ΓÇö no dangling state
+        assert_eq!(
+            client.try_resolve(&alias_a),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(
+            client.try_resolve(&alias_b),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(
+            client.try_resolve(&alias_c),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        // get_alias_target must also reflect the cleanup
+        assert_eq!(client.get_alias_target(&alias_a), None);
+        assert_eq!(client.get_alias_target(&alias_b), None);
+        assert_eq!(client.get_alias_target(&alias_c), None);
+    }
+
+    /// Remove the alias first, then remove the route. Verifies there is no
+    /// dangling state: the alias is gone before route removal, so
+    /// remove_aliases_for_route finds nothing extra to clean up, and both
+    /// the alias and the route are fully absent afterwards.
+    #[test]
+    fn test_remove_alias_then_remove_route_no_dangling_state() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let alias = String::from_str(&env, "oracle-v1");
+        let addr = Address::generate(&env);
+
+        client.register_route(&admin, &oracle, &addr, &None);
+        client.add_alias(&admin, &oracle, &alias);
+
+        // Verify both work initially
+        assert_eq!(client.resolve(&oracle), addr);
+        assert_eq!(client.resolve(&alias), addr);
+
+        // Remove the alias first
+        client.remove_alias(&admin, &alias);
+        assert_eq!(
+            client.try_resolve(&alias),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(client.get_alias_target(&alias), None);
+
+        // Route still resolves after alias removal
+        assert_eq!(client.resolve(&oracle), addr);
+
+        // Now remove the route ΓÇö should succeed cleanly with no dangling alias
+        client.remove_route(&admin, &oracle);
+        assert_eq!(
+            client.try_resolve(&oracle),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+
+        // Alias was already gone; adding it again must fail because the target
+        // route no longer exists
+        assert_eq!(
+            client.try_add_alias(&admin, &oracle, &alias),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+    }
+
+    /// Re-register a route under the same name after removal. Old aliases that
+    /// were created before the removal must NOT auto-reconnect to the new route
+    /// instance; they were deleted as part of remove_route and stay gone.
+    #[test]
+    fn test_reregister_route_after_removal_old_aliases_do_not_reconnect() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let alias = String::from_str(&env, "oracle-legacy");
+        let addr_v1 = Address::generate(&env);
+        let addr_v2 = Address::generate(&env);
+
+        // Register route v1 and create an alias for it
+        client.register_route(&admin, &oracle, &addr_v1, &None);
+        client.add_alias(&admin, &oracle, &alias);
+        assert_eq!(client.resolve(&alias), addr_v1);
+
+        // Remove the route (which also removes the alias)
+        client.remove_route(&admin, &oracle);
+
+        // Re-register under the same name with a new address
+        client.register_route(&admin, &oracle, &addr_v2, &None);
+        assert_eq!(client.resolve(&oracle), addr_v2);
+
+        // The old alias must NOT have been automatically re-attached to the new
+        // route; it was deleted and must remain gone
+        assert_eq!(
+            client.try_resolve(&alias),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(client.get_alias_target(&alias), None);
+
+        // The alias name is now free to be re-created pointing to the new route
+        client.add_alias(&admin, &oracle, &alias);
+        assert_eq!(client.resolve(&alias), addr_v2);
+    }
+
+    /// "Rename" a route by removing it (and its aliases) and re-registering
+    /// under a new name. Aliases pointed to the old name must be gone; the new
+    /// name has no aliases until they are explicitly re-created.
+    #[test]
+    fn test_rename_route_via_remove_and_register_aliases_follow_name() {
+        let (env, admin, client) = setup();
+        let old_name = String::from_str(&env, "oracle-old");
+        let new_name = String::from_str(&env, "oracle-new");
+        let alias = String::from_str(&env, "oracle-alias");
+        let addr = Address::generate(&env);
+
+        // Register the original route and create an alias
+        client.register_route(&admin, &old_name, &addr, &None);
+        client.add_alias(&admin, &old_name, &alias);
+        assert_eq!(client.resolve(&alias), addr);
+
+        // Simulate a rename: remove the old route, register under new name
+        client.remove_route(&admin, &old_name);
+        client.register_route(&admin, &new_name, &addr, &None);
+
+        // Old alias was removed with the old route; it must not resolve
+        assert_eq!(
+            client.try_resolve(&alias),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        // Old name is also gone
+        assert_eq!(
+            client.try_resolve(&old_name),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+
+        // New name resolves correctly
+        assert_eq!(client.resolve(&new_name), addr);
+
+        // Can now create the alias pointing to the new name
+        client.add_alias(&admin, &new_name, &alias);
+        assert_eq!(client.resolve(&alias), addr);
+    }
+
+    /// Batch-remove multiple routes that each have aliases. Verifies that alias
+    /// cleanup happens for every route in the batch, leaving no dangling aliases.
+    #[test]
+    fn test_batch_remove_routes_with_aliases_cleans_all_aliases() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let vault = String::from_str(&env, "vault");
+        let dex = String::from_str(&env, "dex");
+        let oracle_alias = String::from_str(&env, "price-feed");
+        let vault_alias = String::from_str(&env, "savings");
+        let dex_alias = String::from_str(&env, "swap");
+        let addr = Address::generate(&env);
+
+        // Register three routes, each with one alias
+        client.register_route(&admin, &oracle, &addr, &None);
+        client.register_route(&admin, &vault, &addr, &None);
+        client.register_route(&admin, &dex, &addr, &None);
+        client.add_alias(&admin, &oracle, &oracle_alias);
+        client.add_alias(&admin, &vault, &vault_alias);
+        client.add_alias(&admin, &dex, &dex_alias);
+
+        // Confirm all aliases resolve before batch removal
+        assert_eq!(client.resolve(&oracle_alias), addr);
+        assert_eq!(client.resolve(&vault_alias), addr);
+        assert_eq!(client.resolve(&dex_alias), addr);
+
+        // Batch-remove all three routes (fail_fast = false)
+        let names = vec![&env, oracle.clone(), vault.clone(), dex.clone()];
+        let result = client.remove_routes_batch(&admin, &names, &false);
+
+        // All three should succeed
+        assert_eq!(result.successes.len(), 3);
+        assert_eq!(result.failures.len(), 0);
+
+        // All routes must be gone
+        assert_eq!(
+            client.try_resolve(&oracle),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(
+            client.try_resolve(&vault),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(
+            client.try_resolve(&dex),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+
+        // All aliases must also be cleaned up ΓÇö no dangling state
+        assert_eq!(
+            client.try_resolve(&oracle_alias),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(
+            client.try_resolve(&vault_alias),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(
+            client.try_resolve(&dex_alias),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(client.get_alias_target(&oracle_alias), None);
+        assert_eq!(client.get_alias_target(&vault_alias), None);
+        assert_eq!(client.get_alias_target(&dex_alias), None);
+    }
+
+    /// Batch-remove in fail_fast mode stops at the first pre-validation error.
+    /// Routes that pass pre-validation but come after a failed route are NOT
+    /// removed. Their aliases must remain intact.
+    #[test]
+    fn test_batch_remove_fail_fast_aborts_on_error_aliases_remain_for_unprocessed() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let ghost = String::from_str(&env, "ghost"); // does not exist
+        let vault = String::from_str(&env, "vault");
+        let oracle_alias = String::from_str(&env, "price-feed");
+        let vault_alias = String::from_str(&env, "savings");
+        let addr = Address::generate(&env);
+
+        client.register_route(&admin, &oracle, &addr, &None);
+        client.register_route(&admin, &vault, &addr, &None);
+        client.add_alias(&admin, &oracle, &oracle_alias);
+        client.add_alias(&admin, &vault, &vault_alias);
+
+        // Batch: [oracle (exists), ghost (missing), vault (exists)]
+        // fail_fast pre-validation finds "ghost" missing and aborts before
+        // removing anything ΓÇö oracle and vault survive with their aliases intact
+        let names = vec![&env, oracle.clone(), ghost.clone(), vault.clone()];
+        let result = client.remove_routes_batch(&admin, &names, &true);
+
+        // At least one failure was recorded (the missing "ghost" route)
+        assert!(result.failures.len() >= 1);
+
+        // oracle and vault must still be present with their aliases intact
+        assert_eq!(client.resolve(&oracle), addr);
+        assert_eq!(client.resolve(&oracle_alias), addr);
+        assert_eq!(client.resolve(&vault), addr);
+        assert_eq!(client.resolve(&vault_alias), addr);
+    }
+
+    // ΓöÇΓöÇ Issue #728: get_stats returns correct aggregate counts ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+
+    /// Verify that get_stats correctly counts total, active, paused, and
+    /// alias entries across a mixed-state router.
+    #[test]
+    fn test_get_stats_counts_correctly() {
+        let (env, admin, client) = setup();
+
+        // Initially all zeros (no routes registered yet)
+        let stats = client.get_stats();
+        assert_eq!(stats.total_routes, 0);
+        assert_eq!(stats.active_routes, 0);
+        assert_eq!(stats.paused_routes, 0);
+        assert_eq!(stats.expired_routes, 0);
+        assert_eq!(stats.alias_count, 0);
+        assert_eq!(stats.scored_routes, 0);
+
+        let addr = Address::generate(&env);
+        let name1 = String::from_str(&env, "route-one");
+        let name2 = String::from_str(&env, "route-two");
+        let name3 = String::from_str(&env, "route-three");
+
+        client.register_route(&admin, &name1, &addr, &None);
+        client.register_route(&admin, &name2, &addr, &None);
+        client.register_route(&admin, &name3, &addr, &None);
+
+        // 3 active routes, no paused, no aliases, no scores yet
+        let stats = client.get_stats();
+        assert_eq!(stats.total_routes, 3);
+        assert_eq!(stats.active_routes, 3);
+        assert_eq!(stats.paused_routes, 0);
+        assert_eq!(stats.alias_count, 0);
+        assert_eq!(stats.scored_routes, 0);
+
+        // Pause one route
+        client.set_route_paused(&admin, &name1, &true);
+        let stats = client.get_stats();
+        assert_eq!(stats.active_routes, 2);
+        assert_eq!(stats.paused_routes, 1);
+
+        // Add an alias
+        let alias = String::from_str(&env, "alias-one");
+        client.add_alias(&admin, &name2, &alias);
+        let stats = client.get_stats();
+        assert_eq!(stats.alias_count, 1);
+
+        // Score a route
+        client.set_route_score(
+            &admin,
+            &name2,
+            &RouteScore {
+                liquidity_score: 80,
+                fee_bps: 20,
+                reliability_score: 90,
+            },
+        );
+        let stats = client.get_stats();
+        assert_eq!(stats.scored_routes, 1);
+
+        // Expire a route via TTL
+        let expired_name = String::from_str(&env, "route-expiring");
+        client.register_route_with_ttl(&admin, &expired_name, &addr, &Some(5u32));
+        // Advance ledger past expiry
+        env.ledger().with_mut(|li| li.sequence_number += 10);
+        let stats = client.get_stats();
+        assert_eq!(stats.expired_routes, 1);
+        // total_routes still counts it (it's still registered)
+        assert_eq!(stats.total_routes, 4);
+    }
+
+    // ΓöÇΓöÇ Issue #721: multi-hop circular dependency detection ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+
+    /// AΓåÆB, BΓåÆC, then CΓåÆA must be rejected as a CircularDependency.
+    /// This validates that validate_dependency_cycle walks the full graph,
+    /// not just immediate (depth-1) predecessors.
+    #[test]
+    fn test_multihop_circular_dependency_is_rejected() {
+        let (env, admin, client) = setup();
+        let a = String::from_str(&env, "route-a");
+        let b = String::from_str(&env, "route-b");
+        let c = String::from_str(&env, "route-c");
+        let addr = Address::generate(&env);
+
+        client.register_route(&admin, &a, &addr, &None);
+        client.register_route(&admin, &b, &addr, &None);
+        client.register_route(&admin, &c, &addr, &None);
+
+        // Build A ΓåÆ B ΓåÆ C (no cycle yet)
+        client.set_route_dependency(&admin, &a, &b);
+        client.set_route_dependency(&admin, &b, &c);
+
+        // Adding C ΓåÆ A would create A ΓåÆ B ΓåÆ C ΓåÆ A: must be rejected
+        let result = client.try_set_route_dependency(&admin, &c, &a);
+        assert_eq!(result, Err(Ok(RouterError::CircularDependency)));
     }
 }
