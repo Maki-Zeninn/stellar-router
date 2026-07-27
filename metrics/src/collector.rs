@@ -151,21 +151,28 @@ impl Collector {
             .with_label_values(&[contract_id])
             .set(total_routed as f64);
 
-        // 2. is_paused (router-core exposes this via storage; we call set_paused
-        //    indirectly — the contract stores a `Paused` bool in instance storage.
-        //    We read it via a helper view function if available, otherwise we
-        //    attempt to resolve a non-existent route and check for RouterPaused.)
+        // 2. is_paused
         //
-        //    router-core does not expose a dedicated `is_paused()` view function
-        //    in the current implementation, so we use `get_route` on a sentinel
-        //    name and interpret the error.  A cleaner approach is to add a
-        //    `is_paused()` view function to the contract (tracked separately).
-        //
-        //    For now we record 0 (unknown / not paused) and note the limitation.
+        // Prefer the dedicated bool view when the contract exposes it. If the
+        // RPC call fails, leave the metric at 0.0 so the exporter does not
+        // report a false positive from a fallback path.
+        let paused_value = match client.call_bool(contract_id, "is_paused").await {
+            Ok(paused) => {
+                if paused {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Err(e) => {
+                warn!(contract_id, "failed to read router pause state via is_paused: {e:#}");
+                0.0
+            }
+        };
         self.metrics
             .core_paused
             .with_label_values(&[contract_id])
-            .set(0.0); // updated below if the RPC call succeeds
+            .set(paused_value);
 
         // 3. get_all_routes → per-route paused state
         let routes = client
@@ -498,6 +505,25 @@ mod tests {
             .with_label_values(&["CORE_ID"])
             .get();
         assert_eq!(val, 42.0);
+    }
+
+    #[tokio::test]
+    async fn test_scrape_core_updates_pause_metric_when_is_paused_view_returns_true() {
+        let (collector, metrics) = make_collector("CORE_ID", "", "");
+
+        let mock = MockRpcClient::new()
+            .with_u64("CORE_ID", "total_routed", 42)
+            .with_bool("CORE_ID", "is_paused", true)
+            .with_string_vec("CORE_ID", "get_all_routes", vec![]);
+
+        let ok = collector.scrape_all(&mock).await;
+        assert!(ok);
+
+        let val = metrics
+            .core_paused
+            .with_label_values(&["CORE_ID"])
+            .get();
+        assert_eq!(val, 1.0);
     }
 
     #[tokio::test]
