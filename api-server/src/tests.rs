@@ -352,6 +352,26 @@ async fn test_simulate_empty_body_returns_400_or_422() {
 }
 
 #[tokio::test]
+async fn test_simulate_malformed_json_body_returns_400_or_422() {
+    let app = test_app();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/simulate")
+                .header("content-type", "application/json")
+                .body(Body::from("not json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status() == StatusCode::BAD_REQUEST
+            || resp.status() == StatusCode::UNPROCESSABLE_ENTITY
+    );
+}
+
+#[tokio::test]
 async fn test_get_route_returns_500_when_core_not_configured() {
     let app = test_app();
     let resp = app
