@@ -1,0 +1,29 @@
+# Mirror entries from .gitignore
+target/
+**/test_snapshots/
+benches/src/scrap-menu/
+
+# Git
+.git
+.gitignore
+
+# Rust build artifacts
+*.wasm
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker
+Dockerfile*
+docker-compose*
+.docker/

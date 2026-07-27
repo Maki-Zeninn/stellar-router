@@ -31,14 +31,22 @@ pub enum DataKey {
     Aliases,       // Vec<String> of all alias names
 }
 
+// ── Constants ────────────────────────────────────────────────────────────────
+
+/// Maximum allowed length (in characters) for a [`RouteMetadata`] description.
+pub const MAX_METADATA_DESCRIPTION_LEN: u32 = 256;
+
+/// Maximum allowed number of tags in a [`RouteMetadata`].
+pub const MAX_METADATA_TAGS: u32 = 5;
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct RouteMetadata {
-    /// Human-readable description (max 256 chars)
+    /// Human-readable description (max [`MAX_METADATA_DESCRIPTION_LEN`] chars)
     pub description: String,
-    /// Tags for categorization (max 5 tags)
+    /// Tags for categorization (max [`MAX_METADATA_TAGS`] tags)
     pub tags: Vec<String>,
     /// Owner address (use the zero/contract address as sentinel for "no owner")
     pub owner: Address,
@@ -151,10 +159,10 @@ impl RouterCore {
 
         // Validate metadata if provided
         if let Some(ref meta) = metadata {
-            if meta.description.len() > 256 {
+            if meta.description.len() > MAX_METADATA_DESCRIPTION_LEN {
                 return Err(RouterError::InvalidMetadata);
             }
-            if meta.tags.len() > 5 {
+            if meta.tags.len() > MAX_METADATA_TAGS {
                 return Err(RouterError::InvalidMetadata);
             }
         }
@@ -495,10 +503,10 @@ impl RouterCore {
 
         // Validate metadata if provided
         if let Some(ref meta) = metadata {
-            if meta.description.len() > 256 {
+            if meta.description.len() > MAX_METADATA_DESCRIPTION_LEN {
                 return Err(RouterError::InvalidMetadata);
             }
-            if meta.tags.len() > 5 {
+            if meta.tags.len() > MAX_METADATA_TAGS {
                 return Err(RouterError::InvalidMetadata);
             }
         }
@@ -1606,6 +1614,22 @@ mod tests {
         let (env, _admin, client) = setup();
         let name = String::from_str(&env, "nonexistent");
 
+        let metadata = client.get_metadata(&name);
+        assert_eq!(metadata, None);
+    }
+
+    /// Regression test for issue #913: get_metadata must return None when
+    /// a route exists but was registered without metadata (&None).
+    #[test]
+    fn test_get_metadata_route_exists_without_metadata() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+
+        // Register a route without metadata
+        client.register_route(&admin, &name, &addr, &None);
+
+        // The route exists but has no metadata → should return None
         let metadata = client.get_metadata(&name);
         assert_eq!(metadata, None);
     }
