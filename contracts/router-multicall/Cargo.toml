@@ -2,6 +2,7 @@
 name = "router-multicall"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -11,4 +12,4 @@ soroban-sdk = { workspace = true }
 router-common = { path = "../router-common" }
 
 [dev-dependencies]
-soroban-sdk = { version = "21.7.6", features = ["testutils"] }
+soroban-sdk = { version = "21.7.6", default-features = false, features = ["testutils"] }

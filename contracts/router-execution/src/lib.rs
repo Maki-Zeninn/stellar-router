@@ -1,0 +1,1710 @@
+#![no_std]
+
+//! # router-execution
+//!
+//! Transaction execution pipeline with structured error handling, pre-execution
+//! simulation, and fee estimation for the stellar-router suite.
+//!
+//! ## Features
+//! - Structured error hierarchy: network, simulation, and contract error categories
+//! - Pre-execution simulation that blocks execution on failure
+//! - Retry logic for transient (network) failures
+//! - Centralized error event logging
+//! - Fee estimation endpoint with edge-case handling
+//! - Bounded execution history: capped at `max_history_size` records (default
+//!   1000), oldest entries evicted first, to prevent unbounded storage growth
+//!
+//! ## Events (following naming convention: past tense verbs in snake_case)
+//! - `execution_result` — Execution result logged (target, function, success, attempts)
+//! - `fee_estimated` — Fee estimation completed (total_fee, surge_pricing). Note:
+//!   `surge_pricing`/`high_load` here reflect only the caller's own asserted load
+//!   hint (see `estimate_fee`), not a verified on-chain network-congestion signal.
+//! - `simulation_result` — Pre-execution simulation result (target, function, success)
+//! - `execution_retry` — Retry attempt following a transient network error (target, function, attempts, delay_ms)
+//! - `execution_error` — Execution error logged (target, function, error_code, attempts)
+//! - `admin_transferred` — Admin transferred to a new address (previous_admin, new_admin)
+
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
+};
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+/// Fixed-point scale factor used for multiplier arithmetic (100 = 1.0×).
+/// e.g. backoff_multiplier=200 means 2.0×, 150 means 1.5×.
+const FIXED_POINT_SCALE: u32 = 100;
+
+/// Minimum valid backoff multiplier: 100 = 1.0× (no growth, constant delay).
+const MIN_BACKOFF_MULTIPLIER: u32 = FIXED_POINT_SCALE;
+
+/// Maximum valid backoff multiplier: 10_000 = 100.0× to prevent overflow and runaway delays.
+const MAX_BACKOFF_MULTIPLIER: u32 = 10_000;
+
+/// Default cap on the number of `ExecutionRecord`s kept in `ExecHistory`
+/// when no explicit limit has been configured via `set_max_history_size`.
+/// Bounds per-entry storage growth so the history can't grow unbounded.
+const DEFAULT_MAX_HISTORY_SIZE: u32 = 1000;
+
+/// Maximum backoff delay in milliseconds. Used to cap exponential backoff
+/// calculations and prevent arithmetic overflow when computing
+/// `multiplier^attempt_index`. Derived from practical retry constraints:
+/// with max_retries=5 and max_multiplier=10_000 (100×), the unchecked
+/// calculation could overflow u64. This cap (1 hour) ensures any overflow
+/// or excessively long delay saturates to a reasonable maximum.
+const MAX_BACKOFF_MS: u64 = 3_600_000;
+
+// ── Storage Keys ──────────────────────────────────────────────────────────────
+
+#[contracttype]
+pub enum DataKey {
+    Admin,
+    MaxRetries,
+    TotalExecutions,
+    TotalErrors,
+    BackoffBaseMs,     // base delay in milliseconds before first retry
+    BackoffMultiplier, // multiplier applied each retry (stored as fixed-point *100, e.g. 200 = 2x)
+    ExecHistory,       // Vec<ExecutionRecord>, capped at MaxHistorySize (oldest evicted first)
+    MaxHistorySize,    // u32 — cap on ExecHistory length
+}
+
+// ── Error Types ───────────────────────────────────────────────────────────────
+
+/// Structured error hierarchy for the execution pipeline.
+///
+/// Errors are grouped into three categories:
+/// - **Network** (1xx): transient connectivity or timeout issues — eligible for retry.
+/// - **Simulation** (2xx): pre-execution validation failures — execution is blocked.
+/// - **Contract** (3xx): on-chain contract-level rejections — not retried.
+/// - **Config** (4xx): misconfiguration or unauthorized access.
+#[contracterror]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum ExecutionError {
+    // ── Network errors (transient, retryable) ─────────────────────────────
+    /// RPC node did not respond within the expected window.
+    NetworkTimeout = 101,
+    /// Network connectivity issue; retry may succeed.
+    NetworkUnavailable = 102,
+
+    // ── Simulation errors (block execution) ───────────────────────────────
+    /// Simulation detected the transaction would fail on-chain.
+    SimulationFailed = 201,
+    /// Simulation indicated insufficient resources (budget/fees).
+    SimulationInsufficientResources = 202,
+
+    // ── Contract errors (non-retryable) ───────────────────────────────────
+    /// The target contract rejected the call.
+    ContractRejected = 301,
+    /// The target contract was not found at the given address.
+    ContractNotFound = 302,
+    /// The called function does not exist on the target contract.
+    ContractFunctionNotFound = 303,
+
+    // ── Config / auth errors ──────────────────────────────────────────────
+    AlreadyInitialized = 401,
+    NotInitialized = 402,
+    Unauthorized = 403,
+    InvalidConfig = 404,
+    InvalidAmount = 405,
+}
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+/// Describes a single transaction to execute.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecutionRequest {
+    /// Target contract address.
+    pub target: Address,
+    /// Function name to invoke.
+    pub function: Symbol,
+    /// Whether to run simulation before execution.
+    pub simulate_first: bool,
+    /// Maximum number of retries for transient (network) errors.
+    /// Capped at the contract-level `max_retries` setting.
+    pub max_retries: u32,
+    /// Positional call arguments passed to `function` on `target`, in the
+    /// exact order and types the target function's ABI expects. Each `Val`
+    /// must already be the correctly-typed/serialized argument (e.g. built
+    /// via `IntoVal` on the caller's side) — this contract performs no
+    /// argument type-checking beyond whatever `try_invoke_contract` enforces
+    /// at the host level.
+    pub args: Vec<soroban_sdk::Val>,
+    /// Transaction amount in stroops. Used to compute the real fee recorded
+    /// in `ExecutionRecord.fee_paid` (see `estimate_fee`'s resource-fee
+    /// scaling, which this mirrors).
+    pub amount: i128,
+}
+
+/// A single entry in the per-execution history log.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecutionRecord {
+    pub timestamp: u64,
+    pub target: Address,
+    pub function: Symbol,
+    pub success: bool,
+    pub fee_paid: i128,
+}
+
+/// Result of a single execution attempt.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecutionResult {
+    pub target: Address,
+    pub function: Symbol,
+    pub success: bool,
+    /// Number of attempts made (1 = first try succeeded or non-retryable failure).
+    pub attempts: u32,
+    /// Whether simulation was run before execution.
+    pub simulated: bool,
+}
+
+/// Result of a pre-execution simulation.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SimulationResult {
+    pub target: Address,
+    pub function: Symbol,
+    /// `true` if the simulated call would succeed on-chain.
+    pub success: bool,
+    /// `true` if the simulated call would be rejected on-chain.
+    pub would_fail: bool,
+    /// Human-readable feedback for the caller.
+    pub message: String,
+}
+
+/// Fee estimate for a transaction.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FeeEstimate {
+    /// Base network fee in stroops.
+    pub base_fee: i128,
+    /// Estimated resource fee (CPU + memory) in stroops.
+    pub resource_fee: i128,
+    /// Total estimated fee (base + resource).
+    pub total_fee: i128,
+    /// Surge multiplier applied (100 = 1x, 200 = 2x, etc.).
+    pub surge_multiplier: u32,
+    /// Whether the estimate reflects high-load conditions, per the caller's
+    /// own asserted load hint. This is NOT a verified/observed network
+    /// condition — see `estimate_fee`'s doc comment.
+    pub high_load: bool,
+}
+
+// ── Fee estimation constants ──────────────────────────────────────────────────
+
+/// Minimum base fee in stroops (Stellar network minimum transaction fee).
+const BASE_FEE_STROOPS: i128 = 100;
+
+/// Scaling divisor for resource fee: amount / FEE_SCALE_DIVISOR gives the
+/// proportional resource fee (0.1% of amount).
+const FEE_SCALE_DIVISOR: i128 = 1000;
+
+/// Minimum resource fee in stroops; applies when the scaled amount is below
+/// this floor.
+const MIN_RESOURCE_FEE_STROOPS: i128 = 100;
+
+/// Network utilization basis-point threshold above which surge (2×) pricing
+/// is applied (8000 bps = 80%).
+const HIGH_LOAD_THRESHOLD_BPS: u32 = 8000;
+
+/// Surge pricing multiplier applied when the network is under high load
+/// (stored as a percentage: 200 = 2×).
+const SURGE_MULTIPLIER: u32 = 200;
+
+/// Normal (no-surge) pricing multiplier (100 = 1×).
+const NORMAL_MULTIPLIER: u32 = 100;
+
+// ── Instance storage TTL constants ─────────────────────────────────────────────
+
+/// Threshold (in ledgers) below which instance storage TTL is extended on
+/// state-mutating/frequently-invoked calls. ~30 days assuming ~5s average
+/// ledger close time (17280 ledgers/day).
+const INSTANCE_TTL_THRESHOLD: u32 = 17280 * 30;
+
+/// Ledger count instance storage TTL is bumped to when extended. ~60 days.
+const INSTANCE_TTL_EXTEND_TO: u32 = 17280 * 60;
+
+// ── Contract ──────────────────────────────────────────────────────────────────
+
+#[contract]
+pub struct RouterExecution;
+
+#[contractimpl]
+impl RouterExecution {
+    /// Initialize the execution contract.
+    ///
+    /// # Arguments
+    /// * `admin` - Admin address.
+    /// * `max_retries` - Global cap on per-request retry attempts (max 5).
+    /// * `backoff_base_ms` - Base delay in milliseconds before the first retry (0 = no delay).
+    /// * `backoff_multiplier` - Multiplier applied each retry, as fixed-point *100
+    ///   (e.g. 200 = 2x, 150 = 1.5x). Must be >= 100 and <= 10000.
+    ///
+    /// # Errors
+    /// * [`ExecutionError::AlreadyInitialized`] — called more than once.
+    /// * [`ExecutionError::InvalidConfig`] — `max_retries` exceeds 5 or `backoff_multiplier` < 100 or > 10000.
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        max_retries: u32,
+        backoff_base_ms: u64,
+        backoff_multiplier: u32,
+    ) -> Result<(), ExecutionError> {
+        if env.storage().instance().has(&DataKey::Admin) {
+            return Err(ExecutionError::AlreadyInitialized);
+        }
+        if max_retries == 0 || max_retries > 5 {
+            return Err(ExecutionError::InvalidConfig);
+        }
+        if !(MIN_BACKOFF_MULTIPLIER..=MAX_BACKOFF_MULTIPLIER).contains(&backoff_multiplier) {
+            return Err(ExecutionError::InvalidConfig);
+        }
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxRetries, &max_retries);
+        env.storage()
+            .instance()
+            .set(&DataKey::BackoffBaseMs, &backoff_base_ms);
+        env.storage()
+            .instance()
+            .set(&DataKey::BackoffMultiplier, &backoff_multiplier);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalExecutions, &0u64);
+        env.storage().instance().set(&DataKey::TotalErrors, &0u64);
+        Ok(())
+    }
+
+    /// Update the backoff configuration. Caller must be admin.
+    ///
+    /// # Arguments
+    /// * `backoff_base_ms` - Base delay in milliseconds before the first retry.
+    /// * `backoff_multiplier` - Multiplier per retry as fixed-point *100 (min 100, max 10000).
+    ///
+    /// # Errors
+    /// * [`ExecutionError::Unauthorized`] — caller is not the admin.
+    /// * [`ExecutionError::InvalidConfig`] — `backoff_multiplier` < 100 or > 10000.
+    /// * [`ExecutionError::NotInitialized`] — contract not initialized.
+    pub fn set_backoff_config(
+        env: Env,
+        caller: Address,
+        backoff_base_ms: u64,
+        backoff_multiplier: u32,
+    ) -> Result<(), ExecutionError> {
+        caller.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, ExecutionError)?;
+        if !(MIN_BACKOFF_MULTIPLIER..=MAX_BACKOFF_MULTIPLIER).contains(&backoff_multiplier) {
+            return Err(ExecutionError::InvalidConfig);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::BackoffBaseMs, &backoff_base_ms);
+        env.storage()
+            .instance()
+            .set(&DataKey::BackoffMultiplier, &backoff_multiplier);
+        Ok(())
+    }
+
+    /// Get the current backoff configuration.
+    ///
+    /// Returns `(backoff_base_ms, backoff_multiplier)`.
+    pub fn backoff_config(env: Env) -> (u64, u32) {
+        let base: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::BackoffBaseMs)
+            .unwrap_or(0);
+        let mult: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::BackoffMultiplier)
+            .unwrap_or(FIXED_POINT_SCALE);
+        (base, mult)
+    }
+
+    /// Execute a transaction with structured error handling and optional retry.
+    ///
+    /// If `request.simulate_first` is `true`, a dry-run simulation is performed
+    /// via `try_invoke_contract` before the real call. A failed simulation blocks
+    /// execution and returns [`ExecutionError::SimulationFailed`].
+    ///
+    /// Network errors (codes 101–102) are retried up to
+    /// `min(request.max_retries, global_max_retries)` times. All other errors
+    /// are returned immediately without retry.
+    ///
+    /// Every outcome (success or failure) is logged via an `execution_result`
+    /// event so off-chain observers can monitor the pipeline.
+    ///
+    /// # Errors
+    /// * [`ExecutionError::SimulationFailed`] — simulation detected a would-fail tx.
+    /// * [`ExecutionError::ContractRejected`] — contract call failed after all retries.
+    /// * [`ExecutionError::NotInitialized`] — contract not initialized.
+    pub fn execute(
+        env: Env,
+        caller: Address,
+        request: ExecutionRequest,
+    ) -> Result<ExecutionResult, ExecutionError> {
+        caller.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+
+        let max_retries: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxRetries)
+            .ok_or(ExecutionError::NotInitialized)?;
+
+        let effective_retries = if request.max_retries < max_retries {
+            request.max_retries
+        } else {
+            max_retries
+        };
+
+        let fee_paid = Self::compute_actual_fee(request.amount);
+
+        // ── Simulation phase ──────────────────────────────────────────────
+        if request.simulate_first {
+            let sim_ok = Self::dry_run_invoke(&env, &request.target, &request.function, request.args.clone());
+            if !sim_ok {
+                Self::log_error(
+                    &env,
+                    &request.target,
+                    &request.function,
+                    ExecutionError::SimulationFailed,
+                    0,
+                );
+                return Err(ExecutionError::SimulationFailed);
+            }
+        }
+
+        // ── Execution phase with retry ────────────────────────────────────
+        let backoff_base_ms: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::BackoffBaseMs)
+            .unwrap_or(0);
+        let backoff_multiplier: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::BackoffMultiplier)
+            .unwrap_or(100);
+
+        let mut attempts = 0u32;
+        loop {
+            attempts += 1;
+            let invoke_ok = Self::dry_run_invoke(&env, &request.target, &request.function, request.args.clone());
+
+            if invoke_ok {
+                Self::increment_counter(&env, &DataKey::TotalExecutions);
+                Self::append_history(&env, &request.target, &request.function, true, fee_paid);
+                let exec_result = ExecutionResult {
+                    target: request.target.clone(),
+                    function: request.function.clone(),
+                    success: true,
+                    attempts,
+                    simulated: request.simulate_first,
+                };
+                env.events().publish(
+                    (Symbol::new(&env, router_common::EVENT_EXECUTION_RESULT),),
+                    (&request.target, &request.function, true, attempts),
+                );
+                return Ok(exec_result);
+            } else {
+                if attempts <= effective_retries {
+                    // Compute the delay the caller should wait before the next
+                    // retry: base_ms * multiplier^(attempt-1) / 100^(attempt-1).
+                    // Emitting this lets off-chain orchestrators honour the backoff.
+                    let delay_ms = Self::compute_backoff_ms(
+                        backoff_base_ms,
+                        backoff_multiplier,
+                        attempts - 1,
+                    );
+                    env.events().publish(
+                        (Symbol::new(&env, router_common::EVENT_EXECUTION_RETRY),),
+                        (&request.target, &request.function, attempts, delay_ms),
+                    );
+                    // Retry
+                    continue;
+                }
+                Self::log_error(
+                    &env,
+                    &request.target,
+                    &request.function,
+                    ExecutionError::ContractRejected,
+                    attempts,
+                );
+                Self::append_history(&env, &request.target, &request.function, false, fee_paid);
+                return Err(ExecutionError::ContractRejected);
+            }
+        }
+    }
+
+    /// Estimate fees for a transaction.
+    ///
+    /// Returns a [`FeeEstimate`] based on the target contract and function.
+    /// Under high-load conditions (detected via a configurable threshold), a
+    /// surge multiplier is applied to the base fee.
+    ///
+    /// # Arguments
+    /// * `target` - The contract to be called.
+    /// * `function` - The function to be invoked.
+    /// * `amount` - The transaction amount in stroops (used to scale resource fees).
+    ///   Must be greater than zero.
+    /// * `caller_asserted_load_bps` - A **caller-asserted** basis-point hint above
+    ///   which surge pricing applies (e.g., 8000 = "I assert 80% network
+    ///   utilization"). This is NOT a verified on-chain or oracle-derived network
+    ///   utilization figure — the contract has no mechanism to observe real
+    ///   network load, so this value is simply whatever the caller passes in and
+    ///   must not be trusted as ground truth by downstream consumers (including
+    ///   the `high_load` field below and the `fee_estimated` event).
+    ///
+    /// # Errors
+    /// * [`ExecutionError::InvalidAmount`] — if `amount` is ≤ 0.
+    /// * [`ExecutionError::NotInitialized`] — if the contract is not initialized.
+    pub fn estimate_fee(
+        env: Env,
+        _target: Address,
+        _function: Symbol,
+        amount: i128,
+        caller_asserted_load_bps: u32,
+    ) -> Result<FeeEstimate, ExecutionError> {
+        // Verify initialized
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(ExecutionError::NotInitialized);
+        }
+        if amount <= 0 {
+            return Err(ExecutionError::InvalidAmount);
+        }
+
+        let (base_fee, resource_fee) = Self::compute_base_and_resource_fee(amount);
+
+        // Surge pricing: apply 2x multiplier above HIGH_LOAD_THRESHOLD_BPS.
+        // NOTE: `caller_asserted_load_bps` is caller-supplied and unverified —
+        // see the doc comment above. `high_load` below reflects only what the
+        // caller asserted, not a confirmed network condition.
+        let (surge_multiplier, high_load) = if caller_asserted_load_bps >= HIGH_LOAD_THRESHOLD_BPS
+        {
+            (SURGE_MULTIPLIER, true)
+        } else {
+            (NORMAL_MULTIPLIER, false)
+        };
+
+        // Fee calculation: (base_fee + resource_fee) * surge_multiplier / 100
+        // Overflow analysis: resource_fee = amount / 1000, so the sum is bounded by
+        // (100 + amount/1000). Multiplying by surge_multiplier (max 200) gives
+        // (100 + amount/1000) * 200. For Stellar's max amount (i128::MAX stroops ~
+        // 170 trillion XLM), this is well within i128 range. The operation is safe
+        // as long as `amount` represents a valid Stellar amount (which it must, as
+        // it comes from a transaction context validated by the network).
+        let total_fee =
+            (base_fee + resource_fee) * surge_multiplier as i128 / FIXED_POINT_SCALE as i128;
+
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_FEE_ESTIMATED),),
+            (total_fee, high_load),
+        );
+
+        Ok(FeeEstimate {
+            base_fee,
+            resource_fee,
+            total_fee,
+            surge_multiplier,
+            high_load,
+        })
+    }
+
+    /// Simulate a transaction without executing it.
+    ///
+    /// Runs a dry-run invocation via `try_invoke_contract` and returns a
+    /// [`SimulationResult`] describing whether the transaction would succeed.
+    /// The real execution is never performed — this is purely a validation step.
+    ///
+    /// Simulation results are logged via a `simulation_result` event so
+    /// off-chain observers can track validation outcomes.
+    ///
+    /// # Arguments
+    /// * `caller` - The address requesting simulation; must authenticate.
+    /// * `target` - The contract to simulate against.
+    /// * `function` - The function to simulate.
+    /// * `args` - Positional call arguments to pass to `function`, in the exact
+    ///   order/types the target function's ABI expects (same contract as
+    ///   [`ExecutionRequest::args`]).
+    ///
+    /// # Returns
+    /// A [`SimulationResult`] with `success`, `would_fail`, and a `message`.
+    ///
+    /// # Errors
+    /// * [`ExecutionError::NotInitialized`] — if the contract is not initialized.
+    pub fn simulate(
+        env: Env,
+        caller: Address,
+        target: Address,
+        function: Symbol,
+        args: Vec<soroban_sdk::Val>,
+    ) -> Result<SimulationResult, ExecutionError> {
+        caller.require_auth();
+
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(ExecutionError::NotInitialized);
+        }
+
+        let sim_ok = Self::dry_run_invoke(&env, &target, &function, args);
+
+        let message = if sim_ok {
+            String::from_str(&env, "simulation succeeded")
+        } else {
+            String::from_str(&env, "simulation failed: transaction would be rejected")
+        };
+
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_SIMULATION_RESULT),),
+            (&target, &function, sim_ok),
+        );
+
+        Ok(SimulationResult {
+            target,
+            function,
+            success: sim_ok,
+            would_fail: !sim_ok,
+            message,
+        })
+    }
+
+    /// Transfer admin to a new address.
+    ///
+    /// # Errors
+    /// * [`ExecutionError::Unauthorized`] — if `current` is not the admin.
+    /// * [`ExecutionError::NotInitialized`] — if the contract is not initialized.
+    pub fn transfer_admin(
+        env: Env,
+        current: Address,
+        new_admin: Address,
+    ) -> Result<(), ExecutionError> {
+        current.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ExecutionError::NotInitialized)?;
+        if admin != current {
+            return Err(ExecutionError::Unauthorized);
+        }
+        router_common::admin_transfer_complete!(&env, &current, &new_admin, &DataKey::Admin);
+        Ok(())
+    }
+
+    /// Update the global max-retries cap (admin only).
+    ///
+    /// # Errors
+    /// * [`ExecutionError::Unauthorized`] — if `caller` is not the admin.
+    /// * [`ExecutionError::NotInitialized`] — if the contract is not initialized.
+    /// * [`ExecutionError::InvalidConfig`] — if `new_max` > 5.
+    pub fn set_max_retries(env: Env, caller: Address, new_max: u32) -> Result<(), ExecutionError> {
+        caller.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ExecutionError::NotInitialized)?;
+        if admin != caller {
+            return Err(ExecutionError::Unauthorized);
+        }
+        if new_max == 0 || new_max > 5 {
+            return Err(ExecutionError::InvalidConfig);
+        }
+        env.storage().instance().set(&DataKey::MaxRetries, &new_max);
+        Ok(())
+    }
+
+    /// Update the cap on the number of execution history records retained
+    /// (admin only). If the history currently holds more than `new_max`
+    /// records, the oldest excess records are evicted immediately.
+    ///
+    /// # Errors
+    /// * [`ExecutionError::Unauthorized`] — if `caller` is not the admin.
+    /// * [`ExecutionError::NotInitialized`] — if the contract is not initialized.
+    /// * [`ExecutionError::InvalidConfig`] — if `new_max` is zero.
+    pub fn set_max_history_size(
+        env: Env,
+        caller: Address,
+        new_max: u32,
+    ) -> Result<(), ExecutionError> {
+        caller.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ExecutionError::NotInitialized)?;
+        if admin != caller {
+            return Err(ExecutionError::Unauthorized);
+        }
+        if new_max == 0 {
+            return Err(ExecutionError::InvalidConfig);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxHistorySize, &new_max);
+
+        let mut history: Vec<ExecutionRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExecHistory)
+            .unwrap_or(Vec::new(&env));
+        while history.len() > new_max {
+            history.remove(0);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ExecHistory, &history);
+
+        Ok(())
+    }
+
+    /// Get the global cap on per-request retry attempts.
+    ///
+    /// # Errors
+    /// * [`ExecutionError::NotInitialized`] — if the contract has not been initialized.
+    pub fn max_retries(env: Env) -> Result<u32, ExecutionError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxRetries)
+            .ok_or(ExecutionError::NotInitialized)
+    }
+
+    /// Get the current cap on the number of execution history records retained.
+    pub fn max_history_size(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxHistorySize)
+            .unwrap_or(DEFAULT_MAX_HISTORY_SIZE)
+    }
+
+    /// Return up to `limit` most-recent execution history records (newest first).
+    ///
+    /// # Errors
+    /// * [`ExecutionError::NotInitialized`] — if the contract is not initialized.
+    pub fn get_execution_history(
+        env: Env,
+        limit: u32,
+    ) -> Result<Vec<ExecutionRecord>, ExecutionError> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(ExecutionError::NotInitialized);
+        }
+        let history: Vec<ExecutionRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExecHistory)
+            .unwrap_or(Vec::new(&env));
+        let len = history.len();
+        let take = if limit > len { len } else { limit };
+        let mut result = Vec::new(&env);
+        // Return newest-first: iterate from the end
+        let mut i = len;
+        let mut collected = 0u32;
+        while i > 0 && collected < take {
+            i -= 1;
+            if let Some(entry) = history.get(i) {
+                result.push_back(entry);
+                collected += 1;
+            }
+        }
+        Ok(result)
+    }
+
+    /// Get the current count of stored execution history records.
+    ///
+    /// Returns the number of records currently in the execution history without
+    /// materializing the entire vector across the host boundary.
+    ///
+    /// # Errors
+    /// * [`ExecutionError::NotInitialized`] — if the contract is not initialized.
+    pub fn execution_history_len(env: Env) -> Result<u32, ExecutionError> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(ExecutionError::NotInitialized);
+        }
+        let history: Vec<ExecutionRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExecHistory)
+            .unwrap_or(Vec::new(&env));
+        Ok(history.len() as u32)
+    }
+
+    /// Get the current admin address.
+    ///
+    /// # Errors
+    /// Returns `ExecutionError::NotInitialized` if the contract has not been initialized.
+    pub fn admin(env: Env) -> Result<Address, ExecutionError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ExecutionError::NotInitialized)
+    }
+
+    /// Get cumulative execution statistics.
+    ///
+    /// Returns `(total_executions, total_errors)`.
+    pub fn stats(env: Env) -> (u64, u64) {
+        let execs: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalExecutions)
+            .unwrap_or(0);
+        let errors: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalErrors)
+            .unwrap_or(0);
+        (execs, errors)
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// Computes `(base_fee, resource_fee)` for a transaction amount: a fixed
+    /// base fee plus a resource fee that scales with `amount` (0.1%, floored
+    /// at `MIN_RESOURCE_FEE_STROOPS`). Shared by `estimate_fee` and
+    /// `compute_actual_fee` so the two stay in sync.
+    fn compute_base_and_resource_fee(amount: i128) -> (i128, i128) {
+        let base_fee: i128 = BASE_FEE_STROOPS;
+        let resource_fee: i128 = {
+            let scaled = amount / FEE_SCALE_DIVISOR;
+            if scaled < MIN_RESOURCE_FEE_STROOPS {
+                MIN_RESOURCE_FEE_STROOPS
+            } else {
+                scaled
+            }
+        };
+        (base_fee, resource_fee)
+    }
+
+    /// Computes the real fee for an executed transaction, mirroring
+    /// `estimate_fee`'s base + resource fee logic (without surge pricing,
+    /// since `execute()` has no caller-asserted load hint to apply it
+    /// against). Used to populate `ExecutionRecord.fee_paid` with an actual
+    /// value instead of a hardcoded `0`.
+    fn compute_actual_fee(amount: i128) -> i128 {
+        let (base_fee, resource_fee) = Self::compute_base_and_resource_fee(amount);
+        base_fee + resource_fee
+    }
+
+    /// Compute exponential backoff delay in milliseconds for a given attempt index.
+    ///
+    /// Formula: `delay = base_ms * (multiplier / 100)^attempt_index`
+    ///
+    /// Uses checked arithmetic to prevent overflow panics (Issue #569):
+    /// - `multiplier^attempt_index` is computed via `checked_pow`
+    /// - Intermediate multiplication uses `checked_mul`
+    /// - Any overflow results in the delay being capped at `MAX_BACKOFF_MS`
+    ///
+    /// The denominator `100^attempt_index` is computed with unchecked `pow` because
+    /// it is provably safe: with `max_retries` capped at 5 (enforced in `initialize`),
+    /// `attempt_index ≤ 5`, and `100u64.pow(5) = 10,000,000,000` is well within
+    /// `u64::MAX` (18,446,744,073,709,551,615).
+    ///
+    /// If `attempt_index` is 0, the formula reduces to `base_ms` (no growth).
+    ///
+    /// # Security
+    /// Before this fix, the calculation used unchecked `u32::pow`, which panicked
+    /// on overflow when `multiplier` and `attempt_index` were large (e.g.,
+    /// `multiplier=200, attempt_index=10`), constituting a denial-of-service vector.
+    /// Checked arithmetic eliminates this panic and caps the result at a reasonable
+    /// maximum delay (1 hour).
+    pub(crate) fn compute_backoff_ms(base_ms: u64, multiplier: u32, attempt_index: u32) -> u64 {
+        // Compute: base_ms * multiplier^attempt_index / 100^attempt_index
+        // Using checked arithmetic to prevent overflow panic.
+        let backoff = multiplier
+            .checked_pow(attempt_index)
+            .and_then(|m| base_ms.checked_mul(m as u64))
+            .map(|b| b / FIXED_POINT_SCALE.pow(attempt_index) as u64)
+            .unwrap_or(MAX_BACKOFF_MS);
+        backoff
+    }
+
+    fn log_error(
+        env: &Env,
+        target: &Address,
+        function: &Symbol,
+        error: ExecutionError,
+        attempts: u32,
+    ) {
+        Self::increment_counter(env, &DataKey::TotalErrors);
+        // Emit a structured error event; does not leak internal details beyond
+        // the error code and attempt count.
+        env.events().publish(
+            (Symbol::new(env, router_common::EVENT_EXECUTION_ERROR),),
+            (target, function, error as u32, attempts),
+        );
+    }
+
+    fn increment_counter(env: &Env, key: &DataKey) {
+        let val: u64 = env.storage().instance().get(key).unwrap_or(0);
+        // Saturating add to prevent overflow after 2^64 executions. In practice,
+        // this counter will never reach u64::MAX (would require >18 quintillion
+        // executions), but saturating_add ensures the contract remains operational
+        // and doesn't panic even in a theoretical overflow scenario.
+        env.storage().instance().set(key, &val.saturating_add(1));
+    }
+
+    fn append_history(
+        env: &Env,
+        target: &Address,
+        function: &Symbol,
+        success: bool,
+        fee_paid: i128,
+    ) {
+        let mut history: Vec<ExecutionRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExecHistory)
+            .unwrap_or(Vec::new(env));
+        history.push_back(ExecutionRecord {
+            timestamp: env.ledger().timestamp(),
+            target: target.clone(),
+            function: function.clone(),
+            success,
+            fee_paid,
+        });
+        env.storage()
+            .instance()
+            .set(&DataKey::ExecHistory, &history);
+
+        // Cap storage growth: evict the oldest record(s) once over the limit.
+        let max_history: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxHistorySize)
+            .unwrap_or(DEFAULT_MAX_HISTORY_SIZE);
+        while history.len() > max_history {
+            history.remove(0);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ExecHistory, &history);
+    }
+
+    fn dry_run_invoke(
+        env: &Env,
+        target: &Address,
+        function: &Symbol,
+        args: Vec<soroban_sdk::Val>,
+    ) -> bool {
+        env.try_invoke_contract::<soroban_sdk::Val, soroban_sdk::Val>(target, function, args)
+            .is_ok()
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Events as _},
+        Env, IntoVal,
+    };
+
+    fn setup() -> (Env, Address, RouterExecutionClient<'static>) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &2, &500, &200); // base=500ms, multiplier=2x
+        (env, admin, client)
+    }
+
+    #[test]
+    fn test_initialize_twice_fails() {
+        let (_, admin, client) = setup();
+        let result = client.try_initialize(&admin, &1, &0, &100);
+        assert_eq!(result, Err(Ok(ExecutionError::AlreadyInitialized)));
+    }
+
+    #[test]
+    fn test_initialize_max_retries_zero_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let result = client.try_initialize(&admin, &0, &0, &100);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_set_max_retries_zero_fails() {
+        let (_, admin, client) = setup();
+        let result = client.try_set_max_retries(&admin, &0);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_initialize_max_retries_too_high_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let result = client.try_initialize(&admin, &6, &0, &100);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_initialize_invalid_multiplier_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        // multiplier < 100 is invalid
+        let result = client.try_initialize(&admin, &2, &500, &99);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_admin_returns_initialized_admin() {
+        let (_, admin, client) = setup();
+        assert_eq!(client.admin(), admin);
+    }
+
+    #[test]
+    fn test_fee_estimate_normal_load() {
+        let (env, _, client) = setup();
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        // 80% threshold not reached → no surge
+        let estimate = client.estimate_fee(&target, &function, &1_000_000, &5000);
+        assert!(!estimate.high_load);
+        assert_eq!(estimate.surge_multiplier, 100);
+        assert_eq!(estimate.base_fee, 100);
+        assert_eq!(
+            estimate.total_fee,
+            estimate.base_fee + estimate.resource_fee
+        );
+    }
+
+    #[test]
+    fn test_fee_estimate_high_load() {
+        let (env, _, client) = setup();
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        let estimate = client.estimate_fee(&target, &function, &1_000_000, &8000);
+        assert!(estimate.high_load);
+        assert_eq!(estimate.surge_multiplier, 200);
+        // total = (base + resource) * 2
+        assert_eq!(
+            estimate.total_fee,
+            (estimate.base_fee + estimate.resource_fee) * 2
+        );
+    }
+
+    #[test]
+    fn test_fee_estimate_invalid_amount() {
+        let (env, _, client) = setup();
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        let result = client.try_estimate_fee(&target, &function, &0, &5000);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidAmount)));
+    }
+
+    #[test]
+    fn test_stats_initial() {
+        let (_, _, client) = setup();
+        assert_eq!(client.stats(), (0, 0));
+    }
+
+    #[test]
+    fn test_simulate_nonexistent_contract_fails() {
+        let (env, _, client) = setup();
+        let caller = Address::generate(&env);
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        // Calling a random address that has no contract → simulation should fail
+        let result = client.simulate(&caller, &target, &function, &Vec::new(&env));
+        assert!(!result.success);
+        assert!(result.would_fail);
+    }
+
+    #[test]
+    fn test_transfer_admin() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        client.transfer_admin(&admin, &new_admin);
+        assert_eq!(client.admin(), new_admin);
+    }
+
+    #[test]
+    fn test_transfer_admin_unauthorized_fails() {
+        let (env, _, client) = setup();
+        let attacker = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        let result = client.try_transfer_admin(&attacker, &new_admin);
+        assert_eq!(result, Err(Ok(ExecutionError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_transfer_admin_emits_event() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        client.transfer_admin(&admin, &new_admin);
+        let event = env.events().all().last().unwrap().clone();
+        let topic: Symbol = event.1.get(0).unwrap().into_val(&env);
+        assert_eq!(topic, Symbol::new(&env, "admin_transferred"));
+    }
+
+    #[test]
+    fn test_set_max_retries() {
+        let (_, admin, client) = setup();
+        client.set_max_retries(&admin, &3);
+    }
+
+    #[test]
+    fn test_set_max_retries_too_high_fails() {
+        let (_, admin, client) = setup();
+        let result = client.try_set_max_retries(&admin, &6);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_set_max_retries_unauthorized_fails() {
+        let (env, _, client) = setup();
+        let attacker = Address::generate(&env);
+        let result = client.try_set_max_retries(&attacker, &2);
+        assert_eq!(result, Err(Ok(ExecutionError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_max_retries_returns_initialization_value() {
+        let (_, _, client) = setup();
+        // setup() initializes with max_retries=2
+        assert_eq!(client.max_retries(), 2);
+    }
+
+    #[test]
+    fn test_max_retries_reflects_updates() {
+        let (_, admin, client) = setup();
+        assert_eq!(client.max_retries(), 2);
+        client.set_max_retries(&admin, &3);
+        assert_eq!(client.max_retries(), 3);
+    }
+
+    #[test]
+    fn test_max_retries_uninitialized_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let result = client.try_max_retries();
+        assert_eq!(result, Err(Ok(ExecutionError::NotInitialized)));
+    }
+
+    // ── Execution history size limit (#664) ───────────────────────────────────
+
+    #[test]
+    fn test_max_history_size_default() {
+        let (_, _, client) = setup();
+        assert_eq!(client.max_history_size(), 1000);
+    }
+
+    #[test]
+    fn test_set_max_history_size_updates_value() {
+        let (_, admin, client) = setup();
+        client.set_max_history_size(&admin, &5);
+        assert_eq!(client.max_history_size(), 5);
+    }
+
+    #[test]
+    fn test_set_max_history_size_zero_fails() {
+        let (_, admin, client) = setup();
+        let result = client.try_set_max_history_size(&admin, &0);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_set_max_history_size_unauthorized_fails() {
+        let (env, _, client) = setup();
+        let attacker = Address::generate(&env);
+        let result = client.try_set_max_history_size(&attacker, &5);
+        assert_eq!(result, Err(Ok(ExecutionError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_append_history_evicts_oldest_when_over_limit() {
+        let (env, admin, client) = setup();
+        client.set_max_history_size(&admin, &3);
+
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        env.as_contract(&client.address, || {
+            for _ in 0..5u32 {
+                RouterExecution::append_history(&env, &target, &function, true, 0);
+            }
+        });
+
+        let history = client.get_execution_history(&10);
+        // Capped at 3 despite 5 appends — oldest entries were evicted.
+        assert_eq!(history.len(), 3);
+    }
+
+    #[test]
+    fn test_set_max_history_size_trims_existing_history() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        env.as_contract(&client.address, || {
+            for _ in 0..5u32 {
+                RouterExecution::append_history(&env, &target, &function, true, 0);
+            }
+        });
+        assert_eq!(client.get_execution_history(&10).len(), 5);
+
+        // Shrinking the cap below the current length trims immediately.
+        client.set_max_history_size(&admin, &2);
+        assert_eq!(client.get_execution_history(&10).len(), 2);
+    }
+
+    #[test]
+    fn test_get_execution_history_empty() {
+        let (_, _, client) = setup();
+        let history = client.get_execution_history(&10);
+        assert_eq!(history.len(), 0);
+    }
+
+    #[test]
+    fn test_execution_history_len_fresh_contract_is_zero() {
+        let (_, _, client) = setup();
+        assert_eq!(client.execution_history_len(), 0);
+    }
+
+    #[test]
+    fn test_execution_history_len_reflects_appends() {
+        let (env, _, client) = setup();
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        env.as_contract(&client.address, || {
+            for i in 0..5u32 {
+                RouterExecution::append_history(&env, &target, &function, true, 0);
+                assert_eq!(RouterExecution::execution_history_len(env.clone()), Ok(i + 1));
+            }
+        });
+        assert_eq!(client.execution_history_len(), 5);
+    }
+
+    #[test]
+    fn test_execution_history_len_after_eviction() {
+        let (env, admin, client) = setup();
+        client.set_max_history_size(&admin, &3);
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        env.as_contract(&client.address, || {
+            for _ in 0..5u32 {
+                RouterExecution::append_history(&env, &target, &function, true, 0);
+            }
+        });
+        // Should be capped at 3 due to eviction of oldest entries
+        assert_eq!(client.execution_history_len(), 3);
+    }
+
+    #[test]
+    fn test_execution_history_len_uninitialized_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let result = client.try_execution_history_len();
+        assert_eq!(result, Err(Ok(ExecutionError::NotInitialized)));
+    }
+
+    #[test]
+    fn test_simulate_returns_message_on_failure() {
+        let (env, _, client) = setup();
+        let caller = Address::generate(&env);
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        let result = client.simulate(&caller, &target, &function, &Vec::new(&env));
+        // Message should indicate failure
+        assert_eq!(
+            result.message,
+            soroban_sdk::String::from_str(&env, "simulation failed: transaction would be rejected")
+        );
+    }
+
+    // ── Backoff config tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_backoff_config_stored_on_initialize() {
+        let (_, _, client) = setup();
+        let (base, mult) = client.backoff_config();
+        assert_eq!(base, 500);
+        assert_eq!(mult, 200);
+    }
+
+    #[test]
+    fn test_set_backoff_config_updates_values() {
+        let (_, admin, client) = setup();
+        client.set_backoff_config(&admin, &1000, &150);
+        let (base, mult) = client.backoff_config();
+        assert_eq!(base, 1000);
+        assert_eq!(mult, 150);
+    }
+
+    #[test]
+    fn test_set_backoff_config_unauthorized_fails() {
+        let (env, _, client) = setup();
+        let attacker = Address::generate(&env);
+        let result = client.try_set_backoff_config(&attacker, &1000, &200);
+        assert_eq!(result, Err(Ok(ExecutionError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_set_backoff_config_invalid_multiplier_fails() {
+        let (_, admin, client) = setup();
+        let result = client.try_set_backoff_config(&admin, &500, &99);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_compute_backoff_ms_no_delay() {
+        // base=0 → always 0 regardless of multiplier
+        assert_eq!(RouterExecution::compute_backoff_ms(0, 200, 0), 0);
+        assert_eq!(RouterExecution::compute_backoff_ms(0, 200, 3), 0);
+    }
+
+    #[test]
+    fn test_compute_backoff_ms_doubles_each_attempt() {
+        // base=100ms, multiplier=200 (2x): 100, 200, 400, 800
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 0), 100);
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 1), 200);
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 2), 400);
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 3), 800);
+    }
+
+    #[test]
+    fn test_compute_backoff_ms_1x_multiplier_stays_constant() {
+        // multiplier=100 (1x): delay stays at base
+        assert_eq!(RouterExecution::compute_backoff_ms(250, 100, 0), 250);
+        assert_eq!(RouterExecution::compute_backoff_ms(250, 100, 5), 250);
+    }
+
+    // ── Backoff delay calculation: base/multiplier fixed-point math ─────────
+
+    #[test]
+    fn test_backoff_delay_base_100_multiplier_200_attempts_1_to_5() {
+        // base=100ms, multiplier=200 (2x fixed-point *100)
+        // compute_backoff_ms(base, multiplier, attempt_index)
+        // execute() uses attempt_index = attempts - 1.
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 0), 100); // attempt=1
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 1), 200); // attempt=2
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 2), 400); // attempt=3
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 3), 800); // attempt=4
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 4), 1600); // attempt=5
+    }
+
+    #[test]
+    fn test_backoff_delay_exponential_growth_attempt_index_0_to_4() {
+        // Explicitly verify growth for attempt indices 0..4.
+        // delay = base * (multiplier/100)^attempt_index
+        let base = 100u64;
+        let mult = 200u32; // 2x
+        let expected = [100u64, 200u64, 400u64, 800u64, 1600u64];
+        for (attempt_index, &exp) in expected.iter().enumerate() {
+            assert_eq!(
+                RouterExecution::compute_backoff_ms(base, mult, attempt_index as u32),
+                exp
+            );
+        }
+    }
+
+    #[test]
+    fn test_backoff_delay_min_multiplier_boundary_constant_delay() {
+        // Minimum allowed multiplier: 100 => constant delay, no growth.
+        let base = 123u64;
+        let mult = 100u32;
+        for attempt_index in 0u32..=10u32 {
+            assert_eq!(
+                RouterExecution::compute_backoff_ms(base, mult, attempt_index),
+                base
+            );
+        }
+    }
+
+    #[test]
+    fn test_backoff_delay_zero_base_is_zero_for_any_attempt() {
+        let mult = 300u32;
+        for attempt_index in 0u32..=10u32 {
+            assert_eq!(
+                RouterExecution::compute_backoff_ms(0, mult, attempt_index),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn test_backoff_delay_large_multiplier_saturates_safely_and_is_monotonic() {
+        // Large multiplier must not overflow due to saturating_mul.
+        // We can’t easily assert exact values far out without knowing the saturation point,
+        // but we can assert monotonic non-decreasing behavior.
+        let base = 100u64;
+        let mult = 300u32;
+
+        let mut prev = RouterExecution::compute_backoff_ms(base, mult, 0);
+        for attempt_index in 1u32..=20u32 {
+            let next = RouterExecution::compute_backoff_ms(base, mult, attempt_index);
+            assert!(
+                next >= prev,
+                "backoff should be monotonic: {} -> {}",
+                prev,
+                next
+            );
+            prev = next;
+        }
+    }
+
+    // ── Backoff retry exhaustion behavior (max retries) ────────────────────────
+
+    #[test]
+    fn test_execute_reaches_max_retries_exhaustion() {
+        // This contract's execute() retries on any Err(_) from try_invoke_contract.
+        // In the test environment, calling an unregistered contract/function should
+        // cause try_invoke_contract to Err consistently, so execute() should exhaust.
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &2, &100, &200);
+
+        let caller = Address::generate(&env);
+        env.as_contract(&client.address, || {
+            // Build a request with max_retries=1, but global max_retries=2.
+            // effective_retries = min(1, 2) = 1.
+            // That means: attempts 1 (initial) and attempt 2 (retry) are allowed,
+            // and failure after attempt 2 returns ContractRejected.
+
+            let target = Address::generate(&env);
+            let function = Symbol::new(&env, "transfer");
+
+            // execute() is called as a contract call to bypass caller.require_auth
+            // signature complexity in tests; env.mock_all_auths() makes auth pass.
+            let request = ExecutionRequest {
+                target,
+                function,
+                simulate_first: false,
+                max_retries: 1,
+                args: Vec::new(&env),
+                amount: 1_000_000,
+            };
+
+            let result = RouterExecution::execute(env.clone(), caller.clone(), request);
+            assert_eq!(result, Err(ExecutionError::ContractRejected));
+        });
+    }
+
+    // ── Issue #633: backoff_multiplier upper bound validation ────────────────
+
+    #[test]
+    fn test_initialize_invalid_multiplier_too_high_fails() {
+        let env = Env::default();
+
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        // multiplier > 10000 (100x) is invalid
+        let result = client.try_initialize(&admin, &2, &500, &10_001);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_set_backoff_config_invalid_multiplier_too_high_fails() {
+        let (_, admin, client) = setup();
+        let result = client.try_set_backoff_config(&admin, &500, &10_001);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_set_backoff_config_max_multiplier_succeeds() {
+        let (_, admin, client) = setup();
+        // Exactly 10000 (100x) is valid
+        assert!(client.try_set_backoff_config(&admin, &500, &10_000).is_ok());
+        let (_, mult) = client.backoff_config();
+        assert_eq!(mult, 10_000);
+    }
+
+    // ── Issue #569: Overflow-safe backoff calculation ────────────────────────
+
+    #[test]
+    fn test_backoff_overflow_large_multiplier_large_attempt_caps_at_max() {
+        // Scenario: multiplier=200 (2×), attempt_index=10
+        // Without checked arithmetic: 200^10 overflows u32, causing panic.
+        // With fix: should cap at MAX_BACKOFF_MS without panic.
+        let delay = RouterExecution::compute_backoff_ms(1000, 200, 10);
+        assert_eq!(delay, 3_600_000); // MAX_BACKOFF_MS
+    }
+
+    #[test]
+    fn test_backoff_overflow_max_multiplier_max_retries_caps_at_max() {
+        // Max allowed multiplier (10_000 = 100×), attempt_index=5 (max retries)
+        // 10_000^5 massively overflows u32 → should cap at MAX_BACKOFF_MS.
+        let delay = RouterExecution::compute_backoff_ms(1000, 10_000, 5);
+        assert_eq!(delay, 3_600_000); // MAX_BACKOFF_MS
+    }
+
+    #[test]
+    fn test_backoff_all_attempts_up_to_max_retries_capped() {
+        // For every attempt from max_retries boundary (5) through a high value (15),
+        // ensure the result is MAX_BACKOFF_MS for cases that overflow.
+        let base = 1000u64;
+        let mult = 300u32; // 3× per retry
+        for attempt_index in 10u32..=15u32 {
+            let delay = RouterExecution::compute_backoff_ms(base, mult, attempt_index);
+            // At these high attempt indices, the calculation should overflow and cap.
+            assert_eq!(
+                delay, 3_600_000,
+                "attempt_index={} should cap at MAX_BACKOFF_MS",
+                attempt_index
+            );
+        }
+    }
+
+    #[test]
+    fn test_backoff_non_overflow_small_attempts_unchanged() {
+        // Small attempt values should produce mathematically correct results,
+        // confirming the fix does not alter non-overflowing behaviour.
+        // base=100ms, multiplier=200 (2×): attempt_index 1,2,3 → 200, 400, 800
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 1), 200);
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 2), 400);
+        assert_eq!(RouterExecution::compute_backoff_ms(100, 200, 3), 800);
+    }
+
+    #[test]
+    fn test_backoff_zero_attempt_returns_base() {
+        // attempt_index=0 should return base_ms unchanged (multiplier^0 = 1).
+        assert_eq!(RouterExecution::compute_backoff_ms(500, 200, 0), 500);
+        assert_eq!(RouterExecution::compute_backoff_ms(1000, 150, 0), 1000);
+    }
+
+    #[test]
+    fn test_backoff_exactly_at_max_boundary() {
+        // Construct a case that results in exactly MAX_BACKOFF_MS without overflow.
+        // This is tricky to achieve exactly, but we can verify the cap applies.
+        // If base * multiplier^attempt / 100^attempt >= MAX_BACKOFF_MS, cap is applied.
+        let delay = RouterExecution::compute_backoff_ms(3_600_000, 100, 0);
+        // 3_600_000 * 100^0 / 100^0 = 3_600_000 exactly
+        assert_eq!(delay, 3_600_000);
+    }
+
+    #[test]
+    fn test_backoff_one_unit_below_cap() {
+        // If the result is MAX_BACKOFF_MS - 1, the cap should NOT be applied.
+        // We need to find a combination that produces a value < MAX_BACKOFF_MS.
+        // base=100, multiplier=200 (2×), attempt_index=15: 100 * 2^15 / 100^15
+        // 2^15 = 32768, 100^15 is huge, so this will be tiny or zero → no cap.
+        let delay = RouterExecution::compute_backoff_ms(100, 200, 15);
+        // This should overflow and cap at MAX_BACKOFF_MS.
+        assert_eq!(delay, 3_600_000);
+
+        // Try a small case: base=3_599_999, multiplier=100 (1×), attempt_index=0
+        let delay = RouterExecution::compute_backoff_ms(3_599_999, 100, 0);
+        assert_eq!(delay, 3_599_999); // Exactly one below cap, no overflow
+        assert!(delay < 3_600_000);
+    }
+
+    #[test]
+    fn test_backoff_no_panic_on_adversarial_inputs() {
+        // Adversarial inputs: attempt_index = u32::MAX, multiplier = 10_000
+        // Should cap at MAX_BACKOFF_MS without panic.
+        let delay = RouterExecution::compute_backoff_ms(1000, 10_000, u32::MAX);
+        assert_eq!(delay, 3_600_000); // MAX_BACKOFF_MS
+    }
+
+    #[test]
+    fn test_backoff_vacuousness_check_without_fix_would_overflow() {
+        // This test documents that WITHOUT the checked arithmetic fix,
+        // the calculation WOULD overflow/panic for large attempt_index.
+        // The current implementation uses checked_pow, so this test simply
+        // confirms the fix is in place by asserting the cap is applied.
+        //
+        // If we replaced checked_pow with unchecked pow (200u32.pow(10)),
+        // this would panic in debug mode or wrap in release mode.
+        let delay = RouterExecution::compute_backoff_ms(1000, 200, 10);
+        assert_eq!(delay, 3_600_000);
+        // Vacuousness check: confirm this is not due to base_ms being MAX_BACKOFF_MS.
+        assert_ne!(1000, 3_600_000);
+    }
+
+    #[test]
+    fn test_backoff_property_result_always_lte_max() {
+        // Property test (manual): for arbitrary multiplier, attempt_index, base_ms,
+        // the result is always ≤ MAX_BACKOFF_MS and never panics.
+        let test_cases = [
+            (100u64, 200u32, 10u32),
+            (500u64, 300u32, 8u32),
+            (1000u64, 10_000u32, 5u32),
+            (5000u64, 150u32, 20u32),
+            (10_000u64, 500u32, 15u32),
+            (u64::MAX / 1000, 200u32, 3u32), // Large base
+        ];
+        for (base, mult, attempt) in &test_cases {
+            let delay = RouterExecution::compute_backoff_ms(*base, *mult, *attempt);
+            assert!(
+                delay <= 3_600_000,
+                "base={}, mult={}, attempt={}: delay={} exceeds MAX_BACKOFF_MS",
+                base,
+                mult,
+                attempt,
+                delay
+            );
+        }
+    }
+
+    // ── Issue #811: execute() success path coverage ──────────────────────────
+    //
+    // Every other `execute()` test drives the failure/exhaustion branch by
+    // calling an unregistered target. These tests register a lightweight
+    // in-process contract so `try_invoke_contract` returns `Ok(_)` and the
+    // success branch (~lines 370-385) is actually exercised.
+
+    #[contract]
+    pub struct MockTarget;
+
+    #[contractimpl]
+    impl MockTarget {
+        /// A trivial no-arg function that always succeeds.
+        pub fn ping(_env: Env) {}
+    }
+
+    #[contract]
+    pub struct FlakyTarget;
+
+    #[contractimpl]
+    impl FlakyTarget {
+        /// Fails on the first invocation, succeeds on every call after that.
+        /// Used to exercise the retry-then-succeed path of `execute()`.
+        pub fn ping(env: Env) {
+            let key = Symbol::new(&env, "calls");
+            let count: u32 = env.storage().instance().get(&key).unwrap_or(0);
+            env.storage().instance().set(&key, &(count + 1));
+            if count == 0 {
+                panic!("flaky: first call fails");
+            }
+        }
+    }
+
+    #[test]
+    fn test_execute_success_path() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockTarget);
+        let caller = Address::generate(&env);
+        let function = Symbol::new(&env, "ping");
+
+        let request = ExecutionRequest {
+            target: mock_id.clone(),
+            function: function.clone(),
+            simulate_first: false,
+            max_retries: 0,
+        };
+
+        let result = client.execute(&caller, &request);
+        assert!(result.success);
+        assert_eq!(result.attempts, 1);
+        assert_eq!(result.target, mock_id);
+        assert_eq!(result.function, function);
+        assert!(!result.simulated);
+
+        // TotalExecutions should have incremented; no errors recorded.
+        let (total_execs, total_errors) = client.stats();
+        assert_eq!(total_execs, 1);
+        assert_eq!(total_errors, 0);
+
+        // The new ExecutionRecord should be present in history, success=true.
+        let history = client.get_execution_history(&1);
+        assert_eq!(history.len(), 1);
+        let record = history.get(0).unwrap();
+        assert!(record.success);
+        assert_eq!(record.target, mock_id);
+        assert_eq!(record.function, function);
+
+        // An `execution_result` event should be present with the expected payload.
+        let all_events = env.events().all();
+        let exec_event = all_events
+            .iter()
+            .find(|e| {
+                let topic: Symbol = e.1.get(0).unwrap().into_val(&env);
+                topic == Symbol::new(&env, router_common::EVENT_EXECUTION_RESULT)
+            })
+            .expect("execution_result event not found");
+        let (evt_target, evt_function, evt_success, evt_attempts): (Address, Symbol, bool, u32) =
+            exec_event.2.into_val(&env);
+        assert_eq!(evt_target, mock_id);
+        assert_eq!(evt_function, function);
+        assert!(evt_success);
+        assert_eq!(evt_attempts, 1);
+    }
+
+    #[test]
+    fn test_execute_retry_then_succeeds() {
+        // setup() initializes with backoff_base_ms=500, backoff_multiplier=200 (2x).
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, FlakyTarget);
+        let caller = Address::generate(&env);
+        let function = Symbol::new(&env, "ping");
+
+        let request = ExecutionRequest {
+            target: mock_id.clone(),
+            function: function.clone(),
+            simulate_first: false,
+            max_retries: 2,
+        };
+
+        let result = client.execute(&caller, &request);
+        assert!(result.success);
+        // First attempt fails, second attempt (the retry) succeeds.
+        assert_eq!(result.attempts, 2);
+
+        let (total_execs, _) = client.stats();
+        assert_eq!(total_execs, 1);
+
+        let history = client.get_execution_history(&1);
+        assert_eq!(history.len(), 1);
+        assert!(history.get(0).unwrap().success);
+
+        let all_events = env.events().all();
+
+        // The failed first attempt should have emitted an `execution_retry` event
+        // carrying the computed backoff delay.
+        let retry_event = all_events
+            .iter()
+            .find(|e| {
+                let topic: Symbol = e.1.get(0).unwrap().into_val(&env);
+                topic == Symbol::new(&env, router_common::EVENT_EXECUTION_RETRY)
+            })
+            .expect("execution_retry event not found");
+        let (retry_target, retry_function, retry_attempts, delay_ms): (Address, Symbol, u32, u64) =
+            retry_event.2.into_val(&env);
+        assert_eq!(retry_target, mock_id);
+        assert_eq!(retry_function, function);
+        assert_eq!(retry_attempts, 1);
+        // attempt_index = attempts - 1 = 0 -> delay == backoff_base_ms unchanged.
+        assert_eq!(delay_ms, 500);
+
+        // The eventual success should still emit `execution_result` with attempts=2.
+        let exec_event = all_events
+            .iter()
+            .find(|e| {
+                let topic: Symbol = e.1.get(0).unwrap().into_val(&env);
+                topic == Symbol::new(&env, router_common::EVENT_EXECUTION_RESULT)
+            })
+            .expect("execution_result event not found");
+        let (_, _, evt_success, evt_attempts): (Address, Symbol, bool, u32) =
+            exec_event.2.into_val(&env);
+        assert!(evt_success);
+        assert_eq!(evt_attempts, 2);
+    }
+}

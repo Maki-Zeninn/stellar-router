@@ -1,5 +1,4 @@
 [workspace]
-name = "stellar-router"
 resolver = "2"
 members = [
     "contracts/router-common",
@@ -9,10 +8,12 @@ members = [
     "contracts/router-middleware",
     "contracts/router-timelock",
     "contracts/router-multicall",
+    "contracts/router-quote",
+    "contracts/router-execution",
 ]
 
 [workspace.dependencies]
-soroban-sdk = { version = "21.7.6" }
+soroban-sdk = { version = "21.7.6", default-features = false }
 
 [profile.release]
 opt-level = "z"

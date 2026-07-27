@@ -23,11 +23,25 @@
                       "map": [
                         {
                           "key": {
+                            "symbol": "args"
+                          },
+                          "val": {
+                            "vec": []
+                          }
+                        },
+                        {
+                          "key": {
                             "symbol": "function"
                           },
                           "val": {
                             "symbol": "success"
                           }
+                        },
+                        {
+                          "key": {
+                            "symbol": "instruction_budget"
+                          },
+                          "val": "void"
                         },
                         {
                           "key": {
@@ -51,11 +65,25 @@
                       "map": [
                         {
                           "key": {
+                            "symbol": "args"
+                          },
+                          "val": {
+                            "vec": []
+                          }
+                        },
+                        {
+                          "key": {
                             "symbol": "function"
                           },
                           "val": {
                             "symbol": "fail"
                           }
+                        },
+                        {
+                          "key": {
+                            "symbol": "instruction_budget"
+                          },
+                          "val": "void"
                         },
                         {
                           "key": {
@@ -79,11 +107,25 @@
                       "map": [
                         {
                           "key": {
+                            "symbol": "args"
+                          },
+                          "val": {
+                            "vec": []
+                          }
+                        },
+                        {
+                          "key": {
                             "symbol": "function"
                           },
                           "val": {
                             "symbol": "success"
                           }
+                        },
+                        {
+                          "key": {
+                            "symbol": "instruction_budget"
+                          },
+                          "val": "void"
                         },
                         {
                           "key": {
@@ -104,7 +146,17 @@
                       ]
                     }
                   ]
-                }
+                },
+                {
+                  "bool": false
+                },
+                {
+                  "bool": false
+                },
+                {
+                  "bool": false
+                },
+                "void"
               ]
             }
           },
@@ -365,11 +417,25 @@
                       "map": [
                         {
                           "key": {
+                            "symbol": "args"
+                          },
+                          "val": {
+                            "vec": []
+                          }
+                        },
+                        {
+                          "key": {
                             "symbol": "function"
                           },
                           "val": {
                             "symbol": "success"
                           }
+                        },
+                        {
+                          "key": {
+                            "symbol": "instruction_budget"
+                          },
+                          "val": "void"
                         },
                         {
                           "key": {
@@ -393,11 +459,25 @@
                       "map": [
                         {
                           "key": {
+                            "symbol": "args"
+                          },
+                          "val": {
+                            "vec": []
+                          }
+                        },
+                        {
+                          "key": {
                             "symbol": "function"
                           },
                           "val": {
                             "symbol": "fail"
                           }
+                        },
+                        {
+                          "key": {
+                            "symbol": "instruction_budget"
+                          },
+                          "val": "void"
                         },
                         {
                           "key": {
@@ -421,11 +501,25 @@
                       "map": [
                         {
                           "key": {
+                            "symbol": "args"
+                          },
+                          "val": {
+                            "vec": []
+                          }
+                        },
+                        {
+                          "key": {
                             "symbol": "function"
                           },
                           "val": {
                             "symbol": "success"
                           }
+                        },
+                        {
+                          "key": {
+                            "symbol": "instruction_budget"
+                          },
+                          "val": "void"
                         },
                         {
                           "key": {
@@ -446,7 +540,17 @@
                       ]
                     }
                   ]
-                }
+                },
+                {
+                  "bool": false
+                },
+                {
+                  "bool": false
+                },
+                {
+                  "bool": false
+                },
+                "void"
               ]
             }
           }
@@ -514,6 +618,9 @@
             "data": {
               "vec": [
                 {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                },
+                {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
@@ -521,6 +628,9 @@
                 },
                 {
                   "bool": true
+                },
+                {
+                  "u32": 0
                 }
               ]
             }
@@ -648,6 +758,9 @@
             "data": {
               "vec": [
                 {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                },
+                {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
@@ -655,6 +768,9 @@
                 },
                 {
                   "bool": false
+                },
+                {
+                  "u32": 1
                 }
               ]
             }
@@ -723,6 +839,9 @@
             "data": {
               "vec": [
                 {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                },
+                {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
@@ -730,6 +849,45 @@
                 },
                 {
                   "bool": true
+                },
+                {
+                  "u32": 2
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "batch_executed"
+              }
+            ],
+            "data": {
+              "vec": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                },
+                {
+                  "u64": 0
+                },
+                {
+                  "u32": 2
+                },
+                {
+                  "u32": 1
+                },
+                {
+                  "u32": 3
                 }
               ]
             }
@@ -757,26 +915,137 @@
               "map": [
                 {
                   "key": {
-                    "symbol": "failed"
+                    "symbol": "failures"
                   },
                   "val": {
-                    "u32": 1
+                    "vec": [
+                      {
+                        "map": [
+                          {
+                            "key": {
+                              "symbol": "error"
+                            },
+                            "val": {
+                              "vec": [
+                                {
+                                  "symbol": "Custom"
+                                },
+                                {
+                                  "string": "invoke_failed"
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "index"
+                            },
+                            "val": {
+                              "u32": 1
+                            }
+                          }
+                        ]
+                      }
+                    ]
                   }
                 },
                 {
                   "key": {
-                    "symbol": "succeeded"
+                    "symbol": "successes"
                   },
                   "val": {
-                    "u32": 2
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "total"
-                  },
-                  "val": {
-                    "u32": 3
+                    "vec": [
+                      {
+                        "map": [
+                          {
+                            "key": {
+                              "symbol": "index"
+                            },
+                            "val": {
+                              "u32": 0
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "result"
+                            },
+                            "val": {
+                              "map": [
+                                {
+                                  "key": {
+                                    "symbol": "function"
+                                  },
+                                  "val": {
+                                    "symbol": "success"
+                                  }
+                                },
+                                {
+                                  "key": {
+                                    "symbol": "success"
+                                  },
+                                  "val": {
+                                    "bool": true
+                                  }
+                                },
+                                {
+                                  "key": {
+                                    "symbol": "target"
+                                  },
+                                  "val": {
+                                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                                  }
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      },
+                      {
+                        "map": [
+                          {
+                            "key": {
+                              "symbol": "index"
+                            },
+                            "val": {
+                              "u32": 2
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "result"
+                            },
+                            "val": {
+                              "map": [
+                                {
+                                  "key": {
+                                    "symbol": "function"
+                                  },
+                                  "val": {
+                                    "symbol": "success"
+                                  }
+                                },
+                                {
+                                  "key": {
+                                    "symbol": "success"
+                                  },
+                                  "val": {
+                                    "bool": true
+                                  }
+                                },
+                                {
+                                  "key": {
+                                    "symbol": "target"
+                                  },
+                                  "val": {
+                                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                                  }
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    ]
                   }
                 }
               ]
