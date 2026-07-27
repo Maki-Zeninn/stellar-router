@@ -224,6 +224,20 @@ pub const EVENT_ROLE_ADMIN_SET: &str = "role_admin_set";
 /// Standard event topic for an address being un-blacklisted
 pub const EVENT_ADDRESS_UNBLACKLISTED: &str = "address_unblacklisted";
 
+/// Failure reason string used when a call fails and an `instruction_budget` was set.
+///
+/// Passed as the payload of [`BatchItemError::Custom`] to distinguish budget-related
+/// failures from generic invocation failures. Use this constant instead of the raw
+/// string literal so that production code and tests share a single source of truth.
+pub const FAILURE_REASON_BUDGET_EXCEEDED: &str = "budget_exceeded";
+
+/// Failure reason string used when a call fails and no `instruction_budget` was set.
+///
+/// Passed as the payload of [`BatchItemError::Custom`] for generic invocation failures.
+/// Use this constant instead of the raw string literal so that production code and
+/// tests share a single source of truth.
+pub const FAILURE_REASON_INVOKE_FAILED: &str = "invoke_failed";
+
 /// Standard event topic for a role grant (pending or direct)
 pub const EVENT_ROLE_GRANT: &str = "role_grant";
 
