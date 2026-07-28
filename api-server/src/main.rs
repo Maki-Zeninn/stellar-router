@@ -180,15 +180,16 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Serves the generated OpenAPI spec as JSON at `/openapi.json`.
+async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
+    Json(ApiDoc::openapi())
+}
+
 /// Attach a unique `request_id` (UUID v4) to every request span and response header.
 ///
 /// All logs emitted while handling the request inherit the `request_id` field
 /// from the enclosing span, enabling correlation across log lines for a single
 /// request. The ID is also returned to the client in the `X-Request-Id` header.
-async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
-    Json(ApiDoc::openapi())
-}
-
 async fn request_id_middleware(req: Request<axum::body::Body>, next: Next) -> Response {
     let request_id = uuid::Uuid::new_v4().to_string();
     let method = req.method().clone();
