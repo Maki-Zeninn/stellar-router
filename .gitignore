@@ -1,14 +1,41 @@
 target/
 storage-profile.txt
+
+# Test snapshots and output
 **/test_snapshots/
 **/test_output.txt
-benches/src/scrap-menu/
-.DS_Store
+**/*.snap.new
+**/*.snap
+**/snapshots/
+
+# Build artifacts
 *.wasm
 artifacts/
+
+# Benchmarks scratch
+benches/src/scrap-menu/
+
+# Secrets and local config
 .env
 .env.*
+
+# Logs and temp files
 *.log
 *.tmp
 *.temp
 /tmp/
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Profiling / coverage output
+*.profraw
+*.profdata
+lcov.info
+coverage/
