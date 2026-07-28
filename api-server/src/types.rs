@@ -70,14 +70,6 @@ pub struct SimulationDetail {
     pub would_succeed: bool,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RouteBreakdown {
-    pub route_name: String,
-    pub version: u32,
-    pub target_contract: String,
-    pub function: String,
-}
 
 /// Machine-readable error codes for API error responses.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
@@ -179,9 +171,4 @@ pub struct SubscribeMessage {
     pub tx_id: String,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WsMessage {
-    pub msg_type: String,
-    pub data: serde_json::Value,
-}
+
