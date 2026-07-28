@@ -306,6 +306,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_request_id_middleware_sets_response_header() {
+        let registry = Registry::new();
+        let state = AppState { registry };
+        let app = Router::new()
+            .route("/health", get(health_handler))
+            .layer(middleware::from_fn(request_id_middleware))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            !request_id.is_empty(),
+            "expected non-empty x-request-id header"
+        );
+    }
+
+    #[tokio::test]
     async fn test_ready_returns_200_when_router_up_is_one() {
         let registry = Registry::new();
         // Register router_up gauge and set it to 1
