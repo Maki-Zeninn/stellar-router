@@ -1033,6 +1033,23 @@ impl RouterCore {
     /// The dependency is stored as a direct prerequisite for `route`. The
     /// dependency must already exist, and adding the edge must not introduce a
     /// cycle. Caller must be the admin.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `caller` - The address initiating the call; must be the admin.
+    /// * `route` - The route that will depend on `depends_on`.
+    /// * `depends_on` - The route that must exist and resolve before `route`.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`RouterError::Unauthorized`] — if `caller` is not the admin.
+    /// * [`RouterError::RouteNotFound`] — if `route` or `depends_on` does not exist.
+    /// * [`RouterError::CircularDependency`] — if `route` and `depends_on` are the
+    ///   same, or if adding the edge would create a dependency cycle.
+    /// * [`RouterError::RecursionLimitExceeded`] — if the existing dependency
+    ///   graph is too deep to safely validate for cycles.
     pub fn set_route_dependency(
         env: Env,
         caller: Address,
@@ -1081,6 +1098,17 @@ impl RouterCore {
     }
 
     /// Return the direct dependencies for a route.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `route` - The name of the route to look up.
+    ///
+    /// # Returns
+    /// A [`Vec<String>`] of the route names that `route` directly depends on,
+    /// in the order they were added. Empty if `route` has no dependencies.
+    ///
+    /// # Errors
+    /// * [`RouterError::RouteNotFound`] — if `route` does not exist.
     pub fn get_route_dependencies(env: Env, route: String) -> Result<Vec<String>, RouterError> {
         router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         if !env.storage().instance().has(&DataKey::Route(route.clone())) {
@@ -1091,6 +1119,26 @@ impl RouterCore {
     }
 
     /// Resolve a route together with all of its dependencies in dependency-first order.
+    ///
+    /// Walks the dependency graph rooted at `name` depth-first and returns each
+    /// resolved route paired with its address, ordered so that every
+    /// dependency appears before the routes that depend on it.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `name` - The name of the route to resolve, along with its dependencies.
+    ///
+    /// # Returns
+    /// A [`Vec<(String, Address)>`] of `(route_name, address)` pairs in
+    /// dependency-first order, including `name` itself last.
+    ///
+    /// # Errors
+    /// * [`RouterError::RouterPaused`] — if the router is globally paused.
+    /// * [`RouterError::RouteNotFound`] — if `name` or any of its dependencies
+    ///   does not exist.
+    /// * [`RouterError::RoutePaused`] — if `name` or any of its dependencies is paused.
+    /// * [`RouterError::CircularDependency`] — if the dependency graph contains a cycle.
+    /// * [`RouterError::RecursionLimitExceeded`] — if the dependency graph is too deep.
     pub fn resolve_with_dependencies(
         env: Env,
         name: String,

@@ -35,15 +35,21 @@ impl ValidationError {
 
 // ── Validation rules ──────────────────────────────────────────────────────────
 
-/// Validate a contract ID: must be a 56-character alphanumeric Stellar address.
+/// Required length of a Stellar contract ID (a base32-style strkey/address string).
+const STELLAR_CONTRACT_ID_LEN: usize = 56;
+
+/// Maximum allowed length of a route name.
+const MAX_ROUTE_NAME_LEN: usize = 64;
+
+/// Validate a contract ID: must be a `STELLAR_CONTRACT_ID_LEN`-character alphanumeric Stellar address.
 pub fn validate_contract_id(id: &str) -> Result<(), ValidationError> {
     if id.is_empty() {
         return Err(ValidationError::new("contract_id must not be empty"));
     }
-    if id.len() != 56 {
-        return Err(ValidationError::new(
-            "contract_id must be exactly 56 characters",
-        ));
+    if id.len() != STELLAR_CONTRACT_ID_LEN {
+        return Err(ValidationError::new(format!(
+            "contract_id must be exactly {STELLAR_CONTRACT_ID_LEN} characters"
+        )));
     }
     if !id.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err(ValidationError::new(
@@ -53,7 +59,7 @@ pub fn validate_contract_id(id: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-/// Validate a route name: non-empty, max 64 chars, alphanumeric + underscore/hyphen.
+/// Validate a route name: non-empty, max `MAX_ROUTE_NAME_LEN` chars, alphanumeric + underscore/hyphen.
 ///
 /// Not yet called from any handler — kept for validating route-name query
 /// params once an endpoint accepts one.
@@ -62,10 +68,10 @@ pub fn validate_route_name(name: &str) -> Result<(), ValidationError> {
     if name.is_empty() {
         return Err(ValidationError::new("route name must not be empty"));
     }
-    if name.len() > 64 {
-        return Err(ValidationError::new(
-            "route name must be 64 characters or fewer",
-        ));
+    if name.len() > MAX_ROUTE_NAME_LEN {
+        return Err(ValidationError::new(format!(
+            "route name must be {MAX_ROUTE_NAME_LEN} characters or fewer"
+        )));
     }
     if !name
         .chars()
@@ -108,7 +114,7 @@ mod tests {
 
     #[test]
     fn valid_contract_id() {
-        let id = "A".repeat(56);
+        let id = "A".repeat(STELLAR_CONTRACT_ID_LEN);
         assert!(validate_contract_id(&id).is_ok());
     }
 
@@ -124,7 +130,7 @@ mod tests {
 
     #[test]
     fn contract_id_with_special_chars_rejected() {
-        let id = format!("{}!", "A".repeat(55));
+        let id = format!("{}!", "A".repeat(STELLAR_CONTRACT_ID_LEN - 1));
         assert!(validate_contract_id(&id).is_err());
     }
 
@@ -140,7 +146,7 @@ mod tests {
 
     #[test]
     fn long_route_name_rejected() {
-        assert!(validate_route_name(&"a".repeat(65)).is_err());
+        assert!(validate_route_name(&"a".repeat(MAX_ROUTE_NAME_LEN + 1)).is_err());
     }
 
     #[test]
