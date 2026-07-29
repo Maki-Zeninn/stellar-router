@@ -7,7 +7,7 @@ test-all:
 	cargo test --workspace
 
 lint:
-	cargo clippy -- -D warnings
+	cargo clippy --workspace -- -D warnings
 
 build-wasm:
 	cargo build --target wasm32-unknown-unknown --release
