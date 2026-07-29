@@ -114,6 +114,9 @@ pub struct RouteScoreInput {
     pub score: RouteScore,
 }
 
+/// Maximum upper bound allowed for liquidity and reliability scores.
+pub const MAX_SCORE_VALUE: u32 = 100;
+
 /// Scoring attributes for a route used in path selection.
 ///
 /// Higher scores indicate more preferred routes. The composite score is
@@ -122,11 +125,11 @@ pub struct RouteScoreInput {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct RouteScore {
-    /// Liquidity depth score (0ΓÇô100). Higher = more liquid.
+    /// Liquidity depth score (0–[`MAX_SCORE_VALUE`]). Higher = more liquid.
     pub liquidity_score: u32,
     /// Fee rate in basis points (e.g., 30 = 0.30%). Lower = cheaper.
     pub fee_bps: u32,
-    /// Historical reliability score (0ΓÇô100). Higher = more reliable.
+    /// Historical reliability score (0–[`MAX_SCORE_VALUE`]). Higher = more reliable.
     pub reliability_score: u32,
 }
 
@@ -215,9 +218,8 @@ pub enum RouterError {
     InvalidTtlExtension = 15,
     RecursionLimitExceeded = 16,
     TooManyRoutes = 17,
-    RecursionLimitExceeded = 15,
     /// `fee_divisor` must be positive (> 0) when configuring scoring weights.
-    InvalidScoringWeights = 16,
+    InvalidScoringWeights = 18,
 }
 
 /// Maximum allowed recursion depth for dependency resolution.
@@ -1852,7 +1854,7 @@ impl RouterCore {
             return Err(RouterError::RouteNotFound);
         }
 
-        if score.liquidity_score > 100 || score.reliability_score > 100 {
+        if score.liquidity_score > MAX_SCORE_VALUE || score.reliability_score > MAX_SCORE_VALUE {
             return Err(RouterError::InvalidScore);
         }
 
@@ -1896,7 +1898,9 @@ impl RouterCore {
                 return Err(RouterError::RouteNotFound);
             }
 
-            if item.score.liquidity_score > 100 || item.score.reliability_score > 100 {
+            if item.score.liquidity_score > MAX_SCORE_VALUE
+                || item.score.reliability_score > MAX_SCORE_VALUE
+            {
                 return Err(RouterError::InvalidScore);
             }
         }
@@ -2389,6 +2393,9 @@ impl RouterCore {
             ),
             RouterError::RecursionLimitExceeded => router_common::BatchItemError::Custom(
                 soroban_sdk::String::from_str(env, "RecursionLimitExceeded"),
+            ),
+            RouterError::InvalidScoringWeights => router_common::BatchItemError::Custom(
+                soroban_sdk::String::from_str(env, "InvalidScoringWeights"),
             ),
         }
     }
