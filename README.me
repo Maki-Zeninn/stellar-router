@@ -1,0 +1,82 @@
+# Stellar Router Security and Robustness Update
+
+This document summarizes the recent hardening changes applied to the timelock and registry contracts in this workspace. The updates focus on preventing silent security bypasses, avoiding arithmetic overflow traps, and making contract behavior more predictable for administrators and integrators.
+
+## Overview
+
+Two important issues were addressed in the router contracts:
+
+1. The timelock contract could be initialized or reconfigured with a zero minimum delay, which effectively removed the intended delay protection for queued operations.
+2. The registry contract’s caret and tilde version constraints could overflow when evaluating the maximum supported version value, causing the contract call to trap instead of returning a clean error result.
+
+These changes ensure that the contracts enforce their intended invariants consistently and fail gracefully when given invalid or unsafe inputs.
+
+## Timelock contract updates
+
+### Minimum delay validation
+
+The timelock contract now refuses to initialize with a zero minimum delay. This prevents a deployment or configuration mistake from creating a contract that appears functional but offers no real protection against immediate execution.
+
+The same rule now applies when an admin updates the minimum delay. A zero value is rejected with the existing `DelayTooShort` error. This ensures that any future configuration change cannot silently weaken the delay protection after deployment.
+
+In addition, `queue()` now checks the stored minimum delay and rejects the operation if that configured value is zero. This provides a second layer of defense in case an older deployment or manually modified storage state still contains a zero minimum delay.
+
+### Overflow-safe ETA calculation
+
+Queueing an operation previously computed the ETA using plain addition:
+
+- `eta = ledger_timestamp + delay`
+
+If the sum overflowed `u64`, the contract call could trap. That behavior has been replaced with checked arithmetic. If the requested delay would overflow the ETA calculation, the contract now returns a typed `DelayTooLong` error instead of aborting.
+
+This makes the contract more robust and aligns the timelock with the rest of the codebase’s Result-based error handling.
+
+## Registry contract updates
+
+### Overflow-safe version constraints
+
+The registry contract evaluates semver-style constraints such as:
+
+- `>=X`
+- `<=X`
+- `>X`
+- `<X`
+- `^X`
+- `~X`
+
+The caret and tilde operators previously constructed an upper bound using unchecked addition. For a base value of `u32::MAX`, that could overflow and trap the contract. This is especially relevant because the registry allows registering versions up to `u32::MAX`.
+
+The implementation now handles this case safely. When the base version is `u32::MAX`, the caret and tilde constraints are evaluated as an exact-match range for the maximum supported version rather than attempting an overflowing upper-bound calculation.
+
+This preserves the intended semantics of these constraints while preventing unexpected contract aborts.
+
+## Error behavior improvements
+
+The new behavior improves both correctness and usability:
+
+- Invalid or unsafe delay settings now fail with explicit contract errors.
+- Overflow conditions no longer panic the transaction path.
+- Administrators receive predictable failures instead of silent misconfiguration or hard aborts.
+
+These changes make the contracts safer to operate in production and easier to reason about during deployment and maintenance.
+
+## Regression coverage
+
+The updates include regression tests that exercise the previously problematic cases:
+
+- initialization and configuration with zero minimum delay
+- queueing with a zero minimum delay stored in state
+- overflow of ETA computation for very large delays
+- caret and tilde constraint evaluation for `u32::MAX`
+
+These tests help ensure the fixes remain in place as the contracts evolve.
+
+## Impact summary
+
+The resulting behavior is more secure and more consistent:
+
+- delayed execution is no longer accidentally disabled by a zero minimum delay
+- oversized delays fail gracefully rather than trapping
+- version constraints remain usable even at the highest supported version boundary
+
+This work strengthens the reliability of the router contracts and reduces the chance of misconfiguration causing a silent security regression.
