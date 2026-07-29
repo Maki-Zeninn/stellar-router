@@ -72,6 +72,8 @@ integration-tests/
 - `test_stellar_cli_available` - Verify CLI installation
 - `test_wasm_contracts_built` - Verify WASM files exist
 - `test_account_generation_and_funding` - Test account setup
+- `test_router_core_register_and_resolve` - End-to-end register_route + resolve check
+- `test_middleware_rate_limit_exceeded_then_resets` - End-to-end rate-limit enforcement check
 
 ## Test Utilities
 
