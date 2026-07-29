@@ -2,12 +2,12 @@ name: Metrics Exporter CI
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
     paths:
       - 'metrics/**'
       - '.github/workflows/metrics-exporter.yml'
   pull_request:
-    branches: [ main, develop ]
+    branches: [main, develop]
     paths:
       - 'metrics/**'
       - '.github/workflows/metrics-exporter.yml'

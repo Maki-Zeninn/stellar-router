@@ -605,16 +605,8 @@ impl RouterCore {
             return Err(RouterError::RouteNotFound);
         }
 
-        let route_names = Self::get_route_names(&env);
-        for dependent_name in route_names.iter() {
-            if dependent_name != name {
-                let dependencies = Self::get_dependencies_for_route(&env, dependent_name.clone());
-                for dependency in dependencies.iter() {
-                    if dependency == name {
-                        return Err(RouterError::RouteInUse);
-                    }
-                }
-            }
+        if Self::route_has_dependents(&env, &name) {
+            return Err(RouterError::RouteInUse);
         }
 
         env.storage()
@@ -2469,21 +2461,8 @@ impl RouterCore {
             return Err(RouterError::RouteNotFound);
         }
 
-        let route_names = Self::get_route_names(env);
-        for dependent_name in route_names.iter() {
-            if dependent_name != name {
-                let dependencies = Self::get_dependencies_for_route(env, dependent_name.clone());
-                let mut depends_on_removed = false;
-                for dependency in dependencies.iter() {
-                    if dependency == name {
-                        depends_on_removed = true;
-                        break;
-                    }
-                }
-                if depends_on_removed {
-                    return Err(RouterError::RouteInUse);
-                }
-            }
+        if Self::route_has_dependents(env, &name) {
+            return Err(RouterError::RouteInUse);
         }
 
         env.storage()
@@ -2524,6 +2503,30 @@ impl RouterCore {
         );
 
         Ok(())
+    }
+
+    /// Checks if any other route depends on the given route name.
+    ///
+    /// Scans all registered routes to determine if the specified route is
+    /// listed as a dependency by any other route.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `name` - The route name to check for dependents.
+    ///
+    /// # Returns
+    /// `true` if at least one other route depends on this route, `false` otherwise.
+    fn route_has_dependents(env: &Env, name: &String) -> bool {
+        for dependent_name in Self::get_route_names(env).iter() {
+            if dependent_name != *name {
+                for dependency in Self::get_dependencies_for_route(env, dependent_name.clone()).iter() {
+                    if dependency == *name {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 }
 

@@ -6,6 +6,12 @@ use tracing::warn;
 
 use crate::types::{RouteEntryResponse, RouteMetadataResponse};
 
+// Fee estimation constants
+const BASE_FEE: i64 = 100;
+const SURGE_THRESHOLD_BPS: u32 = 8_000;
+const SURGE_MULTIPLIER: u32 = 200;
+const NORMAL_MULTIPLIER: u32 = 100;
+
 #[derive(Debug, Clone)]
 pub struct SorobanRpcClient {
     pub rpc_url: String,
@@ -133,11 +139,11 @@ impl SorobanRpcClient {
                         (1_000, false)
                     }
                 };
-                let base_fee: i64 = 100;
-                let (surge_multiplier, high_load) = if network_load_bps >= 8_000 {
-                    (200u32, true)
+                let base_fee = BASE_FEE;
+                let (surge_multiplier, high_load) = if network_load_bps >= SURGE_THRESHOLD_BPS {
+                    (SURGE_MULTIPLIER, true)
                 } else {
-                    (100u32, false)
+                    (NORMAL_MULTIPLIER, false)
                 };
                 let total_fee = (base_fee + resource_fee) * surge_multiplier as i64 / 100;
                 Ok(FeeBreakdown {
@@ -418,7 +424,7 @@ impl SorobanRpcClient {
     }
 
     fn heuristic_estimate(amount: i64, network_load_bps: u32) -> FeeBreakdown {
-        let base_fee: i64 = 100;
+        let base_fee = BASE_FEE;
         let resource_fee: i64 = {
             let scaled = amount / 1_000;
             if scaled < 100 {
@@ -427,10 +433,10 @@ impl SorobanRpcClient {
                 scaled
             }
         };
-        let (surge_multiplier, high_load) = if network_load_bps >= 8_000 {
-            (200u32, true)
+        let (surge_multiplier, high_load) = if network_load_bps >= SURGE_THRESHOLD_BPS {
+            (SURGE_MULTIPLIER, true)
         } else {
-            (100u32, false)
+            (NORMAL_MULTIPLIER, false)
         };
         let total_fee = (base_fee + resource_fee) * surge_multiplier as i64 / 100;
         FeeBreakdown {
