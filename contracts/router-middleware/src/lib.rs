@@ -2860,4 +2860,65 @@ mod tests {
             "reentrancy guard on route_a must not affect route_b"
         );
     }
+
+    // ── check_caller_rate_limit tests ───────────────────────────────────────
+
+    #[test]
+    fn test_check_caller_rate_limit_no_override_returns_true() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0, &0);
+        let caller = Address::generate(&env);
+
+        // No per-caller override configured — route-level default applies,
+        // so check_caller_rate_limit returns Ok(true).
+        assert!(client.check_caller_rate_limit(&route, &caller));
+    }
+
+    #[test]
+    fn test_check_caller_rate_limit_under_limit_returns_true_over_limit_false() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &10, &60, &true, &0, &0, &0, &0);
+
+        let caller = Address::generate(&env);
+
+        // Set a per-caller override: 2 calls per 60s
+        client.set_caller_rate_limit(&admin, &route, &caller, &2, &60);
+
+        // Under the override limit
+        assert!(client.check_caller_rate_limit(&route, &caller));
+
+        // Exhaust the override limit
+        client.pre_call(&caller, &route);
+        client.pre_call(&caller, &route);
+
+        // At the override limit — must return false
+        assert!(!client.check_caller_rate_limit(&route, &caller));
+    }
+
+    #[test]
+    fn test_check_caller_rate_limit_resets_after_window() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &10, &60, &true, &0, &0, &0, &0);
+
+        let caller = Address::generate(&env);
+
+        // Set a per-caller override: 2 calls per 60s
+        client.set_caller_rate_limit(&admin, &route, &caller, &2, &60);
+
+        // Exhaust the override limit
+        client.pre_call(&caller, &route);
+        client.pre_call(&caller, &route);
+
+        // At the override limit
+        assert!(!client.check_caller_rate_limit(&route, &caller));
+
+        // Advance past the override's window
+        env.ledger().with_mut(|l| l.timestamp += 61);
+
+        // Window elapsed — limit should reset to true
+        assert!(client.check_caller_rate_limit(&route, &caller));
+    }
 }
