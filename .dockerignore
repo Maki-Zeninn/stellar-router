@@ -9,6 +9,7 @@ benches/src/scrap-menu/
 
 # Rust build artifacts
 *.wasm
+artifacts/
 
 # Logs
 *.log
