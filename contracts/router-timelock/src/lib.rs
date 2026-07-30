@@ -101,6 +101,8 @@ pub enum TimelockError {
     /// has values that produce overflow (should not occur after the
     /// `GracePeriodTooLong` guard was introduced, but kept as a safety net).
     ExpiryOverflow = 16,
+    /// `ledger_timestamp + delay` overflows `u64`.
+    DelayTooLong = 17,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -133,6 +135,9 @@ impl RouterTimelock {
     ) -> Result<(), TimelockError> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(TimelockError::AlreadyInitialized);
+        }
+        if min_delay == 0 {
+            return Err(TimelockError::DelayTooShort);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::MinDelay, &min_delay);
@@ -167,7 +172,7 @@ impl RouterTimelock {
             .get(&DataKey::MinDelay)
             .ok_or(TimelockError::NotInitialized)?;
 
-        if delay < min_delay {
+        if min_delay == 0 || delay < min_delay {
             return Err(TimelockError::DelayTooShort);
         }
 
@@ -193,7 +198,11 @@ impl RouterTimelock {
             return Err(TimelockError::QueueFull);
         }
 
-        let eta = env.ledger().timestamp() + delay;
+        let eta = env
+            .ledger()
+            .timestamp()
+            .checked_add(delay)
+            .ok_or(TimelockError::DelayTooLong)?;
 
         // Derive op_id from description bytes + target bytes + eta
         let mut preimage = Bytes::new(&env);
@@ -658,6 +667,10 @@ impl RouterTimelock {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, TimelockError)?;
 
+        if new_min_delay == 0 {
+            return Err(TimelockError::DelayTooShort);
+        }
+
         let old_min_delay: u64 = env
             .storage()
             .instance()
@@ -900,24 +913,24 @@ mod tests {
         let contract_id = env.register_contract(None, RouterTimelock);
         let client = RouterTimelockClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        client.initialize(&admin, &0, &1000); // min_delay = 0 for full control over eta
+        client.initialize(&admin, &1, &1000);
 
         let target = Address::generate(&env);
         let desc = String::from_str(&env, "upgrade oracle");
         let deps: Vec<Bytes> = Vec::new(&env);
 
-        let op_id = client.queue(&admin, &desc, &target, &0, &GRACE, &deps);
-        // delay is 0, so now == eta already; execute immediately.
+        let op_id = client.queue(&admin, &desc, &target, &1, &GRACE, &deps);
+        env.ledger().with_mut(|l| l.timestamp += 1);
         client.execute(&admin, &op_id);
         let op = client.get_op(&op_id).unwrap();
         assert!(op.executed);
 
-        // Re-queue with identical description/target and a delay of 0 again.
-        // Since the ledger timestamp hasn't advanced, this reproduces the
+        // Re-queue with identical description/target and the same delay again.
+        // Since the ledger timestamp has not advanced further, this reproduces the
         // exact same (description, target, eta) triple and thus the same
         // op_id — this must be rejected, not silently reset the already
         // executed op back to pending.
-        let result = client.try_queue(&admin, &desc, &target, &0, &GRACE, &deps);
+        let result = client.try_queue(&admin, &desc, &target, &1, &GRACE, &deps);
         assert_eq!(result, Err(Ok(TimelockError::AlreadyQueued)));
 
         let op_after = client.get_op(&op_id).unwrap();
@@ -1097,6 +1110,25 @@ mod tests {
     // ── validation ────────────────────────────────────────────────────────────
 
     #[test]
+    fn test_initialize_rejects_zero_min_delay() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterTimelock);
+        let client = RouterTimelockClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        let result = client.try_initialize(&admin, &0, &1000);
+        assert_eq!(result, Err(Ok(TimelockError::DelayTooShort)));
+    }
+
+    #[test]
+    fn test_set_min_delay_rejects_zero() {
+        let (env, admin, client) = setup();
+        let result = client.try_set_min_delay(&admin, &0);
+        assert_eq!(result, Err(Ok(TimelockError::DelayTooShort)));
+    }
+
+    #[test]
     fn test_delay_too_short_fails() {
         let (env, admin, client) = setup();
         let target = Address::generate(&env);
@@ -1105,6 +1137,24 @@ mod tests {
         // min_delay is 3600, passing 100 should fail
         let result = client.try_queue(&admin, &desc, &target, &100, &GRACE, &deps);
         assert_eq!(result, Err(Ok(TimelockError::DelayTooShort)));
+    }
+
+    #[test]
+    fn test_delay_overflow_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterTimelock);
+        let client = RouterTimelockClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &1, &1000);
+
+        env.ledger().with_mut(|l| l.timestamp = u64::MAX);
+
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "overflow delay");
+        let deps = Vec::new(&env);
+        let result = client.try_queue(&admin, &desc, &target, &1, &GRACE, &deps);
+        assert_eq!(result, Err(Ok(TimelockError::DelayTooLong)));
     }
 
     #[test]

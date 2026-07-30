@@ -903,21 +903,29 @@ impl RouterRegistry {
                 .map_err(|_| RegistryError::InvalidConstraint)?;
             Ok(version < max)
         } else if let Some(rest) = constraint_str.strip_prefix("^") {
-            // Caret: allows changes that do not modify the left-most non-zero digit
+            // Caret: allows changes that do not modify the left-most non-zero digit.
+            // Guard the upper bound so `u32::MAX` does not overflow when we form the
+            // exclusive upper bound for the range check.
             let base = rest
                 .parse::<u32>()
                 .map_err(|_| RegistryError::InvalidConstraint)?;
             if base == 0 {
                 Ok(version >= base && version < 1)
+            } else if base == u32::MAX {
+                Ok(version == u32::MAX)
             } else {
                 Ok(version >= base && version < base + 1)
             }
         } else if let Some(rest) = constraint_str.strip_prefix("~") {
-            // Tilde: allows patch-level changes
+            // Tilde: allows patch-level changes.
             let base = rest
                 .parse::<u32>()
                 .map_err(|_| RegistryError::InvalidConstraint)?;
-            Ok(version >= base && version < base + 1)
+            if base == u32::MAX {
+                Ok(version == u32::MAX)
+            } else {
+                Ok(version >= base && version < base + 1)
+            }
         } else {
             // Try exact match
             let exact = constraint_str
@@ -1763,6 +1771,23 @@ mod tests {
         let gte_constraint = String::from_str(&env, ">=4294967295");
         let result_gte = client.get_latest_with_constraint(&name, &Some(gte_constraint));
         assert_eq!(result_gte.version, large_v);
+    }
+
+    #[test]
+    fn test_get_latest_with_constraint_caret_max_version_matches_exactly() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        let large_v = u32::MAX;
+        client.register(&admin, &name, &addr, &large_v);
+
+        let caret_constraint = String::from_str(&env, "^4294967295");
+        let caret_result = client.get_latest_with_constraint(&name, &Some(caret_constraint));
+        assert_eq!(caret_result.version, large_v);
+
+        let tilde_constraint = String::from_str(&env, "~4294967295");
+        let tilde_result = client.get_latest_with_constraint(&name, &Some(tilde_constraint));
+        assert_eq!(tilde_result.version, large_v);
     }
 
     #[test]
