@@ -480,8 +480,11 @@ fn test_pipeline_circuit_breaker() {
 
     // Next pre_call should be blocked (circuit open)
     let result = s.middleware.try_pre_call(&user, &route);
-    // The circuit should be open now
-    // Note: The actual error depends on middleware implementation
+    assert_eq!(
+        result,
+        Err(Ok(router_middleware::MiddlewareError::CircuitOpen)),
+        "circuit breaker should be open after failure_threshold failures"
+    );
     println!("\n✓ Circuit breaker behavior verified");
 }
 

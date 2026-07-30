@@ -8,7 +8,7 @@ Thank you for your interest in contributing! This document covers everything you
 
 | Tool | Install |
 |---|---|
-| Rust (stable, 1.75+) | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| Rust (stable, 1.88+) | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
 | wasm32 target | `rustup target add wasm32-unknown-unknown` |
 | Stellar CLI | `cargo install --locked stellar-cli` |
 | Docker (optional) | [docs.docker.com](https://docs.docker.com/get-docker/) |
