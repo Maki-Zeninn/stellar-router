@@ -36,14 +36,45 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace -- -D warnings
 
-      - name: Run tests
-        run: cargo test --workspace --verbose
-
-      - name: Test router-common
-        run: cargo test -p router-common --verbose
-
       - name: Test router-metrics-exporter
         run: cargo test --manifest-path metrics/Cargo.toml --verbose
+
+  contract-tests:
+    name: Contract Tests
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        contract:
+          - router-common
+          - router-core
+          - router-registry
+          - router-access
+          - router-middleware
+          - router-timelock
+          - router-multicall
+          - router-quote
+          - router-execution
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run tests for ${{ matrix.contract }}
+        run: cargo test -p ${{ matrix.contract }} --verbose
 
   storage-profiling:
     name: Storage Profiling
@@ -105,7 +136,7 @@ jobs:
   build:
     name: Build WASM
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, contract-tests]
     steps:
       - uses: actions/checkout@v4
 
@@ -136,7 +167,7 @@ jobs:
   local-integration-tests:
     name: Local Integration Tests (In-Process)
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, contract-tests]
     steps:
       - uses: actions/checkout@v4
 
@@ -223,7 +254,7 @@ jobs:
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, contract-tests]
     steps:
       - uses: actions/checkout@v4
 
