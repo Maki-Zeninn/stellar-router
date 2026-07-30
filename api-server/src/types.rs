@@ -19,6 +19,8 @@ pub struct SimulateRequest {
     #[serde(default = "default_amount")]
     pub amount: i64,
     /// Fee rate in basis points (default 30 = 0.30%)
+    /// Note: This field is currently unused and reserved for future use.
+    /// Fee estimation currently uses hardcoded constants.
     #[serde(default = "default_fee_bps")]
     pub fee_bps: u32,
     /// Network load in basis points for surge pricing (0–10000)
