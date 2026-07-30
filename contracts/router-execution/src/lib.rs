@@ -1707,4 +1707,44 @@ mod tests {
         assert!(evt_success);
         assert_eq!(evt_attempts, 2);
     }
+
+    // ── Issue #956: simulate() success path coverage ───────────────────────────
+    //
+    // The existing simulate tests (`test_simulate_nonexistent_contract_fails`,
+    // `test_simulate_returns_message_on_failure`) only exercise the failure
+    // branch. This test registers a real contract so `try_invoke_contract`
+    // returns `Ok(_)`, exercising the success branch of `simulate()` where
+    // `sim_ok == true`, `message == "simulation succeeded"`,
+    // `success == true`, and `would_fail == false`.
+
+    #[test]
+    fn test_simulate_success_path() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockTarget);
+        let caller = Address::generate(&env);
+        let function = Symbol::new(&env, "ping");
+
+        let result = client.simulate(&caller, &mock_id, &function, &Vec::new(&env));
+        assert!(result.success);
+        assert!(!result.would_fail);
+        assert_eq!(
+            result.message,
+            soroban_sdk::String::from_str(&env, "simulation succeeded")
+        );
+
+        // A `simulation_result` event should be emitted with success=true.
+        let all_events = env.events().all();
+        let sim_event = all_events
+            .iter()
+            .find(|e| {
+                let topic: Symbol = e.1.get(0).unwrap().into_val(&env);
+                topic == Symbol::new(&env, router_common::EVENT_SIMULATION_RESULT)
+            })
+            .expect("simulation_result event not found");
+        let (evt_target, evt_function, evt_success): (Address, Symbol, bool) =
+            sim_event.2.into_val(&env);
+        assert_eq!(evt_target, mock_id);
+        assert_eq!(evt_function, function);
+        assert!(evt_success);
+    }
 }
