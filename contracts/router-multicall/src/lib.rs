@@ -320,8 +320,11 @@ impl RouterMulticall {
                     return Err(MulticallError::RequiredCallFailed);
                 }
                 if fail_fast {
-                    env.storage().instance().remove(&DataKey::Executing);
-                    return Ok(result);
+                    // Count this processed call, then exit the loop so the
+                    // normal Ok finalization path still increments
+                    // TotalBatches and emits batch_executed.
+                    call_index += 1;
+                    break;
                 }
             }
 
@@ -1483,6 +1486,77 @@ mod tests {
         // Batch counter still increments — the batch "completed" (all optional
         // failures don't abort the batch)
         assert_eq!(client.total_batches(), 1);
+    }
+
+    /// fail_fast=true with optional failures — verify the batch stops at the
+    /// first optional failure, returns Ok (not an error), increments the batch
+    /// counter, and does not execute remaining calls.
+    #[test]
+    fn test_fail_fast_stops_at_first_optional_failure() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        // Call 0: optional + success → continues
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: false,
+            instruction_budget: None,
+            args: Vec::new(&env),
+        });
+        // Call 1: optional + fail → abort here when fail_fast=true
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "fail"),
+            required: false,
+            instruction_budget: None,
+            args: Vec::new(&env),
+        });
+        // Call 2: should never be reached
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: false,
+            instruction_budget: None,
+            args: Vec::new(&env),
+        });
+
+        let summary = client.execute_batch(&caller, &calls, &false, &false, &true, &None);
+        let (total, succeeded, failed) = batch_counts(&summary);
+        assert_eq!(total, 2, "only calls 0-1 should be present in the result");
+        assert_eq!(succeeded, 1);
+        assert_eq!(failed, 1);
+        // fail_fast returns Ok — the batch completed early but still counts
+        assert_eq!(client.total_batches(), 1);
+
+        let all_events = env.events().all();
+        let call_result_count = all_events
+            .iter()
+            .filter(|(_, topics, _)| {
+                topics
+                    .get(0)
+                    .map(|v| Symbol::from_val(&env, &v) == Symbol::new(&env, "call_result"))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(
+            call_result_count, 2,
+            "only 2 call_result events should be emitted (call index 2 never reached)"
+        );
+
+        // Reentrancy guard must be cleared after fail_fast early exit
+        let mut ok_calls = Vec::new(&env);
+        ok_calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: false,
+            instruction_budget: None,
+            args: Vec::new(&env),
+        });
+        let second = client.try_execute_batch(&caller, &ok_calls, &false, &false, &false, &None);
+        assert!(second.is_ok());
     }
 
     /// 5. Alternating required/optional with failures — verify execution stops
