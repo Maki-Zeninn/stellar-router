@@ -8,8 +8,9 @@
 //! is exceeded.
 
 use std::{
+    collections::VecDeque,
     net::SocketAddr,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 

@@ -22,6 +22,8 @@ use axum::{
 use prometheus::{Encoder, Registry, TextEncoder};
 use std::net::SocketAddr;
 use tracing::{info, info_span, Instrument};
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::auth::AuthConfig;
 use crate::logging::new_request_id;
@@ -47,6 +49,7 @@ pub async fn serve(listen: String, registry: Registry, limiter: RateLimiter) -> 
     let nonce_cache = NonceCache::new(replay_config);
 
     let app = Router::new()
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .route("/metrics", get(metrics_handler))
         .route("/health", get(health_handler))
         .route("/ready", get(ready_handler))
@@ -209,6 +212,7 @@ mod tests {
 
         let state = AppState { registry };
         Router::new()
+            .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
             .route("/metrics", get(metrics_handler))
             .route("/health", get(health_handler))
             .with_state(state)
@@ -359,5 +363,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_swagger_ui_returns_non_404() {
+        let app = make_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/swagger-ui/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::NOT_FOUND);
     }
 }
