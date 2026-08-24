@@ -20,6 +20,13 @@
 //! - [`extend_instance_ttl`] — instance-storage TTL extension wrapper
 //! - [`StorageHelper`] — trait with default implementations of the above
 //!
+//! ## Batch Result Types
+//! - [`BatchResult`] / [`BatchCallResult`] — standardized per-index success/failure tracking for batch operations
+//! - [`BatchItemError`] — structured error variants for batch item failures
+//!
+//! ## String Helpers
+//! - [`is_whitespace_only`] — checks whether a string is empty or all ASCII whitespace
+//!
 //! ## Event Topic Naming Convention
 //!
 //! All event topics across stellar-router contracts follow these rules:
@@ -118,9 +125,6 @@ pub const EVENT_ROLE_REVOKED: &str = "role_revoked";
 /// Standard event topic for role parent assignments
 pub const EVENT_ROLE_PARENT_SET: &str = "role_parent_set";
 
-/// Standard event topic for role parent removals
-pub const EVENT_ROLE_PARENT_REMOVED: &str = "role_parent_removed";
-
 /// Standard event topic for address blacklisting
 pub const EVENT_ADDRESS_BLACKLISTED: &str = "address_blacklisted";
 
@@ -138,9 +142,6 @@ pub const EVENT_SIMULATION_RESULT: &str = "simulation_result";
 
 /// Standard event topic for fee estimations
 pub const EVENT_FEE_ESTIMATED: &str = "fee_estimated";
-
-/// Standard event topic for quote generation
-pub const EVENT_QUOTE_GENERATED: &str = "quote_generated";
 
 /// Standard event topic for pre-call middleware hooks
 pub const EVENT_PRE_CALL: &str = "pre_call";

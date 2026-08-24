@@ -48,7 +48,9 @@ use logging::init_logging;
 use metrics::RouterMetrics;
 use rate_limit::{config_from_env, RateLimiter};
 use server::serve;
-use validation::{validate_contract_id, validate_listen_addr, validate_scrape_interval};
+use validation::{
+    validate_contract_id, validate_listen_addr, validate_rpc_timeout, validate_scrape_interval,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -63,6 +65,8 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("invalid listen address: {}", e.message))?;
     validate_scrape_interval(args.scrape_interval_secs)
         .map_err(|e| anyhow::anyhow!("invalid scrape interval: {}", e.message))?;
+    validate_rpc_timeout(args.rpc_timeout_secs)
+        .map_err(|e| anyhow::anyhow!("invalid RPC timeout: {}", e.message))?;
     for id in [
         &args.core_contract_id,
         &args.middleware_contract_id,

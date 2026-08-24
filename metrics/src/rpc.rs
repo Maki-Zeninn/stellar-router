@@ -173,7 +173,7 @@ impl SorobanRpcClient {
     /// Call `getEvents` to fetch contract events matching the given topic filters.
     ///
     /// `contract_id` — the contract whose events to query.
-    /// `topic_filters` — list of topic symbol strings to match (e.g. `["quote_generated"]`).
+    /// `topic_filters` — list of topic symbol strings to match (e.g. `["quote_calculated"]`).
     /// `start_ledger` — earliest ledger to include (0 = let the RPC choose).
     pub async fn get_events(
         &self,

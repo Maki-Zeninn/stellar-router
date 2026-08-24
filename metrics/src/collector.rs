@@ -66,76 +66,67 @@ impl Collector {
     /// Scrape all configured contracts.  Returns `true` if every scrape
     /// succeeded, `false` if any failed.
     async fn scrape_all(&self, client: &dyn RpcClient) -> bool {
-        let mut all_ok = true;
+        let core_ok = self
+            .scrape_and_record(
+                &self.args.core_contract_id,
+                "core",
+                self.scrape_core(client, &self.args.core_contract_id),
+            )
+            .await;
+        let middleware_ok = self
+            .scrape_and_record(
+                &self.args.middleware_contract_id,
+                "middleware",
+                self.scrape_middleware(client, &self.args.middleware_contract_id),
+            )
+            .await;
+        let registry_ok = self
+            .scrape_and_record(
+                &self.args.registry_contract_id,
+                "registry",
+                self.scrape_registry(client, &self.args.registry_contract_id),
+            )
+            .await;
+        let quote_ok = self
+            .scrape_and_record(
+                &self.args.quote_contract_id,
+                "quote",
+                self.scrape_quote(client, &self.args.quote_contract_id),
+            )
+            .await;
+        let execution_ok = self
+            .scrape_and_record(
+                &self.args.execution_contract_id,
+                "execution",
+                self.scrape_execution(client, &self.args.execution_contract_id),
+            )
+            .await;
 
-        if !self.args.core_contract_id.is_empty() {
-            if let Err(e) = self.scrape_core(client, &self.args.core_contract_id).await {
-                warn!(contract = %self.args.core_contract_id, "core scrape failed: {e:#}");
-                self.metrics
-                    .scrape_errors_total
-                    .with_label_values(&[&self.args.core_contract_id])
-                    .inc();
-                all_ok = false;
-            }
+        core_ok && middleware_ok && registry_ok && quote_ok && execution_ok
+    }
+
+    /// Scrape a single contract and record the outcome: a no-op success when
+    /// `contract_id` is unconfigured, or on failure a warn log plus an
+    /// increment of `scrape_errors_total`. Returns `true` if the scrape
+    /// succeeded (or was skipped), `false` if it failed.
+    async fn scrape_and_record(
+        &self,
+        contract_id: &str,
+        label: &str,
+        scrape: impl std::future::Future<Output = Result<()>>,
+    ) -> bool {
+        if contract_id.is_empty() {
+            return true;
         }
-
-        if !self.args.middleware_contract_id.is_empty() {
-            if let Err(e) = self
-                .scrape_middleware(client, &self.args.middleware_contract_id)
-                .await
-            {
-                warn!(contract = %self.args.middleware_contract_id, "middleware scrape failed: {e:#}");
-                self.metrics
-                    .scrape_errors_total
-                    .with_label_values(&[&self.args.middleware_contract_id])
-                    .inc();
-                all_ok = false;
-            }
+        if let Err(e) = scrape.await {
+            warn!(contract_id, "{label} scrape failed: {e:#}");
+            self.metrics
+                .scrape_errors_total
+                .with_label_values(&[contract_id])
+                .inc();
+            return false;
         }
-
-        if !self.args.registry_contract_id.is_empty() {
-            if let Err(e) = self
-                .scrape_registry(client, &self.args.registry_contract_id)
-                .await
-            {
-                warn!(contract = %self.args.registry_contract_id, "registry scrape failed: {e:#}");
-                self.metrics
-                    .scrape_errors_total
-                    .with_label_values(&[&self.args.registry_contract_id])
-                    .inc();
-                all_ok = false;
-            }
-        }
-
-        if !self.args.quote_contract_id.is_empty() {
-            if let Err(e) = self
-                .scrape_quote(client, &self.args.quote_contract_id)
-                .await
-            {
-                warn!(contract = %self.args.quote_contract_id, "quote scrape failed: {e:#}");
-                self.metrics
-                    .scrape_errors_total
-                    .with_label_values(&[&self.args.quote_contract_id])
-                    .inc();
-                all_ok = false;
-            }
-        }
-
-        if !self.args.execution_contract_id.is_empty() {
-            if let Err(e) = self
-                .scrape_execution(client, &self.args.execution_contract_id)
-                .await
-            {
-                warn!(contract = %self.args.execution_contract_id, "execution scrape failed: {e:#}");
-                self.metrics
-                    .scrape_errors_total
-                    .with_label_values(&[&self.args.execution_contract_id])
-                    .inc();
-                all_ok = false;
-            }
-        }
-
-        all_ok
+        true
     }
 
     // ── router-core ───────────────────────────────────────────────────────────
@@ -304,14 +295,14 @@ impl Collector {
 
     // ── router-quote ──────────────────────────────────────────────────────────
 
-    /// Scrape `router-quote` by counting `quote_generated` and `fee_estimated`
+    /// Scrape `router-quote` by counting `quote_calculated` and `fee_estimated`
     /// events via the `getEvents` RPC and maintaining running totals.
     async fn scrape_quote(&self, client: &dyn RpcClient, contract_id: &str) -> Result<()> {
         let start = Instant::now();
         info!(contract_id, "scraping router-quote");
 
         let quote_events = client
-            .get_events(contract_id, &["quote_generated"], 0)
+            .get_events(contract_id, &["quote_calculated"], 0)
             .await?;
         let fee_events = client
             .get_events(contract_id, &["fee_estimated"], 0)
@@ -336,7 +327,7 @@ impl Collector {
         info!(
             contract_id,
             elapsed_secs = elapsed,
-            quote_generated = quote_events.len(),
+            quote_calculated = quote_events.len(),
             fee_estimated = fee_events.len(),
             "quote scrape done"
         );
@@ -674,8 +665,8 @@ mod tests {
         let mock = MockRpcClient::new()
             .with_events(
                 "QUOTE_ID",
-                "quote_generated",
-                vec![make_event("quote_generated"), make_event("quote_generated")],
+                "quote_calculated",
+                vec![make_event("quote_calculated"), make_event("quote_calculated")],
             )
             .with_events(
                 "QUOTE_ID",
