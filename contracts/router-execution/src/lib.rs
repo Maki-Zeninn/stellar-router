@@ -658,9 +658,7 @@ impl RouterExecution {
             .instance()
             .get(&DataKey::ExecHistory)
             .unwrap_or(Vec::new(&env));
-        while history.len() > new_max {
-            history.remove(0);
-        }
+        Self::evict_oldest(&mut history, new_max);
         env.storage()
             .instance()
             .set(&DataKey::ExecHistory, &history);
@@ -767,6 +765,13 @@ impl RouterExecution {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// Trims `history` down to at most `cap` entries, evicting the oldest first.
+    fn evict_oldest(history: &mut Vec<ExecutionRecord>, cap: u32) {
+        while history.len() > cap {
+            history.remove(0);
+        }
+    }
 
     /// Computes `(base_fee, resource_fee)` for a transaction amount: a fixed
     /// base fee plus a resource fee that scales with `amount` (0.1%, floored
@@ -882,9 +887,7 @@ impl RouterExecution {
             .instance()
             .get(&DataKey::MaxHistorySize)
             .unwrap_or(DEFAULT_MAX_HISTORY_SIZE);
-        while history.len() > max_history {
-            history.remove(0);
-        }
+        Self::evict_oldest(&mut history, max_history);
 
         env.storage()
             .instance()

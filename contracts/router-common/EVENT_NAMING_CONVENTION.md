@@ -60,6 +60,16 @@ All smart contracts in the stellar-router suite follow a consistent event naming
 - `max_batch_size_updated` — (old_size, new_size)
 - `admin_transferred` — (old_admin, new_admin)
 
+### router-quote
+- `initialized` — (admin, default_fee_bps)
+- `route_fee_set` — (route_name, fee_bps)
+- `route_fee_unset` — (route_name)
+- `route_fee_tiers_set` — (route_name, tiers)
+- `quote_calculated` — (route_name, amount_out, fee_amount)
+- `best_quote_selected` — (route_name, amount_out)
+- `default_fee_updated` — (fee_bps)
+- `admin_transferred` — (old_admin, new_admin)
+
 ### router-middleware
 - `pre_call` — (caller, route)
 - `post_call` — (caller, route, success)

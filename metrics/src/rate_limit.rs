@@ -226,6 +226,20 @@ mod tests {
     }
 
     #[test]
+    fn retry_after_secs_reflects_remaining_window() {
+        let rl = limiter(1, 60);
+        assert!(rl.check("1.2.3.4"));
+        let retry_after = rl.retry_after_secs("1.2.3.4");
+        assert!((1..=60).contains(&retry_after));
+    }
+
+    #[test]
+    fn retry_after_secs_defaults_to_one_for_unknown_key() {
+        let rl = limiter(1, 60);
+        assert_eq!(rl.retry_after_secs("never-seen"), 1);
+    }
+
+    #[test]
     fn different_keys_are_independent() {
         let rl = limiter(1, 60);
         assert!(rl.check("192.168.1.1"));
