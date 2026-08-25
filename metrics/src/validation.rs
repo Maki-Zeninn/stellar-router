@@ -99,6 +99,16 @@ pub fn validate_scrape_interval(secs: u64) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// Validate the RPC request timeout: must be greater than 0 seconds.
+pub fn validate_rpc_timeout(secs: u64) -> Result<(), ValidationError> {
+    if secs == 0 {
+        return Err(ValidationError::new(
+            "rpc_timeout_secs must be greater than 0",
+        ));
+    }
+    Ok(())
+}
+
 /// Validate the listen address: must be a valid `host:port` string.
 pub fn validate_listen_addr(addr: &str) -> Result<(), ValidationError> {
     addr.parse::<std::net::SocketAddr>()
@@ -167,6 +177,16 @@ mod tests {
     #[test]
     fn too_large_scrape_interval_rejected() {
         assert!(validate_scrape_interval(3601).is_err());
+    }
+
+    #[test]
+    fn valid_rpc_timeout() {
+        assert!(validate_rpc_timeout(10).is_ok());
+    }
+
+    #[test]
+    fn zero_rpc_timeout_rejected() {
+        assert!(validate_rpc_timeout(0).is_err());
     }
 
     #[test]
