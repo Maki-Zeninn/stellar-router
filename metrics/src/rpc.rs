@@ -425,22 +425,29 @@ pub fn instance_storage_key_xdr(_contract_id: &str) -> Result<String> {
 /// access, or use the real [`SorobanRpcClient`] in production.
 #[async_trait::async_trait]
 pub trait RpcClient: Send + Sync {
+    /// Call a view function and extract a `u64` from the result.
     async fn call_u64(&self, contract_id: &str, function_name: &str) -> Result<u64>;
+    /// Call a view function and extract a `bool` from the result.
     #[allow(dead_code)]
     async fn call_bool(&self, contract_id: &str, function_name: &str) -> Result<bool>;
+    /// Call a view function and extract a `Vec<String>` from the result.
     async fn call_string_vec(&self, contract_id: &str, function_name: &str) -> Result<Vec<String>>;
+    /// Simulate invoking a read-only contract function and return the raw JSON result value.
     async fn simulate_invoke(
         &self,
         contract_id: &str,
         function_name: &str,
         args_xdr: Vec<String>,
     ) -> Result<serde_json::Value>;
+    /// Fetch contract events matching the given topic filters, starting from `start_ledger`
+    /// (0 = let the RPC choose).
     async fn get_events(
         &self,
         contract_id: &str,
         topic_filters: &[&str],
         start_ledger: u32,
     ) -> Result<Vec<ContractEvent>>;
+    /// Fetch ledger entries for the given base64-encoded XDR keys.
     async fn get_ledger_entries(&self, keys_xdr: Vec<String>) -> Result<Vec<LedgerEntry>>;
 }
 

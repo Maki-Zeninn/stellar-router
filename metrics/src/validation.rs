@@ -14,7 +14,9 @@ use serde::Serialize;
 /// A structured validation error returned as JSON with HTTP 400.
 #[derive(Debug, Serialize)]
 pub struct ValidationError {
+    /// Machine-readable error code, currently always `"validation_error"`.
     pub error: &'static str,
+    /// Human-readable description of what failed validation, safe to show to API clients.
     pub message: String,
 }
 
