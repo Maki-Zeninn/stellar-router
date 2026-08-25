@@ -993,6 +993,18 @@ mod tests {
             estimate.total_fee,
             estimate.base_fee + estimate.resource_fee
         );
+
+        let all_events = env.events().all();
+        let fee_event = all_events
+            .iter()
+            .find(|e| {
+                let topic: Symbol = e.1.get(0).unwrap().into_val(&env);
+                topic == Symbol::new(&env, router_common::EVENT_FEE_ESTIMATED)
+            })
+            .expect("fee_estimated event not found");
+        let (evt_total_fee, evt_high_load): (i128, bool) = fee_event.2.into_val(&env);
+        assert_eq!(evt_total_fee, estimate.total_fee);
+        assert!(!evt_high_load);
     }
 
     #[test]
@@ -1407,20 +1419,20 @@ mod tests {
         client.initialize(&admin, &2, &100, &200);
 
         let caller = Address::generate(&env);
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+
         env.as_contract(&client.address, || {
             // Build a request with max_retries=1, but global max_retries=2.
             // effective_retries = min(1, 2) = 1.
             // That means: attempts 1 (initial) and attempt 2 (retry) are allowed,
             // and failure after attempt 2 returns ContractRejected.
 
-            let target = Address::generate(&env);
-            let function = Symbol::new(&env, "transfer");
-
             // execute() is called as a contract call to bypass caller.require_auth
             // signature complexity in tests; env.mock_all_auths() makes auth pass.
             let request = ExecutionRequest {
-                target,
-                function,
+                target: target.clone(),
+                function: function.clone(),
                 simulate_first: false,
                 max_retries: 1,
                 args: Vec::new(&env),
@@ -1430,6 +1442,32 @@ mod tests {
             let result = RouterExecution::execute(env.clone(), caller.clone(), request);
             assert_eq!(result, Err(ExecutionError::ContractRejected));
         });
+
+        let (total_execs, total_errors) = client.stats();
+        assert_eq!(total_execs, 1);
+        assert_eq!(total_errors, 1);
+
+        let history = client.get_execution_history(&1);
+        assert_eq!(history.len(), 1);
+        let record = history.get(0).unwrap();
+        assert!(!record.success);
+        assert_eq!(record.target, target);
+        assert_eq!(record.function, function);
+
+        let all_events = env.events().all();
+        let exec_event = all_events
+            .iter()
+            .find(|e| {
+                let topic: Symbol = e.1.get(0).unwrap().into_val(&env);
+                topic == Symbol::new(&env, router_common::EVENT_EXECUTION_ERROR)
+            })
+            .expect("execution_error event not found");
+        let (evt_target, evt_function, evt_error_code, evt_attempts): (Address, Symbol, u32, u32) =
+            exec_event.2.into_val(&env);
+        assert_eq!(evt_target, target);
+        assert_eq!(evt_function, function);
+        assert_eq!(evt_error_code, ExecutionError::ContractRejected as u32);
+        assert_eq!(evt_attempts, 2);
     }
 
     // ── Issue #633: backoff_multiplier upper bound validation ────────────────
