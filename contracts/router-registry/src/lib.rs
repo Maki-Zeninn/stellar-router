@@ -988,6 +988,15 @@ mod tests {
     }
 
     #[test]
+    fn test_register_version_zero_fails() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        let result = client.try_register(&admin, &name, &addr, &0);
+        assert_eq!(result, Err(Ok(RegistryError::InvalidVersion)));
+    }
+
+    #[test]
     fn test_is_deprecated_returns_false_for_fresh_registration() {
         let (env, admin, client) = setup();
         let name = String::from_str(&env, "oracle");
