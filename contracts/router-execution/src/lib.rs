@@ -1180,6 +1180,25 @@ mod tests {
     }
 
     #[test]
+    fn test_get_execution_history_returns_newest_first() {
+        let (env, _, client) = setup();
+        let target = Address::generate(&env);
+        env.as_contract(&client.address, || {
+            for name in ["first", "second", "third"] {
+                RouterExecution::append_history(&env, &target, &Symbol::new(&env, name), true, 0);
+            }
+        });
+
+        let history = client.get_execution_history(&3);
+        assert_eq!(history.get(0).unwrap().function, Symbol::new(&env, "third"));
+        assert_eq!(
+            history.get(1).unwrap().function,
+            Symbol::new(&env, "second")
+        );
+        assert_eq!(history.get(2).unwrap().function, Symbol::new(&env, "first"));
+    }
+
+    #[test]
     fn test_execution_history_len_fresh_contract_is_zero() {
         let (_, _, client) = setup();
         assert_eq!(client.execution_history_len(), 0);

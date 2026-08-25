@@ -248,4 +248,67 @@ mod tests {
         assert!(rl.buckets.contains_key("three"));
         assert!(!rl.buckets.contains_key("one"));
     }
+
+    // config_from_env reads process-global env vars, so tests that touch them
+    // must run serially to avoid racing under cargo test's parallel runner.
+    static ENV_GUARD: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+    fn with_env_lock<T>(f: impl FnOnce() -> T) -> T {
+        let guard = ENV_GUARD.get_or_init(|| std::sync::Mutex::new(()));
+        let _lock = guard.lock().unwrap_or_else(|e| e.into_inner());
+        f()
+    }
+
+    // Safety: guarded by `with_env_lock` above, so no other thread in this
+    // process observes or mutates these env vars concurrently.
+    fn set_env(key: &str, value: &str) {
+        unsafe { std::env::set_var(key, value) };
+    }
+
+    fn remove_env(key: &str) {
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn config_from_env_uses_defaults_when_unset() {
+        with_env_lock(|| {
+            remove_env("ROUTER_RATE_LIMIT_MAX_REQUESTS");
+            remove_env("ROUTER_RATE_LIMIT_WINDOW_SECS");
+
+            let config = config_from_env();
+            assert_eq!(config.max_requests, 60);
+            assert_eq!(config.window, Duration::from_secs(60));
+            assert_eq!(config.max_buckets, 1024);
+        });
+    }
+
+    #[test]
+    fn config_from_env_parses_values_from_env() {
+        with_env_lock(|| {
+            set_env("ROUTER_RATE_LIMIT_MAX_REQUESTS", "5");
+            set_env("ROUTER_RATE_LIMIT_WINDOW_SECS", "30");
+
+            let config = config_from_env();
+            assert_eq!(config.max_requests, 5);
+            assert_eq!(config.window, Duration::from_secs(30));
+
+            remove_env("ROUTER_RATE_LIMIT_MAX_REQUESTS");
+            remove_env("ROUTER_RATE_LIMIT_WINDOW_SECS");
+        });
+    }
+
+    #[test]
+    fn config_from_env_falls_back_to_default_on_unparsable_value() {
+        with_env_lock(|| {
+            set_env("ROUTER_RATE_LIMIT_MAX_REQUESTS", "not-a-number");
+            set_env("ROUTER_RATE_LIMIT_WINDOW_SECS", "also-not-a-number");
+
+            let config = config_from_env();
+            assert_eq!(config.max_requests, 60);
+            assert_eq!(config.window, Duration::from_secs(60));
+
+            remove_env("ROUTER_RATE_LIMIT_MAX_REQUESTS");
+            remove_env("ROUTER_RATE_LIMIT_WINDOW_SECS");
+        });
+    }
 }
