@@ -676,4 +676,13 @@ mod tests {
         let result = extract_string_vec_from_sim_result(&v).unwrap();
         assert_eq!(result, vec!["oracle", "price_feed"]);
     }
+
+    #[test]
+    fn test_extract_string_vec_wrapped_str_shape() {
+        let v = json!({
+            "results": [{ "retval": [{ "str": "oracle" }, { "str": "vault" }] }]
+        });
+        let result = extract_string_vec_from_sim_result(&v).unwrap();
+        assert_eq!(result, vec!["oracle", "vault"]);
+    }
 }
