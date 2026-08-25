@@ -17,7 +17,7 @@ use axum::{
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
-    Json, Router,
+    Router,
 };
 use prometheus::{Encoder, Registry, TextEncoder};
 use std::net::SocketAddr;
@@ -53,7 +53,6 @@ pub async fn serve(listen: String, registry: Registry, limiter: RateLimiter) -> 
         .route("/metrics", get(metrics_handler))
         .route("/health", get(health_handler))
         .route("/ready", get(ready_handler))
-        .route("/api-docs/openapi.json", get(openapi_handler))
         .layer(middleware::from_fn_with_state(
             limiter,
             rate_limit_middleware,
@@ -189,12 +188,6 @@ async fn ready_handler(State(state): State<AppState>) -> impl IntoResponse {
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "not ready")
     }
-}
-
-/// `GET /api-docs/openapi.json` — OpenAPI specification.
-async fn openapi_handler() -> impl IntoResponse {
-    use utoipa::OpenApi;
-    Json(ApiDoc::openapi())
 }
 
 #[cfg(test)]

@@ -256,8 +256,11 @@ use soroban_sdk::{contracttype, Address, Env, IntoVal, String, Symbol, Val, Vec}
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct CallResult {
+    /// Address of the contract that was invoked.
     pub target: Address,
+    /// Name of the function that was invoked on `target`.
     pub function: Symbol,
+    /// Whether the invocation succeeded.
     pub success: bool,
 }
 
@@ -265,6 +268,7 @@ pub struct CallResult {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct BatchSuccess {
+    /// Index of this item within the original batch input.
     pub index: u32,
 }
 
@@ -272,7 +276,9 @@ pub struct BatchSuccess {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct BatchCallSuccess {
+    /// Index of this item within the original batch input.
     pub index: u32,
+    /// Result of the call at this index.
     pub result: CallResult,
 }
 
@@ -294,7 +300,9 @@ pub enum BatchItemError {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct BatchFailure {
+    /// Index of this item within the original batch input.
     pub index: u32,
+    /// Reason the item at this index failed.
     pub error: BatchItemError,
 }
 
