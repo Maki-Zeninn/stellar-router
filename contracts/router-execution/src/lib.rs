@@ -350,6 +350,10 @@ impl RouterExecution {
         caller.require_auth();
         router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
 
+        if request.amount <= 0 {
+            return Err(ExecutionError::InvalidAmount);
+        }
+
         let max_retries: u32 = env
             .storage()
             .instance()

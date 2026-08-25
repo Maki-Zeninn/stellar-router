@@ -130,7 +130,7 @@ impl NonceCache {
     /// Clean up expired nonces from the cache.
     fn cleanup_expired(&self, now: u64) {
         let ttl = self.config.nonce_ttl_secs;
-        self.cache.retain(|_, entry| now - entry.timestamp < ttl);
+        self.cache.retain(|_, entry| now.saturating_sub(entry.timestamp) < ttl);
     }
 
     /// Evict the single oldest nonce to make room for a new entry.
