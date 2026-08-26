@@ -2174,28 +2174,74 @@ mod tests {
     }
 
     #[test]
+    #[test]
     fn test_queue_circular_dependency_fails() {
         let (env, admin, client) = setup();
         let target = Address::generate(&env);
-        // Compute op_id first, then try to set it as its own dep (circular)
-        let dep_id = client.queue(
+        let desc = String::from_str(&env, "op_a");
+        let delay: u64 = 3600;
+
+        // Precompute the op_id the same way queue() does
+        let eta = env.ledger().timestamp() + delay;
+        let mut preimage = Bytes::new(&env);
+        preimage.append(&desc.clone().to_xdr(&env));
+        preimage.append(&target.clone().to_xdr(&env));
+        preimage.append(&Bytes::from_array(&env, &eta.to_be_bytes()));
+        let predicted_op_id: Bytes = env.crypto().sha256(&preimage).into();
+
+        // Try to queue an operation with itself as a dependency
+        let mut self_dep = Vec::new(&env);
+        self_dep.push_back(predicted_op_id.clone());
+
+        let result = client.try_queue(&admin, &desc, &target, &delay, &GRACE, &self_dep);
+        assert_eq!(
+            result,
+            Err(Ok(TimelockError::CircularDependency)),
+            "queue should reject circular self-dependency"
+        );
+        
+        // Verify the operation was NOT stored
+        let stored_op = client.get_op(&predicted_op_id);
+        assert!(stored_op.is_none(), "circular dependency should prevent operation from being stored");
+    }
+
+    #[test]
+    fn test_queue_circular_dependency_two_ops() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let delay: u64 = 3600;
+
+        // Queue first operation (no dependencies)
+        let op1_id = client.queue(
             &admin,
-            &String::from_str(&env, "op_a"),
+            &String::from_str(&env, "op_1"),
             &target,
-            &3600,
+            &delay,
             &GRACE,
             &Vec::new(&env),
         );
-        let mut self_dep = Vec::new(&env);
-        self_dep.push_back(dep_id.clone());
-        // dep_id pointing to itself is a circular dependency
-        // We can't point op_a at itself since it's already queued,
-        // so instead verify the circular detection: try to set dep_id as dep of itself
-        // by queueing an identical op (same hash won't trigger circular, so test self-ref directly)
-        // The circular check fires when dep_id == new op_id.
-        // We can't force that here, but we can verify a deeply-nested chain works up to the limit.
-        // So this test just asserts the successful path already covered above passes.
-        assert!(!dep_id.is_empty());
+
+        // Try to queue second operation that depends on first
+        let mut deps = Vec::new(&env);
+        deps.push_back(op1_id.clone());
+        
+        let op2_id = client.queue(
+            &admin,
+            &String::from_str(&env, "op_2"),
+            &target,
+            &delay,
+            &GRACE,
+            &deps,
+        );
+
+        // Verify both operations are stored
+        assert!(client.get_op(&op1_id).is_some(), "op1 should be stored");
+        assert!(client.get_op(&op2_id).is_some(), "op2 should be stored");
+        
+        // Verify dependencies are recorded correctly
+        let op2_deps = client.get_dependencies(&op2_id);
+        assert_eq!(op2_deps.len(), 1, "op2 should have one dependency");
+        assert_eq!(op2_deps.get(0).unwrap(), op1_id, "op2 should depend on op1");
     }
 
     #[test]

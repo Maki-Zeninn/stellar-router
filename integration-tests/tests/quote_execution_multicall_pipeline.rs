@@ -163,7 +163,45 @@ impl<'a> PipelineTestSuite<'a> {
 #[test]
 fn test_pipeline_all_contracts_deployed() {
     let s = PipelineTestSuite::setup();
-    println!("\n✓ All contracts deployed and initialized");
+    
+    // Verify each contract is initialized by calling a post-initialization method
+    // that only succeeds if the contract was properly initialized
+    
+    // Core: Should track zero routes initially
+    assert_eq!(s.core.total_routed(), 0, "core should have zero routed calls initially");
+    
+    // Middleware: Should have zero total calls
+    assert_eq!(s.middleware.total_calls(), 0, "middleware should have zero calls initially");
+    
+    // Multicall: Should return the configured max batch size
+    assert_eq!(s.multicall.max_batch_size(), 10, "multicall should have max_batch_size=10");
+    
+    // Registry: Should be able to check for a non-existent route without panic
+    let test_route = String::from_str(&s.env, "nonexistent");
+    let result = s.registry.try_get_latest(&test_route);
+    assert!(result.is_err(), "registry should return error for non-existent route");
+    
+    // Access: Should be able to check roles without panic
+    let test_user = Address::generate(&s.env);
+    let test_role = String::from_str(&s.env, "test_role");
+    assert!(!s.access.has_role(&test_role, &test_user), "access should return false for non-existent role");
+    
+    // Quote: Should be able to get default fee
+    let default_fee_result = s.quote.try_get_default_fee();
+    assert!(default_fee_result.is_ok(), "quote should return default fee after initialization");
+    assert_eq!(default_fee_result.unwrap(), 100, "quote should have 100 bps default fee");
+    
+    // Execution: Should be initialized (no direct getter, but we can verify it doesn't panic)
+    // Just calling setup confirms it initialized without error
+    
+    println!("\n✓ All 7 contracts deployed and initialized");
+    println!("  - router-core: total_routed = 0");
+    println!("  - router-middleware: total_calls = 0");
+    println!("  - router-multicall: max_batch_size = 10");
+    println!("  - router-registry: responding to queries");
+    println!("  - router-access: responding to role checks");
+    println!("  - router-quote: default_fee = 100 bps");
+    println!("  - router-execution: initialized");
 }
 
 /// Test 2: Register a route and verify resolution
