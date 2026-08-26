@@ -25,7 +25,7 @@
 //! - `admin_transferred` — Admin transferred to a new address (previous_admin, new_admin)
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Val, Vec,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -55,16 +55,25 @@ const MAX_BACKOFF_MS: u64 = 3_600_000;
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
+/// Storage keys for instance storage slots used by this contract.
 #[contracttype]
 pub enum DataKey {
+    /// Admin address.
     Admin,
+    /// Global cap on per-request retry attempts.
     MaxRetries,
+    /// Cumulative count of successful executions.
     TotalExecutions,
+    /// Cumulative count of logged errors.
     TotalErrors,
-    BackoffBaseMs,     // base delay in milliseconds before first retry
-    BackoffMultiplier, // multiplier applied each retry (stored as fixed-point *100, e.g. 200 = 2x)
-    ExecHistory,       // Vec<ExecutionRecord>, capped at MaxHistorySize (oldest evicted first)
-    MaxHistorySize,    // u32 — cap on ExecHistory length
+    /// Base delay in milliseconds before first retry.
+    BackoffBaseMs,
+    /// Multiplier applied each retry (stored as fixed-point *100, e.g. 200 = 2x).
+    BackoffMultiplier,
+    /// `Vec<ExecutionRecord>`, capped at `MaxHistorySize` (oldest evicted first).
+    ExecHistory,
+    /// `u32` — cap on `ExecHistory` length.
+    MaxHistorySize,
 }
 
 // ── Error Types ───────────────────────────────────────────────────────────────
@@ -100,10 +109,15 @@ pub enum ExecutionError {
     ContractFunctionNotFound = 303,
 
     // ── Config / auth errors ──────────────────────────────────────────────
+    /// `initialize` was called but the contract has already been initialized.
     AlreadyInitialized = 401,
+    /// A function requiring initialization was called before `initialize`.
     NotInitialized = 402,
+    /// The caller does not match the stored admin address.
     Unauthorized = 403,
+    /// A configuration value (e.g. `max_retries`, `backoff_multiplier`) was out of range.
     InvalidConfig = 404,
+    /// A supplied amount was zero or negative where a positive amount is required.
     InvalidAmount = 405,
 }
 
@@ -128,7 +142,7 @@ pub struct ExecutionRequest {
     /// via `IntoVal` on the caller's side) — this contract performs no
     /// argument type-checking beyond whatever `try_invoke_contract` enforces
     /// at the host level.
-    pub args: Vec<soroban_sdk::Val>,
+    pub args: Vec<Val>,
     /// Transaction amount in stroops. Used to compute the real fee recorded
     /// in `ExecutionRecord.fee_paid` (see `estimate_fee`'s resource-fee
     /// scaling, which this mirrors).
@@ -552,7 +566,7 @@ impl RouterExecution {
         caller: Address,
         target: Address,
         function: Symbol,
-        args: Vec<soroban_sdk::Val>,
+        args: Vec<Val>,
     ) -> Result<SimulationResult, ExecutionError> {
         caller.require_auth();
 
@@ -593,6 +607,7 @@ impl RouterExecution {
         new_admin: Address,
     ) -> Result<(), ExecutionError> {
         current.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         let admin: Address = env
             .storage()
             .instance()
@@ -911,9 +926,9 @@ impl RouterExecution {
         env: &Env,
         target: &Address,
         function: &Symbol,
-        args: Vec<soroban_sdk::Val>,
+        args: Vec<Val>,
     ) -> bool {
-        env.try_invoke_contract::<soroban_sdk::Val, soroban_sdk::Val>(target, function, args)
+        env.try_invoke_contract::<Val, Val>(target, function, args)
             .is_ok()
     }
 }
