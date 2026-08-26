@@ -1636,6 +1636,75 @@ mod tests {
     }
 
     #[test]
+    fn test_get_operations_by_status_returns_matching_ops() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let deps = Vec::new(&env);
+
+        let op1 = client.queue(
+            &admin,
+            &String::from_str(&env, "op1"),
+            &target,
+            &3600,
+            &GRACE,
+            &deps,
+        );
+        let op2 = client.queue(
+            &admin,
+            &String::from_str(&env, "op2"),
+            &target,
+            &3600,
+            &GRACE,
+            &deps,
+        );
+
+        let queued = client.get_operations_by_status(&OperationStatus::Queued);
+        assert_eq!(queued.len(), 2);
+        assert_eq!(queued.get(0).unwrap().0, op1);
+        assert_eq!(queued.get(1).unwrap().0, op2);
+
+        let ready = client.get_operations_by_status(&OperationStatus::Ready);
+        assert_eq!(ready.len(), 0);
+
+        // Advance past ETA — both become Ready
+        env.ledger().with_mut(|l| l.timestamp += 3601);
+
+        let queued = client.get_operations_by_status(&OperationStatus::Queued);
+        assert_eq!(queued.len(), 0);
+
+        let ready = client.get_operations_by_status(&OperationStatus::Ready);
+        assert_eq!(ready.len(), 2);
+        assert_eq!(ready.get(0).unwrap().0, op1);
+        assert_eq!(ready.get(1).unwrap().0, op2);
+    }
+
+    #[test]
+    fn test_get_operations_by_status_expired() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let deps: Vec<Bytes> = Vec::new(&env);
+        let grace: u64 = 3600;
+
+        let op_id = client.queue(
+            &admin,
+            &String::from_str(&env, "expires"),
+            &target,
+            &3600,
+            &grace,
+            &deps,
+        );
+
+        // Jump past grace period
+        env.ledger().with_mut(|l| l.timestamp += 3600 + grace + 1);
+        let expired = client.get_operations_by_status(&OperationStatus::Expired);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired.get(0).unwrap().0, op_id);
+
+        let ready = client.get_operations_by_status(&OperationStatus::Ready);
+        assert_eq!(ready.len(), 0);
+    }
+
+    #[test]
     fn test_pending_ops_index_excludes_expired_from_pending() {
         let (env, admin, client) = setup();
         let target = Address::generate(&env);
