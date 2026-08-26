@@ -111,6 +111,18 @@ const MAX_TRACKED_ROUTES: u32 = 500;
 #[contract]
 pub struct RouterQuote;
 
+/// Returns the index at which `key` should be inserted into `len` items so
+/// the sequence stays ordered, given a comparator `should_insert_before`
+/// that returns true when the new item belongs before the item at `idx`.
+fn find_insertion_index(len: u32, mut should_insert_before: impl FnMut(u32) -> bool) -> u32 {
+    for idx in 0..len {
+        if should_insert_before(idx) {
+            return idx;
+        }
+    }
+    len
+}
+
 #[contractimpl]
 impl RouterQuote {
     /// Initialize the quote contract with an admin address and default fee.
@@ -269,14 +281,9 @@ impl RouterQuote {
                 return Err(QuoteError::InvalidFeeBps);
             }
 
-            let mut position = sorted_tiers.len();
-            for index in 0..sorted_tiers.len() {
-                let current = sorted_tiers.get(index).unwrap();
-                if tier.min_amount < current.min_amount {
-                    position = index;
-                    break;
-                }
-            }
+            let position = find_insertion_index(sorted_tiers.len(), |idx| {
+                tier.min_amount < sorted_tiers.get(idx).unwrap().min_amount
+            });
             sorted_tiers.insert(position, tier.clone());
         }
 
@@ -502,13 +509,9 @@ impl RouterQuote {
         for request in requests.iter() {
             if let Ok(response) = Self::get_quote(env.clone(), request) {
                 // Insertion sort: find position where response.amount_out fits.
-                let mut pos = sorted.len();
-                for i in 0..sorted.len() {
-                    if response.amount_out > sorted.get(i).unwrap().amount_out {
-                        pos = i;
-                        break;
-                    }
-                }
+                let pos = find_insertion_index(sorted.len(), |idx| {
+                    response.amount_out > sorted.get(idx).unwrap().amount_out
+                });
                 sorted.insert(pos, response);
             }
         }
