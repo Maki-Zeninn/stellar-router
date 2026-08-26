@@ -198,8 +198,7 @@ fn test_pipeline_quote_calculation() {
         amount_in,
     };
 
-    let quote = s.quote.get_quote(&quote_request)
-        .expect("Failed to get quote");
+    let quote = s.quote.get_quote(&quote_request);
 
     // Verify quote response
     assert_eq!(quote.amount_in, amount_in);
@@ -266,8 +265,7 @@ fn test_pipeline_execution_swap() {
     };
 
     // Execute (with mocked auth, this should succeed)
-    let result = s.execution.execute(&s.user, &exec_request)
-        .expect("Execution should succeed");
+    let result = s.execution.execute(&s.user, &exec_request);
 
     // Verify execution result
     assert_eq!(result.target, mock_target);
@@ -370,8 +368,7 @@ fn test_quote_to_execution_to_multicall_pipeline() {
         amount_in,
     };
 
-    let quote = s.quote.get_quote(&quote_request)
-        .expect("Quote should succeed");
+    let quote = s.quote.get_quote(&quote_request);
     println!("  ✓ Quote obtained: amount_out = {}", quote.amount_out);
 
     // ── Phase 2: Middleware Check ──────────────────────────────────────
@@ -396,8 +393,7 @@ fn test_quote_to_execution_to_multicall_pipeline() {
         amount: 1_000_000,
     };
 
-    let exec_result = s.execution.execute(&s.user, &exec_request)
-        .expect("Execution should succeed");
+    let exec_result = s.execution.execute(&s.user, &exec_request);
     assert_eq!(exec_result.success, true);
     println!("  ✓ Single swap executed successfully");
 
