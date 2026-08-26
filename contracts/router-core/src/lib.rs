@@ -333,6 +333,21 @@ impl RouterCore {
             return Err(RouterError::InvalidAddress);
         }
 
+        // Enforce MaxRoutes cap before registering
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RouteCount)
+            .unwrap_or(0);
+        let max: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxRoutes)
+            .unwrap_or(1_000);
+        if count >= max {
+            return Err(RouterError::TooManyRoutes);
+        }
+
         // Validate metadata if provided
         if let Some(ref meta) = metadata {
             if meta.description.len() > MAX_METADATA_DESCRIPTION_LEN {
@@ -377,11 +392,6 @@ impl RouterCore {
             .instance()
             .set(&DataKey::RouteNames, &route_names);
 
-        let count: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::RouteCount)
-            .unwrap_or(0);
         env.storage()
             .instance()
             .set(&DataKey::RouteCount, &(count + 1));
