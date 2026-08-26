@@ -1110,6 +1110,74 @@ mod tests {
         assert_eq!(topic, Symbol::new(&env, router_common::EVENT_OP_CANCELLED));
     }
 
+    #[test]
+    fn test_cancel_nonexistent_op_fails() {
+        let (env, admin, client) = setup();
+        let fake_id = Bytes::from_array(&env, &[0u8; 32]);
+        assert_eq!(
+            client.try_cancel(&admin, &fake_id),
+            Err(Ok(TimelockError::NotFound))
+        );
+    }
+
+    #[test]
+    fn test_cancel_unauthorized_fails() {
+        let (env, admin, client) = setup();
+        let attacker = Address::generate(&env);
+        let target = Address::generate(&env);
+        let op_id = client.queue(
+            &admin,
+            &String::from_str(&env, "d"),
+            &target,
+            &3600,
+            &GRACE,
+            &Vec::new(&env),
+        );
+        assert_eq!(
+            client.try_cancel(&attacker, &op_id),
+            Err(Ok(TimelockError::Unauthorized))
+        );
+    }
+
+    #[test]
+    fn test_cancel_already_cancelled_fails() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let op_id = client.queue(
+            &admin,
+            &String::from_str(&env, "d"),
+            &target,
+            &3600,
+            &GRACE,
+            &Vec::new(&env),
+        );
+        client.cancel(&admin, &op_id);
+        assert_eq!(
+            client.try_cancel(&admin, &op_id),
+            Err(Ok(TimelockError::Cancelled))
+        );
+    }
+
+    #[test]
+    fn test_cancel_already_executed_fails() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let op_id = client.queue(
+            &admin,
+            &String::from_str(&env, "d"),
+            &target,
+            &3600,
+            &GRACE,
+            &Vec::new(&env),
+        );
+        env.ledger().with_mut(|l| l.timestamp += 3601);
+        client.execute(&admin, &op_id);
+        assert_eq!(
+            client.try_cancel(&admin, &op_id),
+            Err(Ok(TimelockError::AlreadyExecuted))
+        );
+    }
+
     // ── validation ────────────────────────────────────────────────────────────
 
     #[test]
