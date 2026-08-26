@@ -236,6 +236,21 @@ impl RouterQuote {
     /// The tiers are sorted by `min_amount` ascending and are used to select
     /// the highest matching tier for a quote. When no tier matches, the flat
     /// route fee (if any) or the default fee is used.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `caller` - The address initiating the call; must be the admin.
+    /// * `route` - The route name to configure.
+    /// * `tiers` - The fee tiers to set; each `FeeTier.min_amount` must be
+    ///   non-negative and each `FeeTier.fee_bps` must be <= 10000.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`QuoteError::Unauthorized`] — if caller is not the admin.
+    /// * [`QuoteError::InvalidFeeTier`] — if any tier has a negative `min_amount`.
+    /// * [`QuoteError::InvalidFeeBps`] — if any tier's `fee_bps` > 10000.
     pub fn set_route_fee_tiers(
         env: Env,
         caller: Address,
@@ -1189,6 +1204,24 @@ mod tests {
         let tiers = Vec::new(&env);
         let result = client.try_set_route_fee_tiers(&unauthorized, &route, &tiers);
         assert_eq!(result, Err(Ok(QuoteError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_set_route_fee_tiers_rejects_negative_min_amount() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+        let tiers = vec![&env, FeeTier { min_amount: -1, fee_bps: 50 }];
+        let result = client.try_set_route_fee_tiers(&admin, &route, &tiers);
+        assert_eq!(result, Err(Ok(QuoteError::InvalidFeeTier)));
+    }
+
+    #[test]
+    fn test_set_route_fee_tiers_rejects_fee_bps_over_max() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+        let tiers = vec![&env, FeeTier { min_amount: 0, fee_bps: 10001 }];
+        let result = client.try_set_route_fee_tiers(&admin, &route, &tiers);
+        assert_eq!(result, Err(Ok(QuoteError::InvalidFeeBps)));
     }
 
     #[test]

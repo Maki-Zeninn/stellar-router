@@ -427,7 +427,9 @@ impl RouterTimelock {
                     .checked_add(op.grace_period_seconds)
                     .map_or(true, |expiry| now > expiry);
                 if is_expired || op.executed || op.cancelled {
-                    // It is expired or finalized!
+                    // It is expired or finalized! Remove the underlying storage entries.
+                    env.storage().instance().remove(&DataKey::Op(op_id.clone()));
+                    env.storage().instance().remove(&DataKey::Deps(op_id.clone()));
                     cleaned_count += 1;
                 } else {
                     new_pending.push_back(op_id);
