@@ -742,6 +742,20 @@ mod tests {
         assert_eq!(result, Err(Ok(QuoteError::NotInitialized)));
     }
 
+    /// Issue #629: admin() must return NotInitialized when the contract
+    /// has not been initialized, matching the pattern already covered for
+    /// get_default_fee, get_route_fee, and get_quote.
+    #[test]
+    fn test_admin_returns_not_initialized_when_not_initialized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterQuote);
+        let client = RouterQuoteClient::new(&env, &contract_id);
+        // initialize() was NOT called
+        let result = client.try_admin();
+        assert_eq!(result, Err(Ok(QuoteError::NotInitialized)));
+    }
+
     #[test]
     fn test_set_and_get_route_fee() {
         let (env, admin, client) = setup();
