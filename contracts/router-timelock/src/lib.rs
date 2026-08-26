@@ -1078,6 +1078,29 @@ mod tests {
         assert_eq!(topic, Symbol::new(&env, router_common::EVENT_OP_EXECUTED));
     }
 
+    #[test]
+    fn test_execute_nonexistent_op_fails() {
+        let (env, admin, client) = setup();
+        let fake_id = Bytes::from_array(&env, &[0u8; 32]);
+        let result = client.try_execute(&admin, &fake_id);
+        assert_eq!(result, Err(Ok(TimelockError::NotFound)));
+    }
+
+    #[test]
+    fn test_execute_unauthorized_fails() {
+        let (env, admin, client) = setup();
+        let attacker = Address::generate(&env);
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "upgrade oracle");
+        let deps = Vec::new(&env);
+
+        let op_id = client.queue(&admin, &desc, &target, &3600, &GRACE, &deps);
+        env.ledger().with_mut(|l| l.timestamp += 3601);
+
+        let result = client.try_execute(&attacker, &op_id);
+        assert_eq!(result, Err(Ok(TimelockError::Unauthorized)));
+    }
+
     // ── cancel ────────────────────────────────────────────────────────────────
 
     #[test]
