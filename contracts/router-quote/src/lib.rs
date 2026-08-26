@@ -400,6 +400,7 @@ impl RouterQuote {
     /// # Errors
     /// * [`QuoteError::NoQuotesProvided`] — if requests vector is empty.
     /// * [`QuoteError::InvalidAmount`] — if any amount_in <= 0.
+    /// * [`QuoteError::ArithmeticOverflow`] — if any request's fee/output calculation overflows.
     pub fn get_quotes(
         env: Env,
         requests: Vec<QuoteRequest>,
@@ -433,6 +434,7 @@ impl RouterQuote {
     /// # Errors
     /// * [`QuoteError::NoQuotesProvided`] — if requests vector is empty.
     /// * [`QuoteError::InvalidAmount`] — if any amount_in <= 0.
+    /// * [`QuoteError::ArithmeticOverflow`] — if any request's fee/output calculation overflows.
     pub fn get_best_quote(
         env: Env,
         requests: Vec<QuoteRequest>,
