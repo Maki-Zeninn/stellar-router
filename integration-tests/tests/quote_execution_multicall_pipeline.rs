@@ -576,10 +576,11 @@ fn test_pipeline_authorization_checks() {
 
     let route_name = "swap/usd_to_eur";
     let route = String::from_str(&s.env, route_name);
+    let mock_addr = Address::generate(&s.env);
 
-    // Unauthorized user should not be able to register routes
-    // (This depends on the specific authorization implementation)
-    // The test shows that authorization is being verified
+    // Unauthorized user should not be able to register routes in core
+    let result = s.core.try_register_route(&unauthorized_user, &route, &mock_addr, &None);
+    assert_eq!(result, Err(Ok(router_core::RouterError::Unauthorized)));
 
     println!("\n✓ Authorization checks are enforced");
 }
