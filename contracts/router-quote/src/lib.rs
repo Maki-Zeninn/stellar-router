@@ -400,6 +400,7 @@ impl RouterQuote {
     /// # Errors
     /// * [`QuoteError::NoQuotesProvided`] — if requests vector is empty.
     /// * [`QuoteError::InvalidAmount`] — if any amount_in <= 0.
+    /// * [`QuoteError::ArithmeticOverflow`] — if any request's fee/output calculation overflows.
     pub fn get_quotes(
         env: Env,
         requests: Vec<QuoteRequest>,
@@ -433,6 +434,7 @@ impl RouterQuote {
     /// # Errors
     /// * [`QuoteError::NoQuotesProvided`] — if requests vector is empty.
     /// * [`QuoteError::InvalidAmount`] — if any amount_in <= 0.
+    /// * [`QuoteError::ArithmeticOverflow`] — if any request's fee/output calculation overflows.
     pub fn get_best_quote(
         env: Env,
         requests: Vec<QuoteRequest>,
@@ -737,6 +739,20 @@ mod tests {
             amount_in: 10000,
         };
         let result = client.try_get_quote(&request);
+        assert_eq!(result, Err(Ok(QuoteError::NotInitialized)));
+    }
+
+    /// Issue #629: admin() must return NotInitialized when the contract
+    /// has not been initialized, matching the pattern already covered for
+    /// get_default_fee, get_route_fee, and get_quote.
+    #[test]
+    fn test_admin_returns_not_initialized_when_not_initialized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterQuote);
+        let client = RouterQuoteClient::new(&env, &contract_id);
+        // initialize() was NOT called
+        let result = client.try_admin();
         assert_eq!(result, Err(Ok(QuoteError::NotInitialized)));
     }
 

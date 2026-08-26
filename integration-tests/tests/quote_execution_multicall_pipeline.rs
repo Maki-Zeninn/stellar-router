@@ -144,6 +144,17 @@ impl<'a> PipelineTestSuite<'a> {
             l.sequence += 1;
         });
     }
+
+    /// Build a mock swap CallDescriptor for multicall batch tests.
+    fn make_swap_call(&self, required: bool) -> CallDescriptor {
+        CallDescriptor {
+            target: Address::generate(&self.env),
+            function: Symbol::new(&self.env, "swap"),
+            required,
+            instruction_budget: None,
+            args: Vec::new(&self.env),
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -311,15 +322,8 @@ fn test_pipeline_multicall_batch() {
     let mut calls = Vec::new(&s.env);
 
     // Create 3 swap calls
-    for i in 0..3 {
-        let target = Address::generate(&s.env);
-        let call = CallDescriptor {
-            target,
-            function: Symbol::new(&s.env, "swap"),
-            required: false, // Non-required calls allow partial failures
-            instruction_budget: None,
-            args: Vec::new(&s.env),
-        };
+    for _ in 0..3 {
+        let call = s.make_swap_call(false); // Non-required calls allow partial failures
         calls.push_back(call);
     }
 
@@ -404,15 +408,8 @@ fn test_quote_to_execution_to_multicall_pipeline() {
 
     println!("\nPhase 4: Batching multiple swaps...");
     let mut batch_calls = Vec::new(&s.env);
-    for i in 0..3 {
-        let batch_target = Address::generate(&s.env);
-        let call = CallDescriptor {
-            target: batch_target,
-            function: Symbol::new(&s.env, "swap"),
-            required: false,
-            instruction_budget: None,
-            args: Vec::new(&s.env),
-        };
+    for _ in 0..3 {
+        let call = s.make_swap_call(false);
         batch_calls.push_back(call);
     }
 
@@ -552,22 +549,9 @@ fn test_pipeline_multicall_required_vs_optional() {
     let mut calls = Vec::new(&s.env);
 
     // Required call (will succeed since all calls are mocked)
-    let call1 = CallDescriptor {
-        target: Address::generate(&s.env),
-        function: Symbol::new(&s.env, "swap"),
-        required: true,  // Must succeed
-        instruction_budget: None,
-        args: Vec::new(&s.env),
-    };
-
+    let call1 = s.make_swap_call(true);  // Must succeed
     // Optional calls (can fail)
-    let call2 = CallDescriptor {
-        target: Address::generate(&s.env),
-        function: Symbol::new(&s.env, "swap"),
-        required: false, // Can fail
-        instruction_budget: None,
-        args: Vec::new(&s.env),
-    };
+    let call2 = s.make_swap_call(false); // Can fail
 
     calls.push_back(call1);
     calls.push_back(call2);
@@ -592,10 +576,11 @@ fn test_pipeline_authorization_checks() {
 
     let route_name = "swap/usd_to_eur";
     let route = String::from_str(&s.env, route_name);
+    let mock_addr = Address::generate(&s.env);
 
-    // Unauthorized user should not be able to register routes
-    // (This depends on the specific authorization implementation)
-    // The test shows that authorization is being verified
+    // Unauthorized user should not be able to register routes in core
+    let result = s.core.try_register_route(&unauthorized_user, &route, &mock_addr, &None);
+    assert_eq!(result, Err(Ok(router_core::RouterError::Unauthorized)));
 
     println!("\n✓ Authorization checks are enforced");
 }
