@@ -1192,6 +1192,24 @@ mod tests {
     }
 
     #[test]
+    fn test_set_route_fee_tiers_rejects_negative_min_amount() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+        let tiers = vec![&env, FeeTier { min_amount: -1, fee_bps: 50 }];
+        let result = client.try_set_route_fee_tiers(&admin, &route, &tiers);
+        assert_eq!(result, Err(Ok(QuoteError::InvalidFeeTier)));
+    }
+
+    #[test]
+    fn test_set_route_fee_tiers_rejects_fee_bps_over_max() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+        let tiers = vec![&env, FeeTier { min_amount: 0, fee_bps: 10001 }];
+        let result = client.try_set_route_fee_tiers(&admin, &route, &tiers);
+        assert_eq!(result, Err(Ok(QuoteError::InvalidFeeBps)));
+    }
+
+    #[test]
     fn test_unauthorized_transfer_admin_fails() {
         let (env, _admin, client) = setup();
         let unauthorized = Address::generate(&env);
