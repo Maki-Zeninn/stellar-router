@@ -805,28 +805,28 @@ impl RouterAccess {
         let raw_key = DataKey::HasRole(role.clone(), account.clone());
         let has_raw_assignment = env.storage().instance().has(&raw_key);
 
+        let expiry_timestamp = match expires_in {
+            Some(seconds) => env
+                .ledger()
+                .timestamp()
+                .checked_add(seconds)
+                .ok_or(AccessError::InvalidExpiry)?,
+            None => u64::MAX,
+        };
+
         // If there is an existing unexpired assignment, only treat it as a duplicate error when
         // the requested expiry matches the existing expiry.
         //
         // This allows admins to extend/shorten expiry (or remove it by granting with `None`).
         let currently_active = has_raw_assignment && Self::has_role_internal(env, account, role);
         if currently_active {
-            let existing_expiry: Option<u64> = env
+            let existing_expiry = env
                 .storage()
                 .instance()
-                .get::<DataKey, u64>(&DataKey::RoleExpiry(role.clone(), account.clone()));
+                .get::<DataKey, u64>(&DataKey::RoleExpiry(role.clone(), account.clone()))
+                .unwrap_or(u64::MAX);
 
-            let requested_expiry = match expires_in {
-                Some(seconds) => env
-                    .ledger()
-                    .timestamp()
-                    .checked_add(seconds)
-                    .ok_or(AccessError::InvalidExpiry)?,
-                None => u64::MAX,
-            };
-
-            let existing_expiry = existing_expiry.unwrap_or(u64::MAX);
-            if existing_expiry == requested_expiry {
+            if existing_expiry == expiry_timestamp {
                 return Err(AccessError::AlreadyHasRole);
             }
         }
@@ -834,6 +834,25 @@ impl RouterAccess {
         // Track this role in AllRoles if it's the first time we've seen it
         Self::track_role_in_all_roles(env, role)?;
 
+        env.storage()
+            .instance()
+            .set(&DataKey::HasRole(role.clone(), account.clone()), &true);
+
+        // Increment RoleMemberCount when the account transitions from inactive to active.
+        // This covers two cases:
+        //   1. Brand-new grant (no prior assignment).
+        //   2. Re-grant of a previously expired role (raw assignment exists but was inactive).
+        // An expiry update on a live role must NOT increment to avoid double-counting.
+        if !currently_active {
+            let count: u32 = env
+                .storage()
+                .instance()
+                .get::<DataKey, u32>(&DataKey::RoleMemberCount(role.clone()))
+                .unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&DataKey::RoleMemberCount(role.clone()), &(count + 1));
+        }
         let expiry_timestamp = match expires_in {
             Some(seconds) => env
                 .ledger()

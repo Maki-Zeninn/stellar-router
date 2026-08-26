@@ -1721,6 +1721,8 @@ mod tests {
             function: function.clone(),
             simulate_first: false,
             max_retries: 0,
+            args: Vec::new(&env),
+            amount: 1_000_000,
         };
 
         let result = client.execute(&caller, &request);
@@ -1773,6 +1775,8 @@ mod tests {
             function: function.clone(),
             simulate_first: false,
             max_retries: 2,
+            args: Vec::new(&env),
+            amount: 1_000_000,
         };
 
         let result = client.execute(&caller, &request);
