@@ -257,6 +257,18 @@ impl TestSuite {
             .ok_or("Middleware contract not deployed".to_string())
     }
 
+    pub fn timelock(&self) -> Result<&DeployedContract, String> {
+        self.router_timelock
+            .as_ref()
+            .ok_or("Timelock contract not deployed".to_string())
+    }
+
+    pub fn multicall(&self) -> Result<&DeployedContract, String> {
+        self.router_multicall
+            .as_ref()
+            .ok_or("Multicall contract not deployed".to_string())
+    }
+
     fn new() -> Result<Self, String> {
         let config = TestnetConfig::default();
 

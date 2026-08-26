@@ -83,7 +83,7 @@ Generate and manage test accounts:
 
 ```rust
 let account = TestAccount::generate()?;
-account.fund()?;  // Fund via Friendbot
+account.fund("testnet")?;  // Fund via Friendbot
 ```
 
 ### DeployedContract
@@ -95,6 +95,7 @@ let contract = DeployedContract::deploy(
     "path/to/contract.wasm",
     "contract-name",
     &admin_account,
+    "testnet",
 )?;
 
 let result = contract.invoke("method_name", &["--arg", "value"], &admin)?;
