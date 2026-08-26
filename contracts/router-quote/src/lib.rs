@@ -1406,4 +1406,37 @@ mod tests {
         assert_eq!(emitted_route, route);
         assert_eq!(emitted_fee, 150);
     }
+
+    // ── MAX_TRACKED_ROUTES coverage (#1090) ───────────────────────────────────
+
+    #[test]
+    fn test_set_route_fee_rejects_route_beyond_max_tracked_routes() {
+        let (env, admin, client) = setup();
+
+        for i in 0..MAX_TRACKED_ROUTES {
+            let route = String::from_str(&env, &format!("route-{}", i));
+            client.set_route_fee(&admin, &route, &10);
+        }
+
+        let one_too_many = String::from_str(&env, "one-too-many");
+        let result = client.try_set_route_fee(&admin, &one_too_many, &10);
+        assert_eq!(result, Err(Ok(QuoteError::TooManyRoutes)));
+    }
+
+    /// Re-configuring an already-tracked route must not count against the
+    /// MAX_TRACKED_ROUTES limit, since track_configured_route only pushes
+    /// when the route is not already present in the index.
+    #[test]
+    fn test_set_route_fee_allows_updating_existing_route_at_max_tracked_routes() {
+        let (env, admin, client) = setup();
+
+        for i in 0..MAX_TRACKED_ROUTES {
+            let route = String::from_str(&env, &format!("route-{}", i));
+            client.set_route_fee(&admin, &route, &10);
+        }
+
+        let existing = String::from_str(&env, "route-0");
+        client.set_route_fee(&admin, &existing, &20);
+        assert_eq!(client.get_route_fee(&existing), 20);
+    }
 }
