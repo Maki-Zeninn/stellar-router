@@ -289,10 +289,15 @@ pub struct BatchCallSuccess {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum BatchItemError {
+    /// The item already exists in the target collection.
     AlreadyExists,
+    /// The item's name is empty or contains only whitespace.
     InvalidName,
+    /// The caller is not authorized to perform this operation.
     Unauthorized,
+    /// The item's metadata is malformed or missing required fields.
     InvalidMetadata,
+    /// A catch-all for errors not covered by the specific variants above.
     Custom(String),
 }
 
@@ -955,7 +960,10 @@ mod storage_helper_tests {
         let id = env.register_contract(None, TestContract);
         env.as_contract(&id, || {
             set_admin(&env, &CommonDataKey::Admin, &Address::generate(&env));
+            let ttl_before = env.storage().instance().get_ttl();
             extend_instance_ttl(&env, 100, 1000);
+            let ttl_after = env.storage().instance().get_ttl();
+            assert!(ttl_after >= 1000, "TTL should be extended to at least 1000");
         });
     }
 }
