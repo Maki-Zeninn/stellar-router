@@ -221,10 +221,13 @@ impl RouterTimelock {
             return Err(TimelockError::AlreadyQueued);
         }
 
-        // Validate no circular dependencies
+        // Validate dependencies: no circular references, dependency must exist, depth within limits
         for dep_id in deps.iter() {
             if dep_id == op_id {
                 return Err(TimelockError::CircularDependency);
+            }
+            if !env.storage().instance().has(&DataKey::Op(dep_id.clone())) {
+                return Err(TimelockError::NotFound);
             }
             Self::check_dependency_depth(&env, dep_id.clone(), 0)?;
         }
