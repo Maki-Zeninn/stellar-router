@@ -853,6 +853,14 @@ impl RouterAccess {
                 .instance()
                 .set(&DataKey::RoleMemberCount(role.clone()), &(count + 1));
         }
+        let expiry_timestamp = match expires_in {
+            Some(seconds) => env
+                .ledger()
+                .timestamp()
+                .checked_add(seconds)
+                .ok_or(AccessError::InvalidExpiry)?,
+            None => u64::MAX,
+        };
 
         let mut members: Vec<Address> = env
             .storage()
@@ -875,6 +883,26 @@ impl RouterAccess {
         env.storage()
             .instance()
             .set(&DataKey::RoleMembers(role.clone()), &members);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::HasRole(role.clone(), account.clone()), &true);
+
+        // Increment RoleMemberCount when the account transitions from inactive to active.
+        // This covers two cases:
+        //   1. Brand-new grant (no prior assignment).
+        //   2. Re-grant of a previously expired role (raw assignment exists but was inactive).
+        // An expiry update on a live role must NOT increment to avoid double-counting.
+        if !currently_active {
+            let count: u32 = env
+                .storage()
+                .instance()
+                .get::<DataKey, u32>(&DataKey::RoleMemberCount(role.clone()))
+                .unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&DataKey::RoleMemberCount(role.clone()), &(count + 1));
+        }
 
         let mut roles: Vec<String> = env
             .storage()

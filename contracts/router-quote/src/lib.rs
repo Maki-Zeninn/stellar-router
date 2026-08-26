@@ -347,9 +347,15 @@ impl RouterQuote {
         let mut configured_routes = Vec::new(&env);
 
         for route in routes {
-            if let Ok(fee) = Self::get_route_fee(env.clone(), route.clone()) {
-                configured_routes.push_back((route, fee));
-            }
+            let tiers = Self::get_route_fee_tiers(env.clone(), route.clone());
+            let fee = if let Some(lowest) = tiers.get(0) {
+                lowest.fee_bps
+            } else if let Ok(fee) = Self::get_route_fee(env.clone(), route.clone()) {
+                fee
+            } else {
+                continue;
+            };
+            configured_routes.push_back((route, fee));
         }
         configured_routes
     }
