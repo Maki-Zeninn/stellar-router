@@ -734,16 +734,17 @@ impl RouterTimelock {
     }
 
     /// Add an operation ID to the pending ops index.
+    ///
+    /// Callers must ensure `op_id` is not already tracked — `queue` guarantees
+    /// this via its `AlreadyQueued` check before calling this helper.
     fn add_to_pending_ops(env: &Env, op_id: &Bytes) {
         let mut pending: Vec<Bytes> = env
             .storage()
             .instance()
             .get(&DataKey::PendingOps)
             .unwrap_or_else(|| Vec::new(env));
-        if !pending.iter().any(|id| id == *op_id) {
-            pending.push_back(op_id.clone());
-            env.storage().instance().set(&DataKey::PendingOps, &pending);
-        }
+        pending.push_back(op_id.clone());
+        env.storage().instance().set(&DataKey::PendingOps, &pending);
     }
 
     /// Check dependency chain depth to prevent infinite recursion.
@@ -2151,6 +2152,8 @@ mod tests {
         let fake_id = Bytes::from_array(&env, &[0u8; 32]);
         let deps = client.get_dependencies(&fake_id);
         assert_eq!(deps.len(), 0);
+    }
+
     // ── Grace period overflow / cap tests ─────────────────────────────────────
 
     /// queue() must reject a grace_period_seconds value that exceeds

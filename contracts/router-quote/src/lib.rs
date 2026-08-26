@@ -88,7 +88,7 @@ pub enum QuoteError {
     /// The configured-routes index has reached [`MAX_TRACKED_ROUTES`]; cannot add more.
     TooManyRoutes = 9,
     /// A [`FeeTier`] has an invalid `min_amount` (e.g. negative).
-    InvalidFeeTier = 9,
+    InvalidFeeTier = 10,
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -217,7 +217,7 @@ impl RouterQuote {
         route: String,
     ) -> Result<(), QuoteError> {
         caller.require_auth();
-        Self::require_admin(&env, &caller)?;
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, QuoteError)?;
 
         env.storage()
             .instance()
@@ -654,7 +654,7 @@ mod tests {
     use super::*;
     use soroban_sdk::{
         testutils::{Address as _, Events},
-        vec, Env, String,
+        vec, Env, IntoVal, String, Symbol,
     };
 
     fn setup() -> (Env, Address, RouterQuoteClient<'static>) {
@@ -1316,5 +1316,45 @@ mod tests {
 
         let sorted = client.get_quotes_sorted(&requests);
         assert_eq!(sorted.len(), 0);
+    }
+
+    // ── Event emission tests (#1092) ──────────────────────────────────────────
+
+    #[test]
+    fn test_set_default_fee_emits_event() {
+        let (env, admin, client) = setup();
+        client.set_default_fee(&admin, &200);
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+
+        let topic: Symbol = last.1.get(0).unwrap().into_val(&env);
+        assert_eq!(
+            topic,
+            Symbol::new(&env, router_common::EVENT_DEFAULT_FEE_UPDATED)
+        );
+
+        let emitted_fee: u32 = last.2.into_val(&env);
+        assert_eq!(emitted_fee, 200);
+    }
+
+    #[test]
+    fn test_set_route_fee_emits_event() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+        client.set_route_fee(&admin, &route, &150);
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+
+        let topic: Symbol = last.1.get(0).unwrap().into_val(&env);
+        assert_eq!(
+            topic,
+            Symbol::new(&env, router_common::EVENT_ROUTE_FEE_SET)
+        );
+
+        let (emitted_route, emitted_fee): (String, u32) = last.2.into_val(&env);
+        assert_eq!(emitted_route, route);
+        assert_eq!(emitted_fee, 150);
     }
 }
