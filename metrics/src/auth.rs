@@ -69,14 +69,17 @@ pub async fn auth_middleware(
 
     match api_key {
         Some(key) => {
-            if let Some(expected_key) = &config.api_key {
-                if key == *expected_key {
-                    Ok(next.run(req).await)
-                } else {
-                    Err(AuthError::InvalidKey)
-                }
+            // `config.enabled` is only ever `true` when `from_env` also found an
+            // `api_key` (see `AuthConfig::from_env`), so this is guaranteed to be
+            // `Some` here — `AuthConfig` has no other public constructor.
+            let expected_key = config
+                .api_key
+                .as_ref()
+                .expect("enabled implies api_key is set");
+            if key == *expected_key {
+                Ok(next.run(req).await)
             } else {
-                Err(AuthError::Unauthorized)
+                Err(AuthError::InvalidKey)
             }
         }
         None => Err(AuthError::MissingKey),
@@ -115,8 +118,6 @@ pub enum AuthError {
     MissingKey,
     /// Invalid API key provided.
     InvalidKey,
-    /// Unauthorized access.
-    Unauthorized,
 }
 
 impl IntoResponse for AuthError {
@@ -124,7 +125,6 @@ impl IntoResponse for AuthError {
         let (status, message) = match self {
             AuthError::MissingKey => (StatusCode::UNAUTHORIZED, "Missing API key"),
             AuthError::InvalidKey => (StatusCode::UNAUTHORIZED, "Invalid API key"),
-            AuthError::Unauthorized => (StatusCode::FORBIDDEN, "Unauthorized"),
         };
 
         (status, message).into_response()

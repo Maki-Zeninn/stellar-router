@@ -311,7 +311,13 @@ impl RouterExecution {
     /// Get the current backoff configuration.
     ///
     /// Returns `(backoff_base_ms, backoff_multiplier)`.
-    pub fn backoff_config(env: Env) -> (u64, u32) {
+    ///
+    /// # Errors
+    /// * [`ExecutionError::NotInitialized`] — if the contract is not initialized.
+    pub fn backoff_config(env: Env) -> Result<(u64, u32), ExecutionError> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(ExecutionError::NotInitialized);
+        }
         let base: u64 = env
             .storage()
             .instance()
@@ -322,7 +328,7 @@ impl RouterExecution {
             .instance()
             .get(&DataKey::BackoffMultiplier)
             .unwrap_or(FIXED_POINT_SCALE);
-        (base, mult)
+        Ok((base, mult))
     }
 
     /// Execute a transaction with structured error handling and optional retry.
@@ -678,11 +684,18 @@ impl RouterExecution {
     }
 
     /// Get the current cap on the number of execution history records retained.
-    pub fn max_history_size(env: Env) -> u32 {
-        env.storage()
+    ///
+    /// # Errors
+    /// * [`ExecutionError::NotInitialized`] — if the contract is not initialized.
+    pub fn max_history_size(env: Env) -> Result<u32, ExecutionError> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(ExecutionError::NotInitialized);
+        }
+        Ok(env
+            .storage()
             .instance()
             .get(&DataKey::MaxHistorySize)
-            .unwrap_or(DEFAULT_MAX_HISTORY_SIZE)
+            .unwrap_or(DEFAULT_MAX_HISTORY_SIZE))
     }
 
     /// Return up to `limit` most-recent execution history records (newest first).
@@ -1138,6 +1151,16 @@ mod tests {
     }
 
     #[test]
+    fn test_max_history_size_uninitialized_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let result = client.try_max_history_size();
+        assert_eq!(result, Err(Ok(ExecutionError::NotInitialized)));
+    }
+
+    #[test]
     fn test_set_max_history_size_zero_fails() {
         let (_, admin, client) = setup();
         let result = client.try_set_max_history_size(&admin, &0);
@@ -1297,6 +1320,16 @@ mod tests {
         let attacker = Address::generate(&env);
         let result = client.try_set_backoff_config(&attacker, &1000, &200);
         assert_eq!(result, Err(Ok(ExecutionError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_backoff_config_uninitialized_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let result = client.try_backoff_config();
+        assert_eq!(result, Err(Ok(ExecutionError::NotInitialized)));
     }
 
     #[test]

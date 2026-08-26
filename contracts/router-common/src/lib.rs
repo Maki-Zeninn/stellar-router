@@ -446,7 +446,11 @@ pub fn is_whitespace_only(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{contract, contracterror, testutils::Address as _, Env};
+    use soroban_sdk::{
+        contract, contracterror,
+        testutils::{Address as _, Events as _},
+        Env,
+    };
 
     #[test]
     fn test_empty_string_is_whitespace_only() {
@@ -668,6 +672,37 @@ mod tests {
             let r_simple =
                 require_admin_simple!(&env, &other, &CommonDataKey::Admin, AdminTestError);
             assert_eq!(r_full, r_simple);
+        });
+    }
+
+    // ── admin_transfer_complete! tests ────────────────────────────────────────
+
+    /// admin_transfer_complete! writes the new admin to storage and publishes
+    /// the admin_transferred event.
+    #[test]
+    fn admin_transfer_complete_sets_admin_and_emits_event() {
+        let env = Env::default();
+        let id = env.register_contract(None, AdminTestContract);
+        env.as_contract(&id, || {
+            let old_admin = Address::generate(&env);
+            let new_admin = Address::generate(&env);
+            env.storage()
+                .instance()
+                .set(&CommonDataKey::Admin, &old_admin);
+
+            crate::admin_transfer_complete!(&env, &old_admin, &new_admin, &CommonDataKey::Admin);
+
+            assert_eq!(get_admin(&env, &CommonDataKey::Admin), Some(new_admin));
+
+            let event = env.events().all().last().unwrap().clone();
+            assert_eq!(event.0, id);
+            assert_eq!(
+                event.1,
+                soroban_sdk::vec![
+                    &env,
+                    soroban_sdk::Symbol::new(&env, EVENT_ADMIN_TRANSFERRED).into_val(&env)
+                ]
+            );
         });
     }
 }
