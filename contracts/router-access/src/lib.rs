@@ -1852,6 +1852,34 @@ mod tests {
         assert_eq!(client.get_role_parent(&role_c), None);
     }
 
+    // ensure_no_role_parent_cycle starts at depth=1 for the new edge itself and
+    // checks `depth >= MAX_HIERARCHY_DEPTH` before following each subsequent
+    // parent.  With MAX_HIERARCHY_DEPTH = 16 a chain of 15 existing edges
+    // (role-0 -> role-1 -> ... -> role-14, roles 0..=14) is fully accepted.
+    // Attempting to add role-15 -> role-0 as the 16th edge makes the walk
+    // reach depth 16 (== MAX_HIERARCHY_DEPTH) before it can confirm the chain
+    // is acyclic, so HierarchyTooDeep is returned.
+    #[test]
+    fn test_set_role_parent_rejects_chain_deeper_than_max_hierarchy_depth() {
+        let (env, admin, client) = setup();
+
+        // role-0 .. role-15  (16 role strings)
+        let mut roles = std::vec::Vec::new();
+        for i in 0u32..16 {
+            roles.push(String::from_str(&env, &std::format!("role-{}", i)));
+        }
+
+        // Build role-0 -> role-1 -> ... -> role-14  (15 edges, all accepted)
+        for i in 0usize..15 {
+            client.set_role_parent(&admin, &roles[i], &roles[i + 1]);
+        }
+
+        // A 16th edge (role-15 -> role-0) would require walking 16 steps,
+        // hitting depth == MAX_HIERARCHY_DEPTH inside ensure_no_role_parent_cycle.
+        let result = client.try_set_role_parent(&admin, &roles[15], &roles[0]);
+        assert_eq!(result, Err(Ok(AccessError::HierarchyTooDeep)));
+    }
+
     #[test]
     fn test_get_role_parent_returns_none_when_not_set() {
         // Mirrors test_get_role_admin_returns_none_when_not_set for get_role_parent.
