@@ -331,6 +331,11 @@ impl RouterAccess {
             return Err(AccessError::CannotBlacklistAdmin);
         }
 
+        // No-op if already blacklisted — avoids double-decrementing RoleMemberCount.
+        if Self::is_blacklisted_internal(&env, &target) {
+            return Ok(());
+        }
+
         // Decrement RoleMemberCount for every role the target currently holds
         // actively (directly), since has_role_internal/get_role_members will
         // stop counting them the moment they're blacklisted — must be read
@@ -352,6 +357,16 @@ impl RouterAccess {
     pub fn unblacklist(env: Env, caller: Address, target: Address) -> Result<(), AccessError> {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::SuperAdmin, AccessError)?;
+
+        // No-op if not currently blacklisted — avoids spuriously incrementing
+        // RoleMemberCount for an address whose counts were never decremented.
+        if !Self::is_blacklisted_internal(&env, &target) {
+            return Ok(());
+        }
+
+        // Remove the flag *before* adjusting counts so that
+        // has_direct_role_internal (called inside adjust) sees the address as
+        // active and correctly identifies which roles to re-increment.
         env.storage()
             .instance()
             .remove(&DataKey::Blacklisted(target.clone()));
