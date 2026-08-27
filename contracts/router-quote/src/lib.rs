@@ -88,6 +88,12 @@ pub enum QuoteError {
     /// The configured-routes index has reached [`MAX_TRACKED_ROUTES`]; cannot add more.
     TooManyRoutes = 9,
     /// A [`FeeTier`] has an invalid `min_amount` (e.g. negative).
+    ///
+    /// Assigned discriminant `10` to resolve a duplicate-discriminant bug where
+    /// both `TooManyRoutes` and `InvalidFeeTier` were previously encoded as `9`.
+    /// Callers and generated client code that match on raw error codes could not
+    /// distinguish the two errors; renumbering this variant to `10` restores
+    /// unambiguous decoding. Fixes #1075.
     InvalidFeeTier = 10,
 }
 
