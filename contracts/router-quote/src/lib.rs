@@ -83,7 +83,10 @@ pub enum QuoteError {
     InvalidAmount = 4,
     InvalidFeeBps = 5,
     NoQuotesProvided = 6,
-    RouteNotFound = 7,
+    // NOTE: value 7 (RouteNotFound) is retired — it was declared but never
+    // constructed or returned by any function in this crate. Do not reuse
+    // numeric value 7 in future variants to avoid ambiguity with errors
+    // surfaced by old deployed contract versions.
     ArithmeticOverflow = 8,
     /// The configured-routes index has reached [`MAX_TRACKED_ROUTES`]; cannot add more.
     TooManyRoutes = 9,
