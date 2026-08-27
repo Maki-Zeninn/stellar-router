@@ -337,7 +337,7 @@ fn test_timelock_execute_too_early() {
     let (env, admin) = make_env();
     let id = env.register_contract(None, RouterTimelock);
     let client = RouterTimelockClient::new(&env, &id);
-    client.initialize(&admin, &3600);
+    client.initialize(&admin, &3600, &1000);
 
     let deps = Vec::new(&env);
     let op_id = client.queue(
@@ -345,11 +345,12 @@ fn test_timelock_execute_too_early() {
         &String::from_str(&env, "upgrade oracle"),
         &Address::generate(&env),
         &3600,
+        &86_400,
         &deps,
     );
 
     let result = client.try_execute(&admin, &op_id);
-    assert_eq!(result, Err(Ok(TimelockError::TooEarly)));
+    assert_eq!(result, Err(Ok(TimelockError::NotReady)));
 }
 
 #[test]
@@ -357,7 +358,7 @@ fn test_timelock_delay_below_minimum_fails() {
     let (env, admin) = make_env();
     let id = env.register_contract(None, RouterTimelock);
     let client = RouterTimelockClient::new(&env, &id);
-    client.initialize(&admin, &3600);
+    client.initialize(&admin, &3600, &1000);
 
     let deps = Vec::new(&env);
     let result = client.try_queue(
@@ -365,9 +366,10 @@ fn test_timelock_delay_below_minimum_fails() {
         &String::from_str(&env, "upgrade oracle"),
         &Address::generate(&env),
         &100, // below min_delay of 3600
+        &86_400,
         &deps,
     );
-    assert_eq!(result, Err(Ok(TimelockError::InvalidDelay)));
+    assert_eq!(result, Err(Ok(TimelockError::DelayTooShort)));
 }
 
 #[test]
@@ -375,7 +377,7 @@ fn test_timelock_execute_cancelled_op_fails() {
     let (env, admin) = make_env();
     let id = env.register_contract(None, RouterTimelock);
     let client = RouterTimelockClient::new(&env, &id);
-    client.initialize(&admin, &3600);
+    client.initialize(&admin, &3600, &1000);
 
     let deps = Vec::new(&env);
     let op_id = client.queue(
@@ -383,13 +385,14 @@ fn test_timelock_execute_cancelled_op_fails() {
         &String::from_str(&env, "upgrade oracle"),
         &Address::generate(&env),
         &3600,
+        &86_400,
         &deps,
     );
     client.cancel(&admin, &op_id);
 
     env.ledger().with_mut(|l| l.timestamp += 3601);
     let result = client.try_execute(&admin, &op_id);
-    assert_eq!(result, Err(Ok(TimelockError::AlreadyCancelled)));
+    assert_eq!(result, Err(Ok(TimelockError::Cancelled)));
 }
 
 #[test]
@@ -397,7 +400,7 @@ fn test_timelock_double_execute_fails() {
     let (env, admin) = make_env();
     let id = env.register_contract(None, RouterTimelock);
     let client = RouterTimelockClient::new(&env, &id);
-    client.initialize(&admin, &3600);
+    client.initialize(&admin, &3600, &1000);
 
     let deps = Vec::new(&env);
     let op_id = client.queue(
@@ -405,6 +408,7 @@ fn test_timelock_double_execute_fails() {
         &String::from_str(&env, "upgrade oracle"),
         &Address::generate(&env),
         &3600,
+        &86_400,
         &deps,
     );
     env.ledger().with_mut(|l| l.timestamp += 3601);
@@ -419,7 +423,7 @@ fn test_timelock_unauthorized_queue_fails() {
     let (env, admin) = make_env();
     let id = env.register_contract(None, RouterTimelock);
     let client = RouterTimelockClient::new(&env, &id);
-    client.initialize(&admin, &3600);
+    client.initialize(&admin, &3600, &1000);
 
     let attacker = Address::generate(&env);
     let deps = Vec::new(&env);
@@ -428,6 +432,7 @@ fn test_timelock_unauthorized_queue_fails() {
         &String::from_str(&env, "malicious"),
         &Address::generate(&env),
         &3600,
+        &86_400,
         &deps,
     );
     assert_eq!(result, Err(Ok(TimelockError::Unauthorized)));

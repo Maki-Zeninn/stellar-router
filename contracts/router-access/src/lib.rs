@@ -946,15 +946,18 @@ impl RouterAccess {
         if Self::is_blacklisted_internal(env, caller) {
             return Err(AccessError::Blacklisted);
         }
-        if let Some(admin) = env
+        
+        // Check if super admin exists first, return NotInitialized if not
+        let admin: Address = env
             .storage()
             .instance()
-            .get::<DataKey, Address>(&DataKey::SuperAdmin)
-        {
-            if &admin == caller {
-                return Ok(());
-            }
+            .get(&DataKey::SuperAdmin)
+            .ok_or(AccessError::NotInitialized)?;
+        
+        if &admin == caller {
+            return Ok(());
         }
+        
         if let Some(role_admin) = env
             .storage()
             .instance()

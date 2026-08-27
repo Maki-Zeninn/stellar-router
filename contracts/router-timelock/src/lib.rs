@@ -595,7 +595,7 @@ impl RouterTimelock {
     pub fn get_operations_by_status(
         env: Env,
         status: OperationStatus,
-    ) -> Result<Vec<(Bytes, Op)>, TimelockError> {
+    ) -> Vec<(Bytes, Op)> {
         let pending: Vec<Bytes> = env
             .storage()
             .instance()
@@ -637,7 +637,7 @@ impl RouterTimelock {
             }
         }
 
-        Ok(result)
+        result
     }
 
     /// Get the maximum allowed number of pending operations.
