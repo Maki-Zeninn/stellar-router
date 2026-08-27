@@ -760,6 +760,63 @@ mod tests {
         pub fn fail(_env: Env) {
             panic!("intended failure");
         }
+        /// Echoes the value it received (for direct-call cross-checks).
+        pub fn echo(_env: Env, value: u32) -> u32 {
+            value
+        }
+        /// Records the value it received in instance storage, so a test can
+        /// verify — via `get_recorded_arg` — the exact value that arrived at
+        /// the target contract through `execute_batch`, not merely that
+        /// *some* call of the right shape succeeded.
+        pub fn record_arg(env: Env, value: u32) {
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "recorded_arg"), &value);
+        }
+        pub fn get_recorded_arg(env: Env) -> u32 {
+            env.storage()
+                .instance()
+                .get(&Symbol::new(&env, "recorded_arg"))
+                .unwrap_or(0)
+        }
+    }
+
+    /// Regression test for #1058: `CallDescriptor.args` must be forwarded
+    /// intact (not dropped, reordered, or corrupted) to the invoked contract.
+    #[test]
+    fn test_call_args_are_forwarded_to_target() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut args: Vec<Val> = Vec::new(&env);
+        args.push_back(42u32.into_val(&env));
+
+        let mut calls = Vec::new(&env);
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "record_arg"),
+            required: true,
+            instruction_budget: None,
+            args,
+        });
+
+        let summary = client.execute_batch(&caller, &calls, &false, &false, &false, &None);
+        let (total, succeeded, failed) = batch_counts(&summary);
+        assert_eq!(total, 1);
+        assert_eq!(succeeded, 1);
+        assert_eq!(failed, 0);
+
+        // The real assertion: confirm the *value* that reached the target
+        // contract via execute_batch is exactly the one sent, not
+        // dropped/reordered/corrupted (e.g. by an accidental
+        // `Vec::new(&env)` in place of `call.args.clone()`).
+        let mock_client = MockContractClient::new(&env, &mock_id);
+        assert_eq!(mock_client.get_recorded_arg(), 42u32);
+
+        // Also verify `echo` (direct, non-batch call) as a sanity cross-check
+        // that the mock's argument-passing behaves as expected.
+        assert_eq!(mock_client.echo(&42u32), 42u32);
     }
 
     #[test]

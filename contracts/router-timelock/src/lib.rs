@@ -43,15 +43,21 @@ pub enum DataKey {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Op {
+    /// Address that queued this operation via `queue`.
     pub proposer: Address,
+    /// Human-readable description of the operation; can be updated via `update_description`.
     pub description: String,
+    /// Address the operation applies to.
     pub target: Address,
+    /// Unix timestamp (ledger time) after which the operation becomes executable.
     pub eta: u64,
     /// Seconds after `eta` during which the operation may be executed.
     /// After `eta + grace_period_seconds` the operation is considered expired
     /// and can no longer be executed.
     pub grace_period_seconds: u64,
+    /// Whether `execute` has successfully run for this operation.
     pub executed: bool,
+    /// Whether `cancel` was called on this operation before execution.
     pub cancelled: bool,
 }
 
