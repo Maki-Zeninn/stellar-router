@@ -2714,6 +2714,13 @@ mod tests {
     }
 
     #[test]
+    fn test_get_route_dependencies_nonexistent_route_fails() {
+        let (env, _admin, client) = setup();
+        let result = client.try_get_route_dependencies(&String::from_str(&env, "missing"));
+        assert_eq!(result, Err(Ok(RouterError::RouteNotFound)));
+    }
+
+    #[test]
     fn test_circular_dependency_is_rejected() {
         let (env, admin, client) = setup();
         let name = String::from_str(&env, "oracle");

@@ -33,6 +33,7 @@ pub enum DataKey {
     TotalBatches,
     Executing,             // reentrancy guard
     BatchResult(u64, u32), // (batch_id, call_index) -> CallResult
+    BatchCallCount(u64),   // batch_id -> number of BatchResult entries stored for that batch
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -337,14 +338,31 @@ impl RouterMulticall {
                 .instance()
                 .set(&DataKey::TotalBatches, &new_batch_id);
 
+            // Record how many BatchResult entries were actually stored for this
+            // batch, so a later prune can remove exactly those entries even if
+            // max_batch_size is lowered before this batch becomes stale.
+            if store_results {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::BatchCallCount(batch_id), &call_index);
+            }
+
             // Prune stale batch results to prevent unbounded ledger growth.
             if store_results && new_batch_id > MAX_STORED_BATCHES {
                 let stale_id = new_batch_id - MAX_STORED_BATCHES - 1;
-                for i in 0..max {
+                let stale_count: u32 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::BatchCallCount(stale_id))
+                    .unwrap_or(max);
+                for i in 0..stale_count {
                     env.storage()
                         .instance()
                         .remove(&DataKey::BatchResult(stale_id, i));
                 }
+                env.storage()
+                    .instance()
+                    .remove(&DataKey::BatchCallCount(stale_id));
             }
         }
 
