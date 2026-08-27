@@ -98,6 +98,7 @@ impl RouterAccess {
     ) -> Result<(), AccessError> {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::SuperAdmin, AccessError)?;
+        Self::require_super_admin(&env, &caller)?;
         let effective_max_roles = if max_roles == 0 { DEFAULT_MAX_ROLES } else { max_roles };
         let effective_max_grants = if max_grants_per_role == 0 {
             DEFAULT_MAX_GRANTS_PER_ROLE
@@ -244,6 +245,7 @@ impl RouterAccess {
     ) -> Result<(), AccessError> {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::SuperAdmin, AccessError)?;
+        Self::require_super_admin(&env, &caller)?;
         if Self::is_blacklisted_internal(&env, &admin) {
             return Err(AccessError::Blacklisted);
         }
@@ -275,6 +277,7 @@ impl RouterAccess {
     ) -> Result<(), AccessError> {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::SuperAdmin, AccessError)?;
+        Self::require_super_admin(&env, &caller)?;
         Self::ensure_no_role_parent_cycle(&env, &role, &parent_role)?;
 
         Self::track_role_in_all_roles(&env, &role)?;
@@ -321,6 +324,7 @@ impl RouterAccess {
     pub fn blacklist(env: Env, caller: Address, target: Address) -> Result<(), AccessError> {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::SuperAdmin, AccessError)?;
+        Self::require_super_admin(&env, &caller)?;
 
         let super_admin: Address = env
             .storage()
@@ -357,6 +361,7 @@ impl RouterAccess {
     pub fn unblacklist(env: Env, caller: Address, target: Address) -> Result<(), AccessError> {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::SuperAdmin, AccessError)?;
+        Self::require_super_admin(&env, &caller)?;
 
         // No-op if not currently blacklisted — avoids spuriously incrementing
         // RoleMemberCount for an address whose counts were never decremented.
@@ -1881,3 +1886,4 @@ mod tests {
         assert!(!client.is_blacklisted(&addr));
     }
 }
+
