@@ -15,6 +15,7 @@
 //! - `max_total_gas` — pre-flight cumulative instruction-budget cap to reject over-budget batches before execution
 //!
 //! ## Events (following naming convention: past tense verbs in snake_case)
+//! - `initialized` — Contract initialized (admin, max_batch_size)
 //! - `call_result` — Individual call result logged (caller, target, function, success)
 //! - `batch_executed` — Batch execution completed (summary_data)
 //! - `max_batch_size_updated` — Max batch size updated (old_size, new_size)
@@ -144,6 +145,12 @@ impl RouterMulticall {
             .instance()
             .set(&DataKey::MaxBatchSize, &max_batch_size);
         env.storage().instance().set(&DataKey::TotalBatches, &0u64);
+
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_INITIALIZED),),
+            (admin, max_batch_size),
+        );
+
         Ok(())
     }
 
