@@ -1422,7 +1422,7 @@ mod tests {
         assert_eq!(last_event.0, contract_id);
 
         let topic: Symbol = last_event.1.get(0).unwrap().into_val(&env);
-        assert_eq!(topic, Symbol::new(&env, "admin_transferred"));
+        assert_eq!(topic, Symbol::new(&env, router_common::EVENT_ADMIN_TRANSFERRED));
 
         let (emitted_old, emitted_new): (Address, Address) = last_event.2.into_val(&env);
         assert_eq!(emitted_old, old_admin);

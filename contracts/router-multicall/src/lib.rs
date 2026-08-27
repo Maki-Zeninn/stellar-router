@@ -863,7 +863,7 @@ mod tests {
         let events = env.events().all();
         let last = events.last().unwrap();
         let topic: Symbol = last.1.get(0).unwrap().into_val(&env);
-        assert_eq!(topic, Symbol::new(&env, "admin_transferred"));
+        assert_eq!(topic, Symbol::new(&env, router_common::EVENT_ADMIN_TRANSFERRED));
         let (event_old, event_new): (Address, Address) = last.2.into_val(&env);
         assert_eq!(event_old, admin);
         assert_eq!(event_new, new_admin);

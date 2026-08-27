@@ -1193,7 +1193,7 @@ mod tests {
         assert_eq!(event.0, client.address);
         assert_eq!(
             event.1,
-            vec![&env, Symbol::new(&env, "admin_transferred").into_val(&env)]
+            vec![&env, Symbol::new(&env, router_common::EVENT_ADMIN_TRANSFERRED).into_val(&env)]
         );
         let (old, new): (Address, Address) = event.2.into_val(&env);
         assert_eq!(old, admin);
