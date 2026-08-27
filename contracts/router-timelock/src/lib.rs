@@ -649,11 +649,14 @@ impl RouterTimelock {
     }
 
     /// Get the minimum delay.
-    pub fn min_delay(env: Env) -> u64 {
+    ///
+    /// # Errors
+    /// Returns `TimelockError::NotInitialized` if the contract has not been initialized.
+    pub fn min_delay(env: Env) -> Result<u64, TimelockError> {
         env.storage()
             .instance()
             .get(&DataKey::MinDelay)
-            .unwrap_or(0)
+            .ok_or(TimelockError::NotInitialized)
     }
 
     /// Update the minimum delay (seconds) required for newly queued operations.
@@ -1522,7 +1525,7 @@ mod tests {
     fn test_set_min_delay_updates_value() {
         let (_env, admin, client) = setup();
         client.set_min_delay(&admin, &7200);
-        assert_eq!(client.min_delay(), 7200);
+        assert_eq!(client.min_delay(), Ok(7200));
     }
 
     #[test]
