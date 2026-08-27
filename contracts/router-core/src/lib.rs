@@ -781,7 +781,13 @@ impl RouterCore {
             for (index, name) in names.iter().enumerate() {
                 let idx = index as u32;
                 if !env.storage().instance().has(&DataKey::Route(name.clone())) {
-                    result.record_failure(idx, router_common::BatchItemError::AlreadyExists);
+                    result.record_failure(
+                        idx,
+                        router_common::BatchItemError::Custom(soroban_sdk::String::from_str(
+                            &env,
+                            "RouteNotFound",
+                        )),
+                    );
                     return Ok(result);
                 }
             }
@@ -4729,6 +4735,30 @@ mod tests {
         );
         let resolve_result = client.try_resolve(&name);
         assert_eq!(resolve_result, Err(Ok(RouterError::RouteNotFound)));
+    }
+
+    #[test]
+    fn test_remove_routes_batch_fail_fast_missing_route_reports_route_not_found() {
+        // Regression test for issue #1050: the fail_fast prevalidation loop in
+        // remove_routes_batch used to record `AlreadyExists` for a route name
+        // that does NOT exist, instead of `Custom("RouteNotFound")` (the value
+        // the non-fail_fast path already produces via remove_route_internal).
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+        let names = vec![&env, name.clone(), String::from_str(&env, "missing")];
+        let result = client.remove_routes_batch(&admin, &names, &true);
+        assert_eq!(result.successes.len(), 0);
+        assert_eq!(result.failures.len(), 1);
+        assert_eq!(
+            result.failures.get(0).unwrap().error,
+            router_common::BatchItemError::Custom(String::from_str(&env, "RouteNotFound"))
+        );
+        // fail_fast must not have removed the route it validated before hitting
+        // the missing one.
+        let resolve_result = client.try_resolve(&name);
+        assert!(resolve_result.is_ok());
     }
 
     // ΓöÇΓöÇ Issue #582: cached best-route selection & pagination ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ

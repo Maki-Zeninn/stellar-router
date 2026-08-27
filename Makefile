@@ -1,7 +1,10 @@
-.PHONY: fmt-check test-all lint build-wasm
+.PHONY: fmt-check check test-all lint build-wasm
 
 fmt-check:
 	cargo fmt --check
+
+check:
+	cargo check --workspace
 
 test-all:
 	cargo test --workspace
