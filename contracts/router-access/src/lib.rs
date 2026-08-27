@@ -490,52 +490,7 @@ impl RouterAccess {
             .ok_or(AccessError::RoleNotFound)?;
 
         // Remove grant from source (including member counters/lists).
-        let from_key = DataKey::HasRole(role.clone(), from.clone());
-        if !env.storage().instance().has(&from_key) {
-            return Err(AccessError::RoleNotFound);
-        }
-
-        let was_active = true; // we already validated from is active
-        env.storage().instance().remove(&from_key);
-        if was_active {
-            let current: u32 = env
-                .storage()
-                .instance()
-                .get::<DataKey, u32>(&DataKey::RoleMemberCount(role.clone()))
-                .unwrap_or(0u32);
-            let new_count = current.saturating_sub(1);
-            env.storage()
-                .instance()
-                .set(&DataKey::RoleMemberCount(role.clone()), &new_count);
-        }
-
-        let mut members: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&DataKey::RoleMembers(role.clone()))
-            .unwrap_or_else(|| Vec::new(&env));
-        if let Some(i) = members.iter().position(|a| a == from) {
-            members.remove(i as u32);
-        }
-        env.storage()
-            .instance()
-            .set(&DataKey::RoleMembers(role.clone()), &members);
-
-        let mut roles: Vec<String> = env
-            .storage()
-            .instance()
-            .get(&DataKey::AddressRoles(from.clone()))
-            .unwrap_or_else(|| Vec::new(&env));
-        if let Some(i) = roles.iter().position(|r| r == role) {
-            roles.remove(i as u32);
-        }
-        env.storage()
-            .instance()
-            .set(&DataKey::AddressRoles(from.clone()), &roles);
-
-        env.storage()
-            .instance()
-            .remove(&DataKey::RoleExpiry(role.clone(), from.clone()));
+        Self::deactivate_role_grant(&env, &role, &from);
 
         // Grant to destination with same expiry timestamp.
         if Self::is_blacklisted_internal(&env, &to) {
