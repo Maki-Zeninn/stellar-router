@@ -3,13 +3,14 @@
 //! # router-quote
 //!
 //! Quote calculation and route comparison for the stellar-router suite.
-//! Provides configurable fee-based quote calculations and best-route selection.
+//! Provides configurable fee-based quote calculations and best-route selection
+//! with support for multi-hop routes across fee tiers.
 //!
 //! ## Features
 //! - Configurable fee basis points (fee_bps) per route
+//! - Multi-hop route support with per-hop fee tier configuration
 //! - Multiple quote comparison
 //! - Best quote selection based on highest output amount
-//! - Integration with liquidity plugins
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
