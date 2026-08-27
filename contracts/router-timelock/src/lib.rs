@@ -21,14 +21,21 @@ use soroban_sdk::{
     Symbol, Vec,
 };
 
+/// Complete storage-key map for the router-timelock contract.
 #[contracttype]
 pub enum DataKey {
+    /// The admin address authorized to manage timelock operations.
     Admin,
+    /// The minimum delay (in seconds) enforced before an operation can be executed.
     MinDelay,
-    Op(Bytes),     // op_id -> Op
-    PendingOps,    // Vec<Bytes> — IDs of ops that are neither executed nor cancelled
-    MaxPendingOps, // u32 — Maximum allowed pending operations
-    Deps(Bytes),   // op_id -> Vec<Bytes> — dependency op IDs
+    /// `op_id -> Op`: maps an operation id to its pending operation.
+    Op(Bytes),
+    /// `Vec<Bytes>`: IDs of ops that are neither executed nor cancelled.
+    PendingOps,
+    /// `u32`: maximum allowed number of pending operations.
+    MaxPendingOps,
+    /// `op_id -> Vec<Bytes>`: dependency operation IDs for a given op.
+    Deps(Bytes),
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
