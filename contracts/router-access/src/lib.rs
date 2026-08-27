@@ -555,6 +555,14 @@ impl RouterAccess {
         Ok(())
     }
 
+    /// Transfer super-admin control to a new address.
+    ///
+    /// The current super-admin must authorise the call. The destination is
+    /// checked against the blacklist before the transfer completes. After a
+    /// successful transfer the previous super-admin loses all privileged
+    /// access — this operation cannot be undone by the old admin.
+    ///
+    /// See also: [`Self::blacklist`], [`Self::unblacklist`].
     pub fn transfer_super_admin(
         env: Env,
         current: Address,
