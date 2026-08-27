@@ -19,6 +19,7 @@ use soroban_sdk::{
 
 #[contracttype]
 pub enum DataKey {
+    /// The current admin address.
     Admin,
     /// Route name -> fee in basis points (1 bps = 0.01%)
     RouteFee(String),
@@ -26,6 +27,8 @@ pub enum DataKey {
     RouteFeeTiers(String),
     /// Default fee if route-specific fee not set (in basis points)
     DefaultFee,
+    /// Index of all route names that have ever had a fee or fee-tier set,
+    /// used by `get_all_configured_routes`.
     ConfiguredRoutes,
 }
 
