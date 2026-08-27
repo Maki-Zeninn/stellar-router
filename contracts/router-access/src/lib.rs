@@ -890,7 +890,7 @@ impl RouterAccess {
         env.storage().instance().set(&key, &expiry_timestamp);
 
         env.events().publish(
-            (Symbol::new(env, router_common::EVENT_ROLE_GRANT),),
+            (Symbol::new(env, router_common::EVENT_ROLE_GRANTED),),
             (account.clone(), role.clone(), expiry_timestamp),
         );
         Ok(())
