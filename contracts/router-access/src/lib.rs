@@ -1915,5 +1915,133 @@ mod tests {
         client.unblacklist(&admin, &addr);
         assert!(!client.is_blacklisted(&addr));
     }
+
+    // ── Issue #1051: transfer_role_membership coverage ──────────────────────
+
+    #[test]
+    fn test_transfer_role_membership_moves_active_grant() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+        client.grant_role(&admin, &from, &role, &Some(100));
+
+        client.transfer_role_membership(&admin, &role, &from, &to);
+
+        assert!(!client.has_role(&from, &role));
+        assert!(client.has_role(&to, &role));
+        assert_eq!(client.get_role_member_count(&role), 1);
+
+        // Members list / address-roles bookkeeping should reflect the move.
+        let members = client.get_role_members(&role);
+        assert!(members.iter().any(|a| a == to));
+        assert!(!members.iter().any(|a| a == from));
+        assert!(client.get_roles_for_address(&to).iter().any(|r| r == role));
+        assert!(!client.get_roles_for_address(&from).iter().any(|r| r == role));
+    }
+
+    #[test]
+    fn test_transfer_role_membership_preserves_expiry() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+        client.grant_role(&admin, &from, &role, &Some(500));
+        let expiry = client.get_role_expiry(&role, &from).unwrap();
+
+        client.transfer_role_membership(&admin, &role, &from, &to);
+
+        assert_eq!(client.get_role_expiry(&role, &to), Some(expiry));
+    }
+
+    #[test]
+    fn test_transfer_role_membership_rejects_inactive_source() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+
+        // `from` never had the role granted at all.
+        let result = client.try_transfer_role_membership(&admin, &role, &from, &to);
+        assert_eq!(result, Err(Ok(AccessError::RoleNotFound)));
+    }
+
+    #[test]
+    fn test_transfer_role_membership_rejects_expired_source() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+        client.grant_role(&admin, &from, &role, &Some(10));
+
+        env.ledger().set_timestamp(env.ledger().timestamp() + 20);
+
+        let result = client.try_transfer_role_membership(&admin, &role, &from, &to);
+        assert_eq!(result, Err(Ok(AccessError::RoleNotFound)));
+    }
+
+    #[test]
+    fn test_transfer_role_membership_rejects_destination_with_existing_role() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+        client.grant_role(&admin, &from, &role, &Some(100));
+        client.grant_role(&admin, &to, &role, &Some(100));
+
+        let result = client.try_transfer_role_membership(&admin, &role, &from, &to);
+        assert_eq!(result, Err(Ok(AccessError::DestinationAlreadyHasRole)));
+
+        // State must be untouched by the rejected transfer.
+        assert!(client.has_role(&from, &role));
+        assert!(client.has_role(&to, &role));
+        assert_eq!(client.get_role_member_count(&role), 2);
+    }
+
+    #[test]
+    fn test_transfer_role_membership_self_transfer_is_noop() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let from = Address::generate(&env);
+        client.grant_role(&admin, &from, &role, &Some(100));
+        let expiry_before = client.get_role_expiry(&role, &from);
+        let count_before = client.get_role_member_count(&role);
+
+        client.transfer_role_membership(&admin, &role, &from, &from);
+
+        assert!(client.has_role(&from, &role));
+        assert_eq!(client.get_role_expiry(&role, &from), expiry_before);
+        assert_eq!(client.get_role_member_count(&role), count_before);
+    }
+
+    #[test]
+    fn test_transfer_role_membership_rejects_blacklisted_destination() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+        client.grant_role(&admin, &from, &role, &Some(100));
+        client.blacklist(&admin, &to);
+
+        let result = client.try_transfer_role_membership(&admin, &role, &from, &to);
+        assert_eq!(result, Err(Ok(AccessError::Blacklisted)));
+    }
+
+    #[test]
+    fn test_transfer_role_membership_rejects_unauthorized_caller() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        client.grant_role(&admin, &from, &role, &Some(100));
+
+        let result = client.try_transfer_role_membership(&stranger, &role, &from, &to);
+        assert_eq!(result, Err(Ok(AccessError::Unauthorized)));
+
+        // State must be untouched.
+        assert!(client.has_role(&from, &role));
+        assert!(!client.has_role(&to, &role));
+    }
 }
 
