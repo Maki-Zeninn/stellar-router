@@ -1028,6 +1028,36 @@ mod tests {
     // ... (all your existing tests remain unchanged) ...
 
     #[test]
+    fn test_grant_role_fails_when_max_roles_exceeded() {
+        let (env, admin, client) = setup();
+        client.set_role_limits(&admin, &1, &0); // only 1 distinct role name allowed
+        let user = Address::generate(&env);
+
+        let role_a = String::from_str(&env, "role-a");
+        client.grant_role(&admin, &user, &role_a, &None); // consumes the only slot
+
+        let role_b = String::from_str(&env, "role-b");
+        let result = client.try_grant_role(&admin, &user, &role_b, &None);
+        assert_eq!(result, Err(Ok(AccessError::MaxRolesExceeded)));
+    }
+
+    #[test]
+    fn test_regrant_of_tracked_role_does_not_hit_max_roles_cap() {
+        let (env, admin, client) = setup();
+        client.set_role_limits(&admin, &1, &0); // only 1 distinct role name allowed
+        let user_one = Address::generate(&env);
+        let user_two = Address::generate(&env);
+
+        let role_a = String::from_str(&env, "role-a");
+        client.grant_role(&admin, &user_one, &role_a, &None); // consumes the only slot
+
+        // Granting the same (already-tracked) role name to a different address
+        // must not hit the MaxRolesExceeded cap, since AllRoles is unchanged.
+        let result = client.try_grant_role(&admin, &user_two, &role_a, &None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn test_expired_role_not_recognized() {
         let (env, admin, client) = setup();
         let role = String::from_str(&env, "operator");
