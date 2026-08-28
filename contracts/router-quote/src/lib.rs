@@ -247,6 +247,13 @@ impl RouterQuote {
             .instance()
             .remove(&DataKey::RouteFee(route.clone()));
 
+        // (#1183) unset_route_fee must also clear the tier schedule written by
+        // set_route_fee_tiers — resolve_route_fee_bps checks tiers first, so
+        // leaving them in place kept quotes priced off the "removed" fee.
+        env.storage()
+            .instance()
+            .remove(&DataKey::RouteFeeTiers(route.clone()));
+
         env.events().publish(
             (Symbol::new(&env, router_common::EVENT_ROUTE_FEE_UNSET),),
             route,
