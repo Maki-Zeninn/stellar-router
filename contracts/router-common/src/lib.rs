@@ -58,6 +58,9 @@
 /// Standard event topic for admin transfer operations
 pub const EVENT_ADMIN_TRANSFERRED: &str = "admin_transferred";
 
+/// Emitted when the super-admin changes the role-system limits.
+pub const EVENT_ROLE_LIMITS_SET: &str = "role_limits_set";
+
 /// Standard event topic for route registration
 pub const EVENT_ROUTE_REGISTERED: &str = "route_registered";
 
