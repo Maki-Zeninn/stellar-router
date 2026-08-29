@@ -255,7 +255,7 @@ fn test_middleware_rate_limit_exceeded() {
     let route = String::from_str(&env, "oracle/price");
     let caller = Address::generate(&env);
     // max 2 calls per 60s
-    client.configure_route(&admin, &route, &2, &60, &true, &0, &0, &0);
+    client.configure_route(&admin, &route, &2, &60, &true, &0, &0, &0, &0);
 
     client.pre_call(&caller, &route);
     client.pre_call(&caller, &route);
@@ -273,7 +273,7 @@ fn test_middleware_disabled_route_blocked() {
 
     let route = String::from_str(&env, "oracle/price");
     let caller = Address::generate(&env);
-    client.configure_route(&admin, &route, &0, &0, &false, &0, &0, &0);
+    client.configure_route(&admin, &route, &0, &0, &false, &0, &0, &0, &0);
 
     let result = client.try_pre_call(&caller, &route);
     assert_eq!(result, Err(Ok(MiddlewareError::RouteDisabled)));
@@ -305,7 +305,7 @@ fn test_middleware_circuit_breaker_open() {
     let route = String::from_str(&env, "oracle/price");
     let caller = Address::generate(&env);
     // failure_threshold = 1, recovery = 60s
-    client.configure_route(&admin, &route, &0, &0, &true, &1, &60, &0);
+    client.configure_route(&admin, &route, &0, &0, &true, &1, &60, &0, &0);
 
     // Trip the circuit
     client.post_call(&caller, &route, &false);
@@ -325,7 +325,7 @@ fn test_middleware_unauthorized_configure_fails() {
     let result = client.try_configure_route(
         &attacker,
         &String::from_str(&env, "oracle/price"),
-        &0, &0, &true, &0, &0, &0,
+        &0, &0, &true, &0, &0, &0, &0,
     );
     assert_eq!(result, Err(Ok(MiddlewareError::Unauthorized)));
 }
