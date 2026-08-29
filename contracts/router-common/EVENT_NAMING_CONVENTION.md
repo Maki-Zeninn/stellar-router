@@ -50,9 +50,13 @@ All smart contracts in the stellar-router suite follow a consistent event naming
 - `admin_transferred` — (old_admin, new_admin)
 
 ### router-timelock
-- `op_queued` — (op_id, target, eta)
+- `op_queued` — (op_id, target, eta, grace_period_seconds)
 - `op_executed` — (op_id, target)
 - `op_cancelled` — (op_id)
+- `op_description_updated` — (op_id, new_description)
+- `min_delay_updated` — (old_min_delay, new_min_delay)
+- `ops_cleaned` — (cleaned_count)
+- `admin_transferred` — (old_admin, new_admin)
 
 ### router-multicall
 - `call_result` — (caller, target, function, success)
