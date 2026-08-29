@@ -166,6 +166,22 @@ pub const EVENT_RATE_LIMIT_EXCEEDED: &str = "rate_limit_exceeded";
 /// Standard event topic for call log clearing
 pub const EVENT_CALL_LOG_CLEARED: &str = "call_log_cleared";
 
+// Issue #1198: the #894 migration to EVENT_* constants only covered
+// pre_call/post_call/call_log_cleared — these four router-middleware event
+// topics were left as raw string literals with no constant at all.
+
+/// Standard event topic for a route's rate-limit strategy being set.
+pub const EVENT_RATE_LIMIT_STRATEGY_SET: &str = "rate_limit_strategy_set";
+
+/// Standard event topic for a route's circuit breaker/rate-limit guard state being reset.
+pub const EVENT_GUARD_RESET: &str = "guard_reset";
+
+/// Standard event topic for a per-caller rate limit override being set.
+pub const EVENT_CALLER_RATE_LIMIT_SET: &str = "caller_rate_limit_set";
+
+/// Standard event topic for a per-caller rate limit override being removed.
+pub const EVENT_CALLER_RATE_LIMIT_REMOVED: &str = "caller_rate_limit_removed";
+
 /// Standard event topic for multicall results
 pub const EVENT_CALL_RESULT: &str = "call_result";
 
