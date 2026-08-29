@@ -692,11 +692,18 @@ impl RouterTimelock {
             return Err(TimelockError::DelayTooShort);
         }
 
+        // Issue #1207: `require_admin_simple!` above already proved
+        // `DataKey::Admin` exists, and `initialize` always sets `MinDelay`
+        // alongside `Admin` in the same call with nothing in this contract
+        // ever removing either key — so `MinDelay` is guaranteed present
+        // here. The `NotInitialized` fallback this used to have was dead
+        // code; `.expect` documents the invariant instead of silently
+        // re-checking something already proven.
         let old_min_delay: u64 = env
             .storage()
             .instance()
             .get(&DataKey::MinDelay)
-            .ok_or(TimelockError::NotInitialized)?;
+            .expect("MinDelay is always set alongside Admin in initialize");
 
         env.storage()
             .instance()
