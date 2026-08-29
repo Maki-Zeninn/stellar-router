@@ -43,6 +43,7 @@ RUN cargo build --target wasm32-unknown-unknown --release \
     --package router-middleware \
     --package router-timelock \
     --package router-multicall \
+    --package router-quote \
     --package router-execution
 
 # ── Metrics exporter builder ──────────────────────────────────────────────────

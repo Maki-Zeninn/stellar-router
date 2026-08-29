@@ -1,9 +1,12 @@
-.PHONY: fmt-check test-all lint build-wasm
+.PHONY: fmt-check check test-all lint build-wasm
 
 fmt-check:
 	cargo fmt --check
 	cargo fmt --manifest-path metrics/Cargo.toml --check
 	cargo fmt --manifest-path api-server/Cargo.toml --check
+
+check:
+	cargo check --workspace
 
 test-all:
 	cargo test --workspace

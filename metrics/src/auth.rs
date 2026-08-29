@@ -76,7 +76,7 @@ pub async fn auth_middleware(
                 .api_key
                 .as_ref()
                 .expect("enabled implies api_key is set");
-            if key == *expected_key {
+            if constant_time_equals(key, expected_key) {
                 Ok(next.run(req).await)
             } else {
                 Err(AuthError::InvalidKey)

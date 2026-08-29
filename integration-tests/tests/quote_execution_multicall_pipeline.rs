@@ -367,20 +367,21 @@ fn test_pipeline_multicall_batch() {
     let batch_result = s.multicall.execute_batch(
         &s.user,
         &calls,
-        false, // not simulating
-        true,  // store results
-        false, // don't fail fast
-    ).expect("Batch execution should succeed");
+        &false, // not simulating
+        &true,  // store results
+        &false, // don't fail fast
+        &None,  // max_total_gas
+    );
 
     // Verify batch result summary
-    assert_eq!(batch_result.total_calls, 3);
+    assert_eq!(batch_result.successes.len() + batch_result.failures.len(), 3);
     // In this test environment, all calls should succeed (they're mocked)
-    assert!(batch_result.succeeded_calls >= 0);
+    assert!(batch_result.failures.is_empty(), "all mocked calls should succeed");
 
     println!("\n✓ Multicall batch executed");
-    println!("  Total calls: {}", batch_result.total_calls);
-    println!("  Succeeded: {}", batch_result.succeeded_calls);
-    println!("  Failed: {}", batch_result.failed_calls);
+    println!("  Total calls: {}", batch_result.successes.len() + batch_result.failures.len());
+    println!("  Succeeded: {}", batch_result.successes.len());
+    println!("  Failed: {}", batch_result.failures.len());
 }
 
 /// Test 8: Full end-to-end pipeline test
@@ -450,17 +451,18 @@ fn test_quote_to_execution_to_multicall_pipeline() {
     let batch_result = s.multicall.execute_batch(
         &s.user,
         &batch_calls,
-        false, // not simulating
-        true,  // store results
-        false, // don't fail fast
-    ).expect("Batch should succeed");
+        &false, // not simulating
+        &true,  // store results
+        &false, // don't fail fast
+        &None,  // max_total_gas
+    );
 
-    assert_eq!(batch_result.total_calls, 3);
+    assert_eq!(batch_result.successes.len() + batch_result.failures.len(), 3);
     println!("  ✓ Batched 3 swaps successfully");
     println!("    Total: {}, Succeeded: {}, Failed: {}",
-             batch_result.total_calls,
-             batch_result.succeeded_calls,
-             batch_result.failed_calls);
+             batch_result.successes.len() + batch_result.failures.len(),
+             batch_result.successes.len(),
+             batch_result.failures.len());
 
     // ── Phase 5: Verify Rate Limiting After Batch ───────────────────────
 
@@ -593,12 +595,13 @@ fn test_pipeline_multicall_required_vs_optional() {
     let result = s.multicall.execute_batch(
         &s.user,
         &calls,
-        false, // not simulating
-        true,  // store results
-        false, // don't fail fast
-    ).expect("Batch should succeed");
+        &false, // not simulating
+        &true,  // store results
+        &false, // don't fail fast
+        &None,  // max_total_gas
+    );
 
-    assert_eq!(result.total_calls, 2);
+    assert_eq!(result.successes.len() + result.failures.len(), 2);
     println!("\n✓ Multicall handled required and optional calls correctly");
 }
 

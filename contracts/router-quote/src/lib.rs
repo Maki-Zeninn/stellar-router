@@ -3,13 +3,14 @@
 //! # router-quote
 //!
 //! Quote calculation and route comparison for the stellar-router suite.
-//! Provides configurable fee-based quote calculations and best-route selection.
+//! Provides configurable fee-based quote calculations and best-route selection
+//! with support for multi-hop routes across fee tiers.
 //!
 //! ## Features
 //! - Configurable fee basis points (fee_bps) per route
+//! - Multi-hop route support with per-hop fee tier configuration
 //! - Multiple quote comparison
 //! - Best quote selection based on highest output amount
-//! - Integration with liquidity plugins
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
@@ -246,6 +247,13 @@ impl RouterQuote {
         env.storage()
             .instance()
             .remove(&DataKey::RouteFee(route.clone()));
+
+        // (#1183) unset_route_fee must also clear the tier schedule written by
+        // set_route_fee_tiers — resolve_route_fee_bps checks tiers first, so
+        // leaving them in place kept quotes priced off the "removed" fee.
+        env.storage()
+            .instance()
+            .remove(&DataKey::RouteFeeTiers(route.clone()));
 
         env.events().publish(
             (Symbol::new(&env, router_common::EVENT_ROUTE_FEE_UNSET),),

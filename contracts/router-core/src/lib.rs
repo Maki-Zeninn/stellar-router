@@ -100,17 +100,23 @@ pub struct RouteEntry {
     pub expires_at: Option<u32>,
 }
 
+/// A single route entry for [`RouterCore::register_routes_batch`].
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct RouteRegisterInput {
+    /// The route name to register.
     pub name: String,
+    /// The contract address the route should resolve to.
     pub address: Address,
 }
 
+/// A single route/score pair for [`RouterCore::set_route_scores_batch`].
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct RouteScoreInput {
+    /// The name of the route to score. Must already be registered.
     pub name: String,
+    /// The score to assign to this route.
     pub score: RouteScore,
 }
 
@@ -781,7 +787,13 @@ impl RouterCore {
             for (index, name) in names.iter().enumerate() {
                 let idx = index as u32;
                 if !env.storage().instance().has(&DataKey::Route(name.clone())) {
-                    result.record_failure(idx, router_common::BatchItemError::AlreadyExists);
+                    result.record_failure(
+                        idx,
+                        router_common::BatchItemError::Custom(soroban_sdk::String::from_str(
+                            &env,
+                            "RouteNotFound",
+                        )),
+                    );
                     return Ok(result);
                 }
             }
@@ -2711,6 +2723,13 @@ mod tests {
         let dependencies = client.get_route_dependencies(&dex);
         assert_eq!(dependencies.len(), 1);
         assert_eq!(dependencies.get(0).unwrap(), oracle);
+    }
+
+    #[test]
+    fn test_get_route_dependencies_nonexistent_route_fails() {
+        let (env, _admin, client) = setup();
+        let result = client.try_get_route_dependencies(&String::from_str(&env, "missing"));
+        assert_eq!(result, Err(Ok(RouterError::RouteNotFound)));
     }
 
     #[test]
@@ -4731,6 +4750,30 @@ mod tests {
         assert_eq!(resolve_result, Err(Ok(RouterError::RouteNotFound)));
     }
 
+    #[test]
+    fn test_remove_routes_batch_fail_fast_missing_route_reports_route_not_found() {
+        // Regression test for issue #1050: the fail_fast prevalidation loop in
+        // remove_routes_batch used to record `AlreadyExists` for a route name
+        // that does NOT exist, instead of `Custom("RouteNotFound")` (the value
+        // the non-fail_fast path already produces via remove_route_internal).
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+        let names = vec![&env, name.clone(), String::from_str(&env, "missing")];
+        let result = client.remove_routes_batch(&admin, &names, &true);
+        assert_eq!(result.successes.len(), 0);
+        assert_eq!(result.failures.len(), 1);
+        assert_eq!(
+            result.failures.get(0).unwrap().error,
+            router_common::BatchItemError::Custom(String::from_str(&env, "RouteNotFound"))
+        );
+        // fail_fast must not have removed the route it validated before hitting
+        // the missing one.
+        let resolve_result = client.try_resolve(&name);
+        assert!(resolve_result.is_ok());
+    }
+
     // ΓöÇΓöÇ Issue #582: cached best-route selection & pagination ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
@@ -5894,5 +5937,66 @@ mod tests {
 
         client.register_route(&admin, &name, &valid_addr, &None);
         assert_eq!(client.resolve(&name), valid_addr, "valid address should be accepted");
+    }
+
+    // ── Issue #1057: recursion-depth-limit tests ──────────────────────────
+
+    /// Verifies that `set_route_dependency` rejects an edge that would make the
+    /// dependency chain exceed `MAX_RECURSION_DEPTH` (10), exercising the
+    /// `RecursionLimitExceeded` path in `visit_dependencies`.
+    #[test]
+    fn test_set_route_dependency_fails_past_recursion_limit() {
+        let (env, admin, client) = setup();
+
+        // Register routes r0..=r12 (13 routes) so we can build a chain deep
+        // enough to trip the recursion cap.
+        let mut names: std::vec::Vec<String> = std::vec::Vec::new();
+        for i in 0..=12 {
+            let name = String::from_str(&env, &format!("r{}", i));
+            client.register_route(&admin, &name, &Address::generate(&env), &None);
+            names.push(name);
+        }
+
+        // Build the chain r1 -> r2 -> ... -> r12 (11 edges), adding the
+        // deepest edge first. Validating each edge only walks the (shorter)
+        // existing sub-chain below it, so none of these individually exceed
+        // MAX_RECURSION_DEPTH.
+        for i in (1..12).rev() {
+            client.set_route_dependency(&admin, &names[i], &names[i + 1]);
+        }
+
+        // Adding r0 -> r1 extends the chain to 12 hops (r1..r12), which
+        // exceeds MAX_RECURSION_DEPTH (10) while validate_dependency_cycle
+        // walks it — must be rejected with RecursionLimitExceeded rather
+        // than succeeding or being misreported as a circular dependency.
+        let result = client.try_set_route_dependency(&admin, &names[0], &names[1]);
+        assert_eq!(result, Err(Ok(RouterError::RecursionLimitExceeded)));
+    }
+
+    /// Verifies that `resolve_with_dependencies` rejects a dependency chain
+    /// deeper than `MAX_RECURSION_DEPTH` (10), exercising the
+    /// `RecursionLimitExceeded` path in `resolve_dependencies_recursive`.
+    #[test]
+    fn test_resolve_with_dependencies_fails_past_recursion_limit() {
+        let (env, admin, client) = setup();
+
+        // Register routes r0..=r11 (12 routes) and chain them r0 -> r1 -> ...
+        // -> r11 (11 edges), built deepest-edge-first so that setting up the
+        // chain itself never exceeds the recursion cap (see the sibling test
+        // above for why that ordering is safe).
+        let mut names: std::vec::Vec<String> = std::vec::Vec::new();
+        for i in 0..=11 {
+            let name = String::from_str(&env, &format!("d{}", i));
+            client.register_route(&admin, &name, &Address::generate(&env), &None);
+            names.push(name);
+        }
+        for i in (0..11).rev() {
+            client.set_route_dependency(&admin, &names[i], &names[i + 1]);
+        }
+
+        // Resolving r0 now has to walk 11 hops deep (r0 at depth 0 down to
+        // r11 at depth 11), exceeding MAX_RECURSION_DEPTH.
+        let result = client.try_resolve_with_dependencies(&names[0]);
+        assert_eq!(result, Err(Ok(RouterError::RecursionLimitExceeded)));
     }
 }
