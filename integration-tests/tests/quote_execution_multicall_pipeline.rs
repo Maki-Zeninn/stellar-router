@@ -95,7 +95,7 @@ impl<'a> PipelineTestSuite<'a> {
         let multicall = RouterMulticallClient::new(&env, &multicall_id);
 
         // Initialize all contracts
-        core.initialize(&admin);
+        core.initialize(&admin, &None);
         registry.initialize(&admin);
         access.initialize(&admin);
         middleware.initialize(&admin);

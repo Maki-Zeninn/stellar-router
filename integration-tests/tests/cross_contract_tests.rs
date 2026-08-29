@@ -48,7 +48,7 @@ fn setup() -> Suite<'static> {
     let access = RouterAccessClient::new(&env, &access_id);
     let middleware = RouterMiddlewareClient::new(&env, &middleware_id);
 
-    core.initialize(&admin);
+    core.initialize(&admin, &None);
     registry.initialize(&admin);
     access.initialize(&admin);
     middleware.initialize(&admin);

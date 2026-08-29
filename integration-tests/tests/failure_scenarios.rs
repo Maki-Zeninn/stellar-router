@@ -33,7 +33,7 @@ fn test_core_route_not_found() {
     let (env, admin) = make_env();
     let id = env.register_contract(None, RouterCore);
     let client = RouterCoreClient::new(&env, &id);
-    client.initialize(&admin);
+    client.initialize(&admin, &None);
 
     let result = client.try_resolve(&String::from_str(&env, "nonexistent"));
     assert_eq!(result, Err(Ok(RouterError::RouteNotFound)));
@@ -44,7 +44,7 @@ fn test_core_router_paused_blocks_all_routes() {
     let (env, admin) = make_env();
     let id = env.register_contract(None, RouterCore);
     let client = RouterCoreClient::new(&env, &id);
-    client.initialize(&admin);
+    client.initialize(&admin, &None);
 
     let name = String::from_str(&env, "oracle");
     let addr = Address::generate(&env);
@@ -61,7 +61,7 @@ fn test_core_route_paused_blocks_specific_route() {
     let (env, admin) = make_env();
     let id = env.register_contract(None, RouterCore);
     let client = RouterCoreClient::new(&env, &id);
-    client.initialize(&admin);
+    client.initialize(&admin, &None);
 
     let name = String::from_str(&env, "oracle");
     let addr = Address::generate(&env);
@@ -78,7 +78,7 @@ fn test_core_unauthorized_register_fails() {
     let id = env.register_contract(None, RouterCore);
     let client = RouterCoreClient::new(&env, &id);
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    client.initialize(&admin, &None);
 
     let attacker = Address::generate(&env);
     let result = client.try_register_route(
@@ -95,7 +95,7 @@ fn test_core_duplicate_route_fails() {
     let (env, admin) = make_env();
     let id = env.register_contract(None, RouterCore);
     let client = RouterCoreClient::new(&env, &id);
-    client.initialize(&admin);
+    client.initialize(&admin, &None);
 
     let name = String::from_str(&env, "oracle");
     let addr = Address::generate(&env);
@@ -110,7 +110,7 @@ fn test_core_empty_route_name_fails() {
     let (env, admin) = make_env();
     let id = env.register_contract(None, RouterCore);
     let client = RouterCoreClient::new(&env, &id);
-    client.initialize(&admin);
+    client.initialize(&admin, &None);
 
     let result = client.try_register_route(
         &admin,
