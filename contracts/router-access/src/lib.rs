@@ -83,11 +83,11 @@ impl RouterAccess {
     ///
     /// Both limits are enforced at grant/introduction time:
     /// - `max_roles` — maximum number of *distinct* role names ever introduced
-    ///   into the system (tracked in `AllRoles`).  Pass `0` to restore the
-    ///   default (`DEFAULT_MAX_ROLES`).
+    ///   into the system (tracked in `AllRoles`).  Pass `0` to lock down new
+    ///   role creation entirely.
     /// - `max_grants_per_role` — maximum number of addresses that may
     ///   simultaneously hold a given role (tracked by `RoleMemberCount`).
-    ///   Pass `0` to restore the default (`DEFAULT_MAX_GRANTS_PER_ROLE`).
+    ///   Pass `0` to lock the role against any further members.
     ///
     /// Only the super-admin may call this function.
     pub fn set_role_limits(
@@ -2157,6 +2157,22 @@ impl RouterAccess {
     ) -> Result<(), AccessError> {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::SuperAdmin, AccessError)?;
+
+        // (#1201) Store both caps as-is: a zero cap is a legitimate lockdown
+        // request and must not be silently rewritten to the compile-time
+        // defaults — that made lockdown inexpressible.
+        env.storage()
+            .instance()
+            .set(&DataKey::RoleLimits, &(max_roles, max_grants_per_role));
+
+        // (#1202) Emit an event so off-chain indexers and monitoring
+        // dashboards can track role-system configuration changes, matching
+        // every other state-changing admin function in this contract.
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROLE_LIMITS_SET),),
+            (caller, max_roles, max_grants_per_role),
+        );
+
         Self::require_super_admin(&env, &caller)?;
         let effective_max_roles = max_roles.unwrap_or(DEFAULT_MAX_ROLES);
         let effective_max_grants = max_grants_per_role.unwrap_or(DEFAULT_MAX_GRANTS_PER_ROLE);

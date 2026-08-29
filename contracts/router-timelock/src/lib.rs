@@ -79,6 +79,13 @@ pub enum OperationStatus {
     Blocked,
 }
 
+/// (#1205) Instance-storage TTL management, matching the router-core /
+/// router-execution pattern: without periodic extension the contract's
+/// instance entries (Admin, MinDelay, every queued Op and Deps list) are
+/// archived purely from inactivity, bricking the timelock.
+const INSTANCE_TTL_THRESHOLD: u32 = 17280 * 30;
+const INSTANCE_TTL_EXTEND_TO: u32 = 17280 * 60;
+
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 #[contracterror]
@@ -150,6 +157,7 @@ impl RouterTimelock {
         admin: Address,
         min_delay: u64,
         max_pending_ops: u32,
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     ) -> Result<(), TimelockError> {
         router_common::extend_instance_ttl(&env, Self::INSTANCE_TTL_THRESHOLD, Self::INSTANCE_TTL_EXTEND_TO);
         if env.storage().instance().has(&DataKey::Admin) {
@@ -181,6 +189,7 @@ impl RouterTimelock {
         delay: u64,
         grace_period_seconds: u64,
         deps: Vec<Bytes>,
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     ) -> Result<Bytes, TimelockError> {
         proposer.require_auth();
         router_common::extend_instance_ttl(&env, Self::INSTANCE_TTL_THRESHOLD, Self::INSTANCE_TTL_EXTEND_TO);
@@ -285,6 +294,7 @@ impl RouterTimelock {
 
     /// Cancel a queued operation before it is executed.
     pub fn cancel(env: Env, caller: Address, op_id: Bytes) -> Result<(), TimelockError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::extend_instance_ttl(&env, Self::INSTANCE_TTL_THRESHOLD, Self::INSTANCE_TTL_EXTEND_TO);
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, TimelockError)?;
@@ -317,6 +327,7 @@ impl RouterTimelock {
     /// Returns `TimelockError::NotReady` if called before `eta`.
     /// Returns `TimelockError::Expired` if called after `eta + grace_period_seconds`.
     pub fn execute(env: Env, caller: Address, op_id: Bytes) -> Result<(), TimelockError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::extend_instance_ttl(&env, Self::INSTANCE_TTL_THRESHOLD, Self::INSTANCE_TTL_EXTEND_TO);
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, TimelockError)?;
@@ -377,6 +388,7 @@ impl RouterTimelock {
         caller: Address,
         op_id: Bytes,
         new_description: String,
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     ) -> Result<(), TimelockError> {
         caller.require_auth();
         router_common::extend_instance_ttl(&env, Self::INSTANCE_TTL_THRESHOLD, Self::INSTANCE_TTL_EXTEND_TO);
@@ -423,6 +435,7 @@ impl RouterTimelock {
     /// # Returns
     /// The number of operations removed.
     pub fn cleanup_expired(env: Env, caller: Address, limit: u32) -> Result<u32, TimelockError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::extend_instance_ttl(&env, Self::INSTANCE_TTL_THRESHOLD, Self::INSTANCE_TTL_EXTEND_TO);
 
@@ -482,6 +495,7 @@ impl RouterTimelock {
 
     /// Get an operation by id.
     pub fn get_op(env: Env, op_id: Bytes) -> Option<Op> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         router_common::extend_instance_ttl(&env, Self::INSTANCE_TTL_THRESHOLD, Self::INSTANCE_TTL_EXTEND_TO);
         env.storage().instance().get(&DataKey::Op(op_id))
     }
@@ -491,6 +505,7 @@ impl RouterTimelock {
     /// Returns an empty `Vec` when no dependencies were recorded (i.e. the
     /// operation was queued without deps, or the `op_id` does not exist).
     pub fn get_dependencies(env: Env, op_id: Bytes) -> Vec<Bytes> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         router_common::extend_instance_ttl(&env, Self::INSTANCE_TTL_THRESHOLD, Self::INSTANCE_TTL_EXTEND_TO);
         env.storage()
             .instance()
@@ -509,6 +524,8 @@ impl RouterTimelock {
     ///
     /// Returns `None` if no operation with `op_id` exists.
     pub fn get_operation_status(env: Env, op_id: Bytes) -> Option<OperationStatus> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+        let op: Op = env.storage().instance().get(&DataKey::Op(op_id))?;
         router_common::extend_instance_ttl(&env, Self::INSTANCE_TTL_THRESHOLD, Self::INSTANCE_TTL_EXTEND_TO);
         let op: Op = env.storage().instance().get(&DataKey::Op(op_id.clone()))?;
         let now = env.ledger().timestamp();
@@ -521,7 +538,15 @@ impl RouterTimelock {
         } else if Self::has_blocked_dependency(&env, &op_id) {
             OperationStatus::Blocked
         } else if now >= op.eta {
-            OperationStatus::Ready
+            // (#1206) ETA elapsed is not sufficient for Ready: a cancelled
+            // (or otherwise unexecutable) dependency means the operation can
+            // never run. Report Queued so callers are not told an
+            // unexecutable operation is Ready.
+            if Self::require_dependencies_executed(&env, &op_id).is_err() {
+                OperationStatus::Queued
+            } else {
+                OperationStatus::Ready
+            }
         } else {
             OperationStatus::Queued
         };
@@ -541,6 +566,7 @@ impl RouterTimelock {
     /// # Returns
     /// A [`Vec<Op>`] of all pending operations.
     pub fn get_pending_operations(env: Env) -> Vec<Op> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         router_common::extend_instance_ttl(&env, Self::INSTANCE_TTL_THRESHOLD, Self::INSTANCE_TTL_EXTEND_TO);
         let pending: Vec<Bytes> = env
             .storage()
@@ -581,6 +607,7 @@ impl RouterTimelock {
     /// # Returns
     /// The count of operations matching the given status.
     pub fn get_operation_count_by_status(env: Env, status: OperationStatus) -> u32 {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         router_common::extend_instance_ttl(&env, Self::INSTANCE_TTL_THRESHOLD, Self::INSTANCE_TTL_EXTEND_TO);
         let pending: Vec<Bytes> = env
             .storage()
@@ -610,6 +637,10 @@ impl RouterTimelock {
                             .eta
                             .checked_add(op.grace_period_seconds)
                             .map_or(false, |expiry| now <= expiry);
+                        // (#1206) Same dependency gate as get_operation_status.
+                        let deps_ready =
+                            Self::require_dependencies_executed(&env, &op_id).is_ok();
+                        !op.executed && !op.cancelled && now >= op.eta && within_grace && deps_ready
                         !op.executed && !op.cancelled && now >= op.eta && within_grace
                             && !Self::has_blocked_dependency(&env, &op_id)
                     }
@@ -635,6 +666,7 @@ impl RouterTimelock {
     pub fn get_operations_by_status(
         env: Env,
         status: OperationStatus,
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     ) -> Vec<(Bytes, Op)> {
         router_common::extend_instance_ttl(&env, Self::INSTANCE_TTL_THRESHOLD, Self::INSTANCE_TTL_EXTEND_TO);
         let pending: Vec<Bytes> = env
@@ -667,6 +699,10 @@ impl RouterTimelock {
                             .eta
                             .checked_add(op.grace_period_seconds)
                             .map_or(false, |expiry| now <= expiry);
+                        // (#1206) Same dependency gate as get_operation_status.
+                        let deps_ready =
+                            Self::require_dependencies_executed(&env, &op_id).is_ok();
+                        !op.executed && !op.cancelled && now >= op.eta && within_grace && deps_ready
                         !op.executed && !op.cancelled && now >= op.eta && within_grace
                             && !Self::has_blocked_dependency(&env, &op_id)
                     }
@@ -692,6 +728,7 @@ impl RouterTimelock {
 
     /// Get the maximum allowed number of pending operations.
     pub fn get_max_pending_ops(env: Env) -> u32 {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         router_common::extend_instance_ttl(&env, Self::INSTANCE_TTL_THRESHOLD, Self::INSTANCE_TTL_EXTEND_TO);
         env.storage()
             .instance()
@@ -704,6 +741,7 @@ impl RouterTimelock {
     /// # Errors
     /// Returns `TimelockError::NotInitialized` if the contract has not been initialized.
     pub fn min_delay(env: Env) -> Result<u64, TimelockError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         router_common::extend_instance_ttl(&env, Self::INSTANCE_TTL_THRESHOLD, Self::INSTANCE_TTL_EXTEND_TO);
         env.storage()
             .instance()
@@ -723,6 +761,7 @@ impl RouterTimelock {
         env: Env,
         caller: Address,
         new_min_delay: u64,
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     ) -> Result<(), TimelockError> {
         caller.require_auth();
         router_common::extend_instance_ttl(&env, Self::INSTANCE_TTL_THRESHOLD, Self::INSTANCE_TTL_EXTEND_TO);
@@ -762,6 +801,7 @@ impl RouterTimelock {
     /// # Errors
     /// Returns `TimelockError::NotInitialized` if the contract has not been initialized.
     pub fn admin(env: Env) -> Result<Address, TimelockError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         router_common::extend_instance_ttl(&env, Self::INSTANCE_TTL_THRESHOLD, Self::INSTANCE_TTL_EXTEND_TO);
         env.storage()
             .instance()
@@ -774,6 +814,7 @@ impl RouterTimelock {
         env: Env,
         current: Address,
         new_admin: Address,
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     ) -> Result<(), TimelockError> {
         current.require_auth();
         router_common::require_admin_simple!(&env, &current, &DataKey::Admin, TimelockError)?;
