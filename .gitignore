@@ -27,12 +27,16 @@ benches/src/scrap-menu/
 
 # OS / editor files
 .DS_Store
+**/.DS_Store
 Thumbs.db
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+
+# Node / JS tooling (load-test scripts)
+**/node_modules/
 
 # Profiling / coverage output
 *.profraw

@@ -83,31 +83,33 @@ impl RouterAccess {
     ///
     /// Both limits are enforced at grant/introduction time:
     /// - `max_roles` — maximum number of *distinct* role names ever introduced
-    ///   into the system (tracked in `AllRoles`).  Pass `0` to restore the
-    ///   default (`DEFAULT_MAX_ROLES`).
+    ///   into the system (tracked in `AllRoles`).  Pass `None` to restore the
+    ///   default (`DEFAULT_MAX_ROLES`). Pass `Some(n)` — including `Some(0)` —
+    ///   to store exactly `n` as the limit.
     /// - `max_grants_per_role` — maximum number of addresses that may
     ///   simultaneously hold a given role (tracked by `RoleMemberCount`).
-    ///   Pass `0` to restore the default (`DEFAULT_MAX_GRANTS_PER_ROLE`).
+    ///   Pass `None` to restore the default (`DEFAULT_MAX_GRANTS_PER_ROLE`).
+    ///   Pass `Some(n)` — including `Some(0)` — to store exactly `n`.
     ///
     /// Only the super-admin may call this function.
     pub fn set_role_limits(
         env: Env,
         caller: Address,
-        max_roles: u32,
-        max_grants_per_role: u32,
+        max_roles: Option<u32>,
+        max_grants_per_role: Option<u32>,
     ) -> Result<(), AccessError> {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::SuperAdmin, AccessError)?;
         Self::require_super_admin(&env, &caller)?;
-        let effective_max_roles = if max_roles == 0 { DEFAULT_MAX_ROLES } else { max_roles };
-        let effective_max_grants = if max_grants_per_role == 0 {
-            DEFAULT_MAX_GRANTS_PER_ROLE
-        } else {
-            max_grants_per_role
-        };
+        let effective_max_roles = max_roles.unwrap_or(DEFAULT_MAX_ROLES);
+        let effective_max_grants = max_grants_per_role.unwrap_or(DEFAULT_MAX_GRANTS_PER_ROLE);
         env.storage()
             .instance()
             .set(&DataKey::RoleLimits, &(effective_max_roles, effective_max_grants));
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROLE_LIMITS_SET),),
+            (effective_max_roles, effective_max_grants),
+        );
         Ok(())
     }
 
@@ -1038,7 +1040,7 @@ mod tests {
     #[test]
     fn test_grant_role_fails_when_max_roles_exceeded() {
         let (env, admin, client) = setup();
-        client.set_role_limits(&admin, &1, &0); // only 1 distinct role name allowed
+        client.set_role_limits(&admin, &Some(1), &None); // only 1 distinct role name allowed
         let user = Address::generate(&env);
 
         let role_a = String::from_str(&env, "role-a");
@@ -1052,7 +1054,7 @@ mod tests {
     #[test]
     fn test_regrant_of_tracked_role_does_not_hit_max_roles_cap() {
         let (env, admin, client) = setup();
-        client.set_role_limits(&admin, &1, &0); // only 1 distinct role name allowed
+        client.set_role_limits(&admin, &Some(1), &None); // only 1 distinct role name allowed
         let user_one = Address::generate(&env);
         let user_two = Address::generate(&env);
 
