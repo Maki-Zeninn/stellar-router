@@ -256,6 +256,16 @@ impl RouterMiddleware {
             return Err(MiddlewareError::InvalidConfig);
         }
 
+        // Issue #1193: only wipe the call log when log_retention actually
+        // changes — and when it does, go through call_log::clear so
+        // CallLogSummary is cleared alongside CallLog instead of going stale
+        // (the same desync issue #812 fixed for reset_route_call_log).
+        let previous_log_retention: Option<u32> = env
+            .storage()
+            .instance()
+            .get::<DataKey, RouteConfig>(&DataKey::RouteConfig(route.clone()))
+            .map(|c| c.log_retention);
+
         let config = RouteConfig {
             max_calls_per_window,
             window_seconds,
@@ -281,19 +291,15 @@ impl RouterMiddleware {
                 .set(&DataKey::ConfiguredRoutes, &configured);
         }
 
-        if log_retention > 0 {
-            env.storage()
-                .instance()
-                .remove(&DataKey::CallLog(route.clone()));
+        if previous_log_retention != Some(log_retention) {
+            call_log::clear(&env, &route);
 
-            let log = Self::empty_call_log(&env, &caller, &route, log_retention);
-            env.storage()
-                .instance()
-                .set(&DataKey::CallLog(route.clone()), &log);
-        } else {
-            env.storage()
-                .instance()
-                .remove(&DataKey::CallLog(route.clone()));
+            if log_retention > 0 {
+                let log = Self::empty_call_log(&env, &caller, &route, log_retention);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::CallLog(route.clone()), &log);
+            }
         }
 
         Ok(())
@@ -371,6 +377,7 @@ impl RouterMiddleware {
 
             let mut state_changed = Self::prune_stale_rate_limits(
                 &env,
+                &route,
                 &mut route_call_state.rate_limits,
                 env.ledger().timestamp(),
                 config.window_seconds,
@@ -1059,22 +1066,36 @@ impl RouterMiddleware {
     }
 
     /// Evicts entries from `rate_limits` whose window has been idle for
-    /// longer than `RATE_LIMIT_STALE_WINDOW_MULTIPLIER` × `base_window_seconds`,
-    /// bounding the map's growth to actively-rate-limited callers. Returns
-    /// `true` if any entry was removed (so the caller knows to persist the
-    /// pruned state).
+    /// longer than `RATE_LIMIT_STALE_WINDOW_MULTIPLIER` × the caller's
+    /// *effective* window — their per-caller override window when one is
+    /// configured for `route`, otherwise `base_window_seconds` (issue #1196:
+    /// previously every caller was pruned against the route's base window
+    /// alone, so a caller with a longer override window had their state
+    /// evicted — and their call count silently reset — long before their
+    /// actual window elapsed). Bounds the map's growth to
+    /// actively-rate-limited callers. Returns `true` if any entry was
+    /// removed (so the caller knows to persist the pruned state).
     fn prune_stale_rate_limits(
         env: &Env,
+        route: &String,
         rate_limits: &mut Map<Address, RateLimitState>,
         now: u64,
         base_window_seconds: u64,
     ) -> bool {
-        let stale_after = base_window_seconds
-            .saturating_mul(RATE_LIMIT_STALE_WINDOW_MULTIPLIER)
-            .max(1);
-
         let mut stale_callers: Vec<Address> = Vec::new(env);
         for (caller, state) in rate_limits.iter() {
+            let effective_window = env
+                .storage()
+                .instance()
+                .get::<DataKey, CallerRateLimitConfig>(&DataKey::CallerRateLimit(
+                    route.clone(),
+                    caller.clone(),
+                ))
+                .map(|c| c.window_secs)
+                .unwrap_or(base_window_seconds);
+            let stale_after = effective_window
+                .saturating_mul(RATE_LIMIT_STALE_WINDOW_MULTIPLIER)
+                .max(1);
             if now >= state.window_start.saturating_add(stale_after) {
                 stale_callers.push_back(caller);
             }
