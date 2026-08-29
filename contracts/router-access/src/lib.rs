@@ -97,7 +97,6 @@ impl RouterAccess {
         max_grants_per_role: u32,
     ) -> Result<(), AccessError> {
         caller.require_auth();
-        router_common::require_admin_simple!(&env, &caller, &DataKey::SuperAdmin, AccessError)?;
         Self::require_super_admin(&env, &caller)?;
         let effective_max_roles = if max_roles == 0 { DEFAULT_MAX_ROLES } else { max_roles };
         let effective_max_grants = if max_grants_per_role == 0 {
@@ -244,7 +243,6 @@ impl RouterAccess {
         admin: Address,
     ) -> Result<(), AccessError> {
         caller.require_auth();
-        router_common::require_admin_simple!(&env, &caller, &DataKey::SuperAdmin, AccessError)?;
         Self::require_super_admin(&env, &caller)?;
         if Self::is_blacklisted_internal(&env, &admin) {
             return Err(AccessError::Blacklisted);
@@ -276,7 +274,6 @@ impl RouterAccess {
         parent_role: String,
     ) -> Result<(), AccessError> {
         caller.require_auth();
-        router_common::require_admin_simple!(&env, &caller, &DataKey::SuperAdmin, AccessError)?;
         Self::require_super_admin(&env, &caller)?;
         Self::ensure_no_role_parent_cycle(&env, &role, &parent_role)?;
 
@@ -323,7 +320,6 @@ impl RouterAccess {
     /// Blacklist an address.
     pub fn blacklist(env: Env, caller: Address, target: Address) -> Result<(), AccessError> {
         caller.require_auth();
-        router_common::require_admin_simple!(&env, &caller, &DataKey::SuperAdmin, AccessError)?;
         Self::require_super_admin(&env, &caller)?;
 
         let super_admin: Address = env
@@ -360,7 +356,6 @@ impl RouterAccess {
     /// Remove from blacklist.
     pub fn unblacklist(env: Env, caller: Address, target: Address) -> Result<(), AccessError> {
         caller.require_auth();
-        router_common::require_admin_simple!(&env, &caller, &DataKey::SuperAdmin, AccessError)?;
         Self::require_super_admin(&env, &caller)?;
 
         // No-op if not currently blacklisted — avoids spuriously incrementing
@@ -574,7 +569,6 @@ impl RouterAccess {
         new_admin: Address,
     ) -> Result<(), AccessError> {
         current.require_auth();
-        router_common::require_admin_simple!(&env, &current, &DataKey::SuperAdmin, AccessError)?;
         Self::require_super_admin(&env, &current)?;
         if Self::is_blacklisted_internal(&env, &new_admin) {
             return Err(AccessError::Blacklisted);
@@ -603,7 +597,6 @@ impl RouterAccess {
         target: Address,
     ) -> Result<(), AccessError> {
         caller.require_auth();
-        router_common::require_admin_simple!(&env, &caller, &DataKey::SuperAdmin, AccessError)?;
         Self::require_super_admin(&env, &caller)?;
         Self::deactivate_role_grant(&env, &role, &target);
         env.events().publish(
@@ -910,6 +903,15 @@ impl RouterAccess {
     }
 
 
+    /// Checks that `caller` is the stored super-admin and not blacklisted.
+    ///
+    /// Issue #1199: this alone is the correct gate for every super-admin-only
+    /// function in this file — it performs the same NotInitialized/
+    /// Unauthorized check as `router_common::require_admin_simple!` against
+    /// `DataKey::SuperAdmin`, plus the blacklist check that macro doesn't
+    /// have. Calling `require_admin_simple!` immediately before this (as
+    /// several functions here used to) is pure redundancy: it can never
+    /// reject anything this function wouldn't already reject on its own.
     fn require_super_admin(env: &Env, caller: &Address) -> Result<(), AccessError> {
         if Self::is_blacklisted_internal(env, caller) {
             return Err(AccessError::Blacklisted);
