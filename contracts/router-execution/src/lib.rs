@@ -32,6 +32,11 @@ use soroban_sdk::{
 
 /// Fixed-point scale factor used for multiplier arithmetic (100 = 1.0×).
 /// e.g. backoff_multiplier=200 means 2.0×, 150 means 1.5×.
+/// Issue #1195: caps `ExecutionRequest.args`/`simulate()`'s `args` length,
+/// mirroring `router-multicall`'s `MAX_ARGS_PER_CALL` guard against
+/// unbounded argument vectors being forwarded to `try_invoke_contract`.
+const MAX_ARGS_PER_CALL: u32 = 20;
+
 const FIXED_POINT_SCALE: u32 = 100;
 
 /// Minimum valid backoff multiplier: 100 = 1.0× (no growth, constant delay).
@@ -119,6 +124,8 @@ pub enum ExecutionError {
     InvalidConfig = 404,
     /// A supplied amount was zero or negative where a positive amount is required.
     InvalidAmount = 405,
+    /// `args` exceeds [`MAX_ARGS_PER_CALL`].
+    ArgsTooLarge = 406,
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -374,6 +381,12 @@ impl RouterExecution {
             return Err(ExecutionError::InvalidAmount);
         }
 
+        // Issue #1195: bound the args vector before it's forwarded to
+        // try_invoke_contract, mirroring router-multicall's MAX_ARGS_PER_CALL.
+        if request.args.len() > MAX_ARGS_PER_CALL {
+            return Err(ExecutionError::ArgsTooLarge);
+        }
+
         let max_retries: u32 = env
             .storage()
             .instance()
@@ -389,6 +402,13 @@ impl RouterExecution {
         let fee_paid = Self::compute_actual_fee(request.amount);
 
         // ── Simulation phase ──────────────────────────────────────────────
+        // Issue #1194: `dry_run_invoke` wraps `try_invoke_contract`, which is a
+        // genuine cross-contract call with real side effects — there's no
+        // contract-level "preview" mechanism. So this "simulation" result
+        // *is* attempt #1's real invocation, and must be reused by the retry
+        // loop below rather than invoked again, or the target function would
+        // be executed twice for a single successful `execute()` call.
+        let mut carried_first_result: Option<bool> = None;
         if request.simulate_first {
             let sim_ok = Self::dry_run_invoke(&env, &request.target, &request.function, request.args.clone());
             if !sim_ok {
@@ -401,6 +421,7 @@ impl RouterExecution {
                 );
                 return Err(ExecutionError::SimulationFailed);
             }
+            carried_first_result = Some(sim_ok);
         }
 
         // ── Execution phase with retry ────────────────────────────────────
@@ -418,7 +439,11 @@ impl RouterExecution {
         let mut attempts = 0u32;
         loop {
             attempts += 1;
-            let invoke_ok = Self::dry_run_invoke(&env, &request.target, &request.function, request.args.clone());
+            let invoke_ok = if let Some(result) = carried_first_result.take() {
+                result
+            } else {
+                Self::dry_run_invoke(&env, &request.target, &request.function, request.args.clone())
+            };
 
             if invoke_ok {
                 Self::increment_counter(&env, &DataKey::TotalExecutions);
@@ -572,6 +597,11 @@ impl RouterExecution {
 
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(ExecutionError::NotInitialized);
+        }
+
+        // Issue #1195: same MAX_ARGS_PER_CALL guard as execute().
+        if args.len() > MAX_ARGS_PER_CALL {
+            return Err(ExecutionError::ArgsTooLarge);
         }
 
         let sim_ok = Self::dry_run_invoke(&env, &target, &function, args);
