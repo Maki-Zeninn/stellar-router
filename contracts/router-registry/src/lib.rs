@@ -742,17 +742,18 @@ impl RouterRegistry {
             .set(&DataKey::Entry(name.clone(), version), &entry);
 
         let mut versions = Self::get_versions_list(env, &name);
+        let is_new_name = versions.is_empty();
         versions.push_back(version);
         env.storage()
             .instance()
             .set(&DataKey::Versions(name.clone()), &versions);
 
-        let mut names: Vec<String> = env
-            .storage()
-            .instance()
-            .get(&DataKey::ContractNames)
-            .unwrap_or_else(|| Vec::new(env));
-        if !names.contains(&name) {
+        if is_new_name {
+            let mut names: Vec<String> = env
+                .storage()
+                .instance()
+                .get(&DataKey::ContractNames)
+                .unwrap_or_else(|| Vec::new(env));
             names.push_back(name.clone());
             env.storage()
                 .instance()
