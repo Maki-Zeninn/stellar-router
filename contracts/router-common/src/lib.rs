@@ -238,6 +238,9 @@ pub const EVENT_DEFAULT_FEE_UPDATED: &str = "default_fee_updated";
 /// Standard event topic for a role admin being set
 pub const EVENT_ROLE_ADMIN_SET: &str = "role_admin_set";
 
+/// Standard event topic for role limits being set
+pub const EVENT_ROLE_LIMITS_SET: &str = "role_limits_set";
+
 /// Standard event topic for an address being un-blacklisted
 pub const EVENT_ADDRESS_UNBLACKLISTED: &str = "address_unblacklisted";
 
