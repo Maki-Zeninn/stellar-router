@@ -166,6 +166,22 @@ pub const EVENT_RATE_LIMIT_EXCEEDED: &str = "rate_limit_exceeded";
 /// Standard event topic for call log clearing
 pub const EVENT_CALL_LOG_CLEARED: &str = "call_log_cleared";
 
+// Issue #1198: the #894 migration to EVENT_* constants only covered
+// pre_call/post_call/call_log_cleared — these four router-middleware event
+// topics were left as raw string literals with no constant at all.
+
+/// Standard event topic for a route's rate-limit strategy being set.
+pub const EVENT_RATE_LIMIT_STRATEGY_SET: &str = "rate_limit_strategy_set";
+
+/// Standard event topic for a route's circuit breaker/rate-limit guard state being reset.
+pub const EVENT_GUARD_RESET: &str = "guard_reset";
+
+/// Standard event topic for a per-caller rate limit override being set.
+pub const EVENT_CALLER_RATE_LIMIT_SET: &str = "caller_rate_limit_set";
+
+/// Standard event topic for a per-caller rate limit override being removed.
+pub const EVENT_CALLER_RATE_LIMIT_REMOVED: &str = "caller_rate_limit_removed";
+
 /// Standard event topic for multicall results
 pub const EVENT_CALL_RESULT: &str = "call_result";
 
@@ -221,6 +237,9 @@ pub const EVENT_DEFAULT_FEE_UPDATED: &str = "default_fee_updated";
 
 /// Standard event topic for a role admin being set
 pub const EVENT_ROLE_ADMIN_SET: &str = "role_admin_set";
+
+/// Standard event topic for role limits being set
+pub const EVENT_ROLE_LIMITS_SET: &str = "role_limits_set";
 
 /// Standard event topic for an address being un-blacklisted
 pub const EVENT_ADDRESS_UNBLACKLISTED: &str = "address_unblacklisted";
@@ -333,6 +352,23 @@ pub struct BatchCallResult {
     pub failures: Vec<BatchFailure>,
 }
 
+// Issue #1213: `BatchResult` and `BatchCallResult` differ only in what a
+// *success* carries (`BatchSuccess` vs `BatchCallSuccess`) — their `failures`
+// tracking is identical. These two free functions are the single place that
+// logic now lives; both impls below just delegate to them, so a future
+// change to how a failure is recorded/counted only has to happen once.
+// (Kept as free functions operating on `&(mut) Vec<BatchFailure>`, rather
+// than restructuring the `#[contracttype]` struct fields themselves, so
+// neither struct's on-chain XDR shape changes.)
+
+fn batch_record_failure(failures: &mut Vec<BatchFailure>, index: u32, error: BatchItemError) {
+    failures.push_back(BatchFailure { index, error });
+}
+
+fn batch_has_failures(failures: &Vec<BatchFailure>) -> bool {
+    !failures.is_empty()
+}
+
 impl BatchResult {
     pub fn new(env: &Env) -> Self {
         Self {
@@ -346,11 +382,11 @@ impl BatchResult {
     }
 
     pub fn record_failure(&mut self, index: u32, error: BatchItemError) {
-        self.failures.push_back(BatchFailure { index, error });
+        batch_record_failure(&mut self.failures, index, error);
     }
 
     pub fn has_failures(&self) -> bool {
-        !self.failures.is_empty()
+        batch_has_failures(&self.failures)
     }
 }
 
@@ -370,11 +406,11 @@ impl BatchCallResult {
     }
 
     pub fn record_failure(&mut self, index: u32, error: BatchItemError) {
-        self.failures.push_back(BatchFailure { index, error });
+        batch_record_failure(&mut self.failures, index, error);
     }
 
     pub fn has_failures(&self) -> bool {
-        !self.failures.is_empty()
+        batch_has_failures(&self.failures)
     }
 }
 
@@ -505,26 +541,36 @@ mod tests {
         Unauthorized = 2,
     }
 
+    // Issue #1211: `require_admin!`/`require_admin_simple!` expand to a bare
+    // block whose internal `?`/`return` escape to the *caller's* enclosing
+    // function — by design, so contract methods can write
+    // `require_admin_simple!(...)?;` directly. Inside these tests that
+    // enclosing scope is the `env.as_contract(&id, || { ... })` closure, so
+    // the closure itself must be the thing typed `Result<(), AdminTestError>`
+    // and asserted on — not an internal `let result = ...;` line, which the
+    // escaping `return` on any error path would skip entirely, leaving the
+    // original `assert_eq!` calls unreachable dead code on the error branches.
+
     /// require_admin! returns Ok(()) when the caller matches the stored admin.
     #[test]
     fn require_admin_passes_for_correct_admin() {
         let env = Env::default();
         let id = env.register_contract(None, AdminTestContract);
-        env.as_contract(&id, || {
+        let result: Result<(), AdminTestError> = env.as_contract(&id, || {
             let admin = Address::generate(&env);
             env.storage()
                 .instance()
                 .set(&CommonDataKey::Admin, &admin);
 
-            let result = require_admin!(
+            require_admin!(
                 &env,
                 &admin,
                 &CommonDataKey::Admin,
                 AdminTestError::NotInitialized,
                 AdminTestError::Unauthorized
-            );
-            assert_eq!(result, Ok(()));
+            )
         });
+        assert_eq!(result, Ok(()));
     }
 
     /// require_admin! returns Err(Unauthorized) when the caller is not the admin.
@@ -532,22 +578,22 @@ mod tests {
     fn require_admin_rejects_non_admin_caller() {
         let env = Env::default();
         let id = env.register_contract(None, AdminTestContract);
-        env.as_contract(&id, || {
+        let result: Result<(), AdminTestError> = env.as_contract(&id, || {
             let admin = Address::generate(&env);
             let attacker = Address::generate(&env);
             env.storage()
                 .instance()
                 .set(&CommonDataKey::Admin, &admin);
 
-            let result = require_admin!(
+            require_admin!(
                 &env,
                 &attacker,
                 &CommonDataKey::Admin,
                 AdminTestError::NotInitialized,
                 AdminTestError::Unauthorized
-            );
-            assert_eq!(result, Err(AdminTestError::Unauthorized));
+            )
         });
+        assert_eq!(result, Err(AdminTestError::Unauthorized));
     }
 
     /// require_admin! returns Err(NotInitialized) when no admin key is present in storage.
@@ -555,18 +601,18 @@ mod tests {
     fn require_admin_returns_not_initialized_when_key_absent() {
         let env = Env::default();
         let id = env.register_contract(None, AdminTestContract);
-        env.as_contract(&id, || {
+        let result: Result<(), AdminTestError> = env.as_contract(&id, || {
             let caller = Address::generate(&env);
 
-            let result = require_admin!(
+            require_admin!(
                 &env,
                 &caller,
                 &CommonDataKey::Admin,
                 AdminTestError::NotInitialized,
                 AdminTestError::Unauthorized
-            );
-            assert_eq!(result, Err(AdminTestError::NotInitialized));
+            )
         });
+        assert_eq!(result, Err(AdminTestError::NotInitialized));
     }
 
     // ── require_admin_simple! tests ───────────────────────────────────────────
@@ -578,16 +624,15 @@ mod tests {
     fn require_admin_simple_passes_for_correct_admin() {
         let env = Env::default();
         let id = env.register_contract(None, AdminTestContract);
-        env.as_contract(&id, || {
+        let result: Result<(), AdminTestError> = env.as_contract(&id, || {
             let admin = Address::generate(&env);
             env.storage()
                 .instance()
                 .set(&CommonDataKey::Admin, &admin);
 
-            let result =
-                require_admin_simple!(&env, &admin, &CommonDataKey::Admin, AdminTestError);
-            assert_eq!(result, Ok(()));
+            require_admin_simple!(&env, &admin, &CommonDataKey::Admin, AdminTestError)
         });
+        assert_eq!(result, Ok(()));
     }
 
     /// require_admin_simple! must return Err(Unauthorized) for a non-admin caller.
@@ -595,17 +640,16 @@ mod tests {
     fn require_admin_simple_rejects_non_admin_caller() {
         let env = Env::default();
         let id = env.register_contract(None, AdminTestContract);
-        env.as_contract(&id, || {
+        let result: Result<(), AdminTestError> = env.as_contract(&id, || {
             let admin = Address::generate(&env);
             let attacker = Address::generate(&env);
             env.storage()
                 .instance()
                 .set(&CommonDataKey::Admin, &admin);
 
-            let result =
-                require_admin_simple!(&env, &attacker, &CommonDataKey::Admin, AdminTestError);
-            assert_eq!(result, Err(AdminTestError::Unauthorized));
+            require_admin_simple!(&env, &attacker, &CommonDataKey::Admin, AdminTestError)
         });
+        assert_eq!(result, Err(AdminTestError::Unauthorized));
     }
 
     /// require_admin_simple! must return Err(NotInitialized) when no admin is stored.
@@ -613,13 +657,12 @@ mod tests {
     fn require_admin_simple_returns_not_initialized_when_key_absent() {
         let env = Env::default();
         let id = env.register_contract(None, AdminTestContract);
-        env.as_contract(&id, || {
+        let result: Result<(), AdminTestError> = env.as_contract(&id, || {
             let caller = Address::generate(&env);
 
-            let result =
-                require_admin_simple!(&env, &caller, &CommonDataKey::Admin, AdminTestError);
-            assert_eq!(result, Err(AdminTestError::NotInitialized));
+            require_admin_simple!(&env, &caller, &CommonDataKey::Admin, AdminTestError)
         });
+        assert_eq!(result, Err(AdminTestError::NotInitialized));
     }
 
     /// require_admin_simple! and require_admin! are equivalent: both must return
@@ -629,50 +672,61 @@ mod tests {
     fn require_admin_simple_matches_require_admin_for_all_cases() {
         let env = Env::default();
         let id = env.register_contract(None, AdminTestContract);
+        let admin = Address::generate(&env);
+        let other = Address::generate(&env);
+
+        // ── Case 1: key absent ────────────────────────────────────────────────
+        // Each macro call runs in its own `as_contract` closure (rather than
+        // sharing one across all three cases) so its escaping `return` on the
+        // error path resolves to that closure's `Result<(), AdminTestError>`
+        // return value instead of aborting the rest of the test function.
+        let r_full: Result<(), AdminTestError> = env.as_contract(&id, || {
+            require_admin!(
+                &env,
+                &admin,
+                &CommonDataKey::Admin,
+                AdminTestError::NotInitialized,
+                AdminTestError::Unauthorized
+            )
+        });
+        let r_simple: Result<(), AdminTestError> = env.as_contract(&id, || {
+            require_admin_simple!(&env, &admin, &CommonDataKey::Admin, AdminTestError)
+        });
+        assert_eq!(r_full, r_simple);
+
+        // ── Case 2: key present, caller is admin ────────────────────────────
         env.as_contract(&id, || {
-            let admin = Address::generate(&env);
-            let other = Address::generate(&env);
+            env.storage().instance().set(&CommonDataKey::Admin, &admin);
+        });
 
-            // ── Case 1: key absent ────────────────────────────────────────────
-            let r_full = require_admin!(
+        let r_full: Result<(), AdminTestError> = env.as_contract(&id, || {
+            require_admin!(
                 &env,
                 &admin,
                 &CommonDataKey::Admin,
                 AdminTestError::NotInitialized,
                 AdminTestError::Unauthorized
-            );
-            let r_simple =
-                require_admin_simple!(&env, &admin, &CommonDataKey::Admin, AdminTestError);
-            assert_eq!(r_full, r_simple);
+            )
+        });
+        let r_simple: Result<(), AdminTestError> = env.as_contract(&id, || {
+            require_admin_simple!(&env, &admin, &CommonDataKey::Admin, AdminTestError)
+        });
+        assert_eq!(r_full, r_simple);
 
-            // ── Case 2: key present, caller is admin ──────────────────────────
-            env.storage()
-                .instance()
-                .set(&CommonDataKey::Admin, &admin);
-
-            let r_full = require_admin!(
-                &env,
-                &admin,
-                &CommonDataKey::Admin,
-                AdminTestError::NotInitialized,
-                AdminTestError::Unauthorized
-            );
-            let r_simple =
-                require_admin_simple!(&env, &admin, &CommonDataKey::Admin, AdminTestError);
-            assert_eq!(r_full, r_simple);
-
-            // ── Case 3: key present, caller is not admin ──────────────────────
-            let r_full = require_admin!(
+        // ── Case 3: key present, caller is not admin ────────────────────────
+        let r_full: Result<(), AdminTestError> = env.as_contract(&id, || {
+            require_admin!(
                 &env,
                 &other,
                 &CommonDataKey::Admin,
                 AdminTestError::NotInitialized,
                 AdminTestError::Unauthorized
-            );
-            let r_simple =
-                require_admin_simple!(&env, &other, &CommonDataKey::Admin, AdminTestError);
-            assert_eq!(r_full, r_simple);
+            )
         });
+        let r_simple: Result<(), AdminTestError> = env.as_contract(&id, || {
+            require_admin_simple!(&env, &other, &CommonDataKey::Admin, AdminTestError)
+        });
+        assert_eq!(r_full, r_simple);
     }
 
     // ── admin_transfer_complete! tests ────────────────────────────────────────

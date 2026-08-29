@@ -190,10 +190,19 @@ pub fn config_from_env() -> RateLimitConfig {
         .and_then(|v| v.parse().ok())
         .unwrap_or(60u64);
 
+    // Issue #1200: max_buckets was hardcoded here even though it's a regular
+    // constructor field (used by RateLimiter::check's eviction logic to
+    // bound memory), not a private constant — every deployment got exactly
+    // 1024 tracked buckets regardless of configuration.
+    let max_buckets = std::env::var("ROUTER_RATE_LIMIT_MAX_BUCKETS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1024usize);
+
     RateLimitConfig {
         max_requests,
         window: Duration::from_secs(window_secs),
-        max_buckets: 1024,
+        max_buckets,
     }
 }
 

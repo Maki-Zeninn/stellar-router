@@ -858,7 +858,7 @@ impl RouterMiddleware {
             .instance()
             .set(&DataKey::RateLimitStrategy(route.clone()), &strategy);
         env.events().publish(
-            (Symbol::new(&env, "rate_limit_strategy_set"),),
+            (Symbol::new(&env, router_common::EVENT_RATE_LIMIT_STRATEGY_SET),),
             (route, strategy),
         );
         Ok(())
@@ -908,7 +908,7 @@ impl RouterMiddleware {
             .remove(&DataKey::Executing(route.clone()));
 
         env.events()
-            .publish((Symbol::new(&env, "guard_reset"),), route);
+            .publish((Symbol::new(&env, router_common::EVENT_GUARD_RESET),), route);
 
         Ok(())
     }
@@ -953,7 +953,7 @@ impl RouterMiddleware {
             },
         );
         env.events().publish(
-            (Symbol::new(&env, "caller_rate_limit_set"),),
+            (Symbol::new(&env, router_common::EVENT_CALLER_RATE_LIMIT_SET),),
             (route, target_caller, max_calls, window_secs),
         );
         Ok(())
@@ -996,7 +996,7 @@ impl RouterMiddleware {
         let key = DataKey::CallerRateLimit(route.clone(), target_caller.clone());
         env.storage().instance().remove(&key);
         env.events().publish(
-            (Symbol::new(&env, "caller_rate_limit_removed"),),
+            (Symbol::new(&env, router_common::EVENT_CALLER_RATE_LIMIT_REMOVED),),
             (route, target_caller),
         );
         Ok(())
@@ -1082,6 +1082,13 @@ impl RouterMiddleware {
         now: u64,
         base_window_seconds: u64,
     ) -> bool {
+        // Issue #1197 (duplicate of #1196): each caller must be pruned
+        // against their own effective window — their per-caller
+        // CallerRateLimitConfig override when one is configured for `route`,
+        // otherwise the route's base window — not the route's base window
+        // alone. Previously a caller with a longer override window had their
+        // rate-limit state evicted (and their call count silently reset)
+        // long before their real window elapsed.
         let mut stale_callers: Vec<Address> = Vec::new(env);
         for (caller, state) in rate_limits.iter() {
             let effective_window = env
@@ -2293,7 +2300,7 @@ mod tests {
         let events = env.events().all();
         let last = events.last().unwrap();
         let topic: Symbol = last.1.get(0).unwrap().into_val(&env);
-        assert_eq!(topic, Symbol::new(&env, "rate_limit_strategy_set"));
+        assert_eq!(topic, Symbol::new(&env, router_common::EVENT_RATE_LIMIT_STRATEGY_SET));
     }
 
     #[test]
@@ -2563,7 +2570,7 @@ mod tests {
         client.set_caller_rate_limit(&admin, &route, &target, &20, &120);
 
         let events = env.events().all();
-        let topic = Symbol::new(&env, "caller_rate_limit_set");
+        let topic = Symbol::new(&env, router_common::EVENT_CALLER_RATE_LIMIT_SET);
         let found = events.iter().any(|e| {
             e.1.get(0)
                 .map(|t| Symbol::from_val(&env, &t) == topic)
@@ -2583,7 +2590,7 @@ mod tests {
         client.remove_caller_rate_limit(&admin, &route, &target);
 
         let events = env.events().all();
-        let topic = Symbol::new(&env, "caller_rate_limit_removed");
+        let topic = Symbol::new(&env, router_common::EVENT_CALLER_RATE_LIMIT_REMOVED);
         let found = events.iter().any(|e| {
             e.1.get(0)
                 .map(|t| Symbol::from_val(&env, &t) == topic)
@@ -2848,7 +2855,7 @@ mod tests {
         client.reset_guard(&admin, &route);
 
         let events = env.events().all();
-        let topic = Symbol::new(&env, "guard_reset");
+        let topic = Symbol::new(&env, router_common::EVENT_GUARD_RESET);
         let found = events.iter().any(|e| {
             e.1.get(0)
                 .map(|t| soroban_sdk::Symbol::from_val(&env, &t) == topic)
