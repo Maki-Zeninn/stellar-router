@@ -492,13 +492,20 @@ impl RouterExecution {
 
     /// Estimate fees for a transaction.
     ///
-    /// Returns a [`FeeEstimate`] based on the target contract and function.
+    /// Returns a [`FeeEstimate`] based on transaction amount and caller-asserted
+    /// network load. Fee calculation depends **only** on `amount` and
+    /// `caller_asserted_load_bps`; the `target` contract and `function` parameters
+    /// exist for API symmetry with `execute()` and `simulate()` but do not
+    /// currently affect the fee estimate.
+    ///
     /// Under high-load conditions (detected via a configurable threshold), a
     /// surge multiplier is applied to the base fee.
     ///
     /// # Arguments
-    /// * `target` - The contract to be called.
-    /// * `function` - The function to be invoked.
+    /// * `target` - The contract to be called. Included for API consistency with
+    ///   `execute()` and `simulate()`, but does not affect fee calculations.
+    /// * `function` - The function to be invoked. Included for API consistency with
+    ///   `execute()` and `simulate()`, but does not affect fee calculations.
     /// * `amount` - The transaction amount in stroops (used to scale resource fees).
     ///   Must be greater than zero.
     /// * `caller_asserted_load_bps` - A **caller-asserted** basis-point hint above
@@ -935,9 +942,6 @@ impl RouterExecution {
             success,
             fee_paid,
         });
-        env.storage()
-            .instance()
-            .set(&DataKey::ExecHistory, &history);
 
         // Cap storage growth: evict the oldest record(s) once over the limit.
         let max_history: u32 = env
@@ -947,6 +951,7 @@ impl RouterExecution {
             .unwrap_or(DEFAULT_MAX_HISTORY_SIZE);
         Self::evict_oldest(&mut history, max_history);
 
+        // Perform a single write after all mutations (append + eviction).
         env.storage()
             .instance()
             .set(&DataKey::ExecHistory, &history);
