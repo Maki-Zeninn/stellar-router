@@ -158,9 +158,9 @@ fn test_registry_double_deprecate_fails() {
 
     let name = String::from_str(&env, "oracle");
     client.register(&admin, &name, &Address::generate(&env), &1);
-    client.deprecate(&admin, &name, &1);
+    client.deprecate(&admin, &name, &1, &None::<String>);
 
-    let result = client.try_deprecate(&admin, &name, &1);
+    let result = client.try_deprecate(&admin, &name, &1, &None::<String>);
     assert_eq!(result, Err(Ok(RegistryError::AlreadyDeprecated)));
 }
 

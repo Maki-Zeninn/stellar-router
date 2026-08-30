@@ -102,6 +102,8 @@ pub enum QuoteError {
     /// distinguish the two errors; renumbering this variant to `10` restores
     /// unambiguous decoding. Fixes #1075.
     InvalidFeeTier = 10,
+    /// Too many fee tiers configured for a single route. Cannot exceed [`MAX_FEE_TIERS_PER_ROUTE`].
+    TooManyTiers = 11,
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -120,6 +122,12 @@ const BPS_DENOMINATOR: u32 = 10_000;
 /// `track_configured_route` returns [`QuoteError::TooManyRoutes`] once this
 /// limit is reached to prevent unbounded storage growth.
 const MAX_TRACKED_ROUTES: u32 = 500;
+
+/// Maximum number of fee tiers that can be configured for a single route.
+///
+/// `set_route_fee_tiers` returns [`QuoteError::TooManyTiers`] once this
+/// limit is reached to prevent unbounded storage growth and O(n²) insertion-sort overhead.
+const MAX_FEE_TIERS_PER_ROUTE: u32 = 100;
 
 #[contract]
 pub struct RouterQuote;
@@ -292,6 +300,11 @@ impl RouterQuote {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, QuoteError)?;
 
+        // Validate tier count to prevent unbounded storage growth
+        if tiers.len() as u32 > MAX_FEE_TIERS_PER_ROUTE {
+            return Err(QuoteError::TooManyTiers);
+        }
+
         let mut sorted_tiers: Vec<FeeTier> = Vec::new(&env);
         for tier in tiers.iter() {
             if tier.min_amount < 0 {
@@ -346,11 +359,21 @@ impl RouterQuote {
     }
 
     /// Get the configured fee tiers for a route.
-    pub fn get_route_fee_tiers(env: Env, route: String) -> Vec<FeeTier> {
+    ///
+    /// Returns an error if the contract has not been initialized.
+    /// If the route has no configured tiers, returns an empty vector.
+    pub fn get_route_fee_tiers(env: Env, route: String) -> Result<Vec<FeeTier>, QuoteError> {
+        // Verify contract is initialized by checking Admin key exists
         env.storage()
             .instance()
-            .get(&DataKey::RouteFeeTiers(route))
-            .unwrap_or_else(|| Vec::new(&env))
+            .has(&DataKey::Admin)
+            .then(|| {
+                env.storage()
+                    .instance()
+                    .get(&DataKey::RouteFeeTiers(route))
+                    .unwrap_or_else(|| Vec::new(&env))
+            })
+            .ok_or(QuoteError::NotInitialized)
     }
 
     /// Get all configured router fee.
@@ -367,7 +390,10 @@ impl RouterQuote {
         let mut configured_routes = Vec::new(&env);
 
         for route in routes {
-            let tiers = Self::get_route_fee_tiers(env.clone(), route.clone());
+            let tiers = match Self::get_route_fee_tiers(env.clone(), route.clone()) {
+                Ok(t) => t,
+                Err(_) => Vec::new(&env), // If not initialized, skip this route
+            };
             let fee = if let Some(lowest) = tiers.get(0) {
                 lowest.fee_bps
             } else if let Ok(fee) = Self::get_route_fee(env.clone(), route.clone()) {
@@ -676,7 +702,7 @@ impl RouterQuote {
     }
 
     fn resolve_route_fee_bps(env: Env, route: String, amount_in: i128) -> Result<u32, QuoteError> {
-        let tiers = Self::get_route_fee_tiers(env.clone(), route.clone());
+        let tiers = Self::get_route_fee_tiers(env.clone(), route.clone())?;
         if !tiers.is_empty() {
             let mut matching_fee = None;
             for tier in tiers.iter() {
@@ -819,8 +845,9 @@ mod tests {
     fn test_get_route_fee_tiers_returns_empty_when_not_set() {
         let (env, _admin, client) = setup();
         let route = String::from_str(&env, "uniswap");
-        let tiers = client.get_route_fee_tiers(&route);
-        assert!(tiers.is_empty());
+        let result = client.get_route_fee_tiers(&route);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
     }
 
     #[test]
@@ -847,7 +874,9 @@ mod tests {
 
         client.set_route_fee_tiers(&admin, &route, &tiers);
 
-        let retrieved_tiers = client.get_route_fee_tiers(&route);
+        let result = client.get_route_fee_tiers(&route);
+        assert!(result.is_ok());
+        let retrieved_tiers = result.unwrap();
         assert_eq!(retrieved_tiers.len(), 3);
 
         // Verify tiers are sorted by min_amount ascending

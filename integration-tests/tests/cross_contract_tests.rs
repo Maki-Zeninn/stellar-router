@@ -94,7 +94,7 @@ fn test_core_route_updated_after_registry_version_bump() {
 
     // Bump registry to v2
     s.registry.register(&s.admin, &name, &v2_addr, &2);
-    s.registry.deprecate(&s.admin, &name, &1);
+    s.registry.deprecate(&s.admin, &name, &1, &None::<String>);
     assert_eq!(s.registry.get_latest(&name).address, v2_addr);
 
     // Update core route to match
