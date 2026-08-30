@@ -205,6 +205,8 @@ impl RouterMulticall {
     /// * [`MulticallError::GasLimitExceeded`] — if the cumulative declared budget exceeds `max_total_gas`.
     /// * [`MulticallError::RequiredCallFailed`] — if a call with `required = true` fails.
     /// * [`MulticallError::NotInitialized`] — if the contract has not been initialized.
+    /// * [`MulticallError::Reentrancy`] — if called from within an executing batch.
+    /// * [`MulticallError::ArgsTooLarge`] — if any call's `args` vector exceeds `MAX_ARGS_PER_CALL`.
     pub fn execute_batch(
         env: Env,
         caller: Address,
