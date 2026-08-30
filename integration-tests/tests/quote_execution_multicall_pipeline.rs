@@ -95,7 +95,7 @@ impl<'a> PipelineTestSuite<'a> {
         let multicall = RouterMulticallClient::new(&env, &multicall_id);
 
         // Initialize all contracts
-        core.initialize(&admin);
+        core.initialize(&admin, &None);
         registry.initialize(&admin);
         access.initialize(&admin);
         middleware.initialize(&admin);
@@ -134,7 +134,7 @@ impl<'a> PipelineTestSuite<'a> {
         self.quote.set_route_fee(&self.admin, &route, &50);
 
         // Step 4: Configure middleware with rate limiting (10 calls per 60s window)
-        self.middleware.configure_route(&self.admin, &route, &10, &60, &true, &3, &30, &0);
+        self.middleware.configure_route(&self.admin, &route, &10, &60, &true, &3, &30, &0, &0);
     }
 
     /// Advance time by a given number of seconds.
@@ -505,7 +505,7 @@ fn test_pipeline_circuit_breaker() {
 
     // Configure middleware with low failure threshold (2 failures)
     // This route will be configured with failure_threshold = 2
-    s.middleware.configure_route(&s.admin, &route, &5, &60, &true, &2, &60, &0);
+    s.middleware.configure_route(&s.admin, &route, &5, &60, &true, &2, &60, &0, &0);
 
     // Simulate two failures (calls post_call with success=false)
     s.middleware.post_call(&user, &route, &false);

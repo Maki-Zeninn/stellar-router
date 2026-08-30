@@ -742,17 +742,18 @@ impl RouterRegistry {
             .set(&DataKey::Entry(name.clone(), version), &entry);
 
         let mut versions = Self::get_versions_list(env, &name);
+        let is_new_name = versions.is_empty();
         versions.push_back(version);
         env.storage()
             .instance()
             .set(&DataKey::Versions(name.clone()), &versions);
 
-        let mut names: Vec<String> = env
-            .storage()
-            .instance()
-            .get(&DataKey::ContractNames)
-            .unwrap_or_else(|| Vec::new(env));
-        if !names.contains(&name) {
+        if is_new_name {
+            let mut names: Vec<String> = env
+                .storage()
+                .instance()
+                .get(&DataKey::ContractNames)
+                .unwrap_or_else(|| Vec::new(env));
             names.push_back(name.clone());
             env.storage()
                 .instance()
@@ -1383,6 +1384,31 @@ mod tests {
         assert_eq!(result.successes.len(), 0);
         assert_eq!(result.failures.len(), 1);
         assert_eq!(result.failures.get(0).unwrap().index, 0);
+    }
+
+    #[test]
+    fn test_bulk_register_unauthorized_caller_fails() {
+        let (env, _admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let attacker = Address::generate(&env);
+        let entries = vec![
+            &env,
+            BulkRegistrationInput {
+                name: name.clone(),
+                address: Address::generate(&env),
+                version: 1,
+            },
+            BulkRegistrationInput {
+                name: name.clone(),
+                address: Address::generate(&env),
+                version: 2,
+            },
+        ];
+        let result = client.try_bulk_register(&attacker, &entries, &false);
+        assert_eq!(result, Err(Ok(RegistryError::Unauthorized)));
+        // Verify no entries were registered
+        assert_eq!(client.try_get(&name, &1), Err(Ok(RegistryError::NotFound)));
+        assert_eq!(client.try_get(&name, &2), Err(Ok(RegistryError::NotFound)));
     }
 
     #[test]
