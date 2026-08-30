@@ -407,17 +407,21 @@ impl RouterMiddleware {
                 state_changed = true;
             }
 
-            // Rate limit check.
-            if config.max_calls_per_window > 0 {
+            // Rate limit check: enforce route-level limit only if set, but always
+            // check for per-caller overrides even when route is unlimited (max_calls_per_window = 0).
+            // This allows admins to throttle specific abusive callers on otherwise-unlimited routes.
+            let caller_override: Option<CallerRateLimitConfig> = env
+                .storage()
+                .instance()
+                .get::<DataKey, CallerRateLimitConfig>(&DataKey::CallerRateLimit(
+                    route.clone(),
+                    caller.clone(),
+                ));
+
+            if config.max_calls_per_window > 0 || caller_override.is_some() {
                 // Resolve effective limit: per-caller override takes precedence
                 // over the route-level default when present.
-                let (effective_limit, effective_window) = env
-                    .storage()
-                    .instance()
-                    .get::<DataKey, CallerRateLimitConfig>(&DataKey::CallerRateLimit(
-                        route.clone(),
-                        caller.clone(),
-                    ))
+                let (effective_limit, effective_window) = caller_override
                     .map(|c| (c.max_calls, c.window_secs))
                     .unwrap_or((
                         config
