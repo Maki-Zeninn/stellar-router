@@ -711,8 +711,8 @@ impl RouterRegistry {
             return Err(RegistryError::AlreadyRegistered);
         }
         let versions = Self::get_versions_list(env, name);
-        for v in versions.iter() {
-            if version <= v {
+        if let Some(last) = versions.last() {
+            if version <= last {
                 return Err(RegistryError::InvalidVersion);
             }
         }
