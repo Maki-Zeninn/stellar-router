@@ -2,8 +2,14 @@ name: Metrics Exporter Integration Tests
 
 on:
   pull_request:
+    paths:
+      - 'metrics/**'
+      - '.github/workflows/metrics-integration-tests.yml'
   push:
     branches: [main]
+    paths:
+      - 'metrics/**'
+      - '.github/workflows/metrics-integration-tests.yml'
 
 jobs:
   metrics-integration-test:
