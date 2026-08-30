@@ -102,6 +102,8 @@ pub enum QuoteError {
     /// distinguish the two errors; renumbering this variant to `10` restores
     /// unambiguous decoding. Fixes #1075.
     InvalidFeeTier = 10,
+    /// Too many fee tiers configured for a single route. Cannot exceed [`MAX_FEE_TIERS_PER_ROUTE`].
+    TooManyTiers = 11,
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -120,6 +122,12 @@ const BPS_DENOMINATOR: u32 = 10_000;
 /// `track_configured_route` returns [`QuoteError::TooManyRoutes`] once this
 /// limit is reached to prevent unbounded storage growth.
 const MAX_TRACKED_ROUTES: u32 = 500;
+
+/// Maximum number of fee tiers that can be configured for a single route.
+///
+/// `set_route_fee_tiers` returns [`QuoteError::TooManyTiers`] once this
+/// limit is reached to prevent unbounded storage growth and O(n²) insertion-sort overhead.
+const MAX_FEE_TIERS_PER_ROUTE: u32 = 100;
 
 #[contract]
 pub struct RouterQuote;
@@ -291,6 +299,11 @@ impl RouterQuote {
     ) -> Result<(), QuoteError> {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, QuoteError)?;
+
+        // Validate tier count to prevent unbounded storage growth
+        if tiers.len() as u32 > MAX_FEE_TIERS_PER_ROUTE {
+            return Err(QuoteError::TooManyTiers);
+        }
 
         let mut sorted_tiers: Vec<FeeTier> = Vec::new(&env);
         for tier in tiers.iter() {
