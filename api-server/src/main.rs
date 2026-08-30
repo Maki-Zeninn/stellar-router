@@ -142,13 +142,13 @@ async fn main() -> Result<()> {
         .route("/ws", get(websocket::ws_handler))
         .route("/openapi.json", get(openapi_json))
         .merge(docs)
+        .layer(middleware::from_fn(request_id_middleware))
+        .layer(cors)
+        .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit::rate_limit_middleware,
         ))
-        .layer(middleware::from_fn(request_id_middleware))
-        .layer(cors)
-        .layer(DefaultBodyLimit::max(1024 * 1024))
         .with_state(state);
 
     let addr: SocketAddr = args
