@@ -29,6 +29,7 @@
 //! - `route_resolve_expired` ΓÇö Route resolution attempted on an expired route (route_name)
 //! - `alias_added` ΓÇö Route alias added (existing_name, alias_name)
 //! - `alias_removed` ΓÇö Route alias removed (alias_name)
+//! - `alias_resolved` ΓÇö Route alias resolved (alias_name, resolved_name)
 //! - `route_scored` ΓÇö Route score updated (route_name, score)
 //! - `best_route_selected` ΓÇö Best route selected (route_name)
 //! - `admin_transferred` ΓÇö Admin transferred (old_admin, new_admin)
