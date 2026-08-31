@@ -57,6 +57,7 @@ pub enum DataKey {
     Score(String),        // name -> RouteScore
     Metadata(String),     // name -> RouteMetadata (stored separately; avoids nested contracttype)
     Dependencies(String), // name -> Vec<String> of direct dependencies
+    Dependents(String),   // name -> Vec<String> of routes that declare `name` as a dependency (reverse index)
     BestRoute,            // cached name of the highest-scoring non-paused route, if any
 
     /// Configurable weights used by the composite scoring formula.
@@ -630,6 +631,18 @@ impl RouterCore {
             .instance()
             .remove(&DataKey::Metadata(name.clone()));
 
+        // Clean up the reverse index: for every route that `name` declared as a
+        // dependency, remove `name` from that route's Dependents list.
+        Self::remove_dependency_edges_for_route(&env, &name);
+        env.storage()
+            .instance()
+            .remove(&DataKey::Dependencies(name.clone()));
+        // Dependents entry for `name` is guaranteed empty (route_has_dependents
+        // returned false), but clean it up to avoid a stale empty-vec entry.
+        env.storage()
+            .instance()
+            .remove(&DataKey::Dependents(name.clone()));
+
         let route_names = Self::get_route_names(&env);
         let mut updated_route_names = Vec::new(&env);
         for route_name in route_names.iter() {
@@ -1104,6 +1117,17 @@ impl RouterCore {
             env.storage()
                 .instance()
                 .set(&DataKey::Dependencies(route.clone()), &dependencies);
+
+            // Maintain the reverse index: depends_on -> set of routes that depend on it.
+            let mut dependents: Vec<String> = env
+                .storage()
+                .instance()
+                .get(&DataKey::Dependents(depends_on.clone()))
+                .unwrap_or_else(|| Vec::new(&env));
+            dependents.push_back(route.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey::Dependents(depends_on.clone()), &dependents);
         }
 
         Ok(())
@@ -2502,9 +2526,19 @@ impl RouterCore {
         env.storage()
             .instance()
             .remove(&DataKey::Metadata(name.clone()));
+
+        // Clean up the reverse index: for every route that `name` declared as a
+        // dependency, remove `name` from that route's Dependents list.
+        Self::remove_dependency_edges_for_route(env, &name);
         env.storage()
             .instance()
             .remove(&DataKey::Dependencies(name.clone()));
+        // The Dependents entry for `name` itself is guaranteed empty at this
+        // point (route_has_dependents returned false above), but remove it
+        // anyway to avoid leaving a stale empty-vec entry.
+        env.storage()
+            .instance()
+            .remove(&DataKey::Dependents(name.clone()));
 
         let route_names = Self::get_route_names(env);
         let mut updated_route_names = Vec::new(env);
@@ -2536,10 +2570,43 @@ impl RouterCore {
         Ok(())
     }
 
+    /// Removes `name` from the [`DataKey::Dependents`] list of every route that
+    /// `name` declared as a direct dependency.
+    ///
+    /// Called at route-removal time so that the reverse index stays consistent:
+    /// once `name` is gone, it should no longer appear in any other route's
+    /// "who depends on me" list.
+    fn remove_dependency_edges_for_route(env: &Env, name: &String) {
+        let own_deps = Self::get_dependencies_for_route(env, name.clone());
+        for dep in own_deps.iter() {
+            let existing: Vec<String> = env
+                .storage()
+                .instance()
+                .get(&DataKey::Dependents(dep.clone()))
+                .unwrap_or_else(|| Vec::new(env));
+            let mut updated = Vec::new(env);
+            for entry in existing.iter() {
+                if entry != *name {
+                    updated.push_back(entry);
+                }
+            }
+            if updated.is_empty() {
+                env.storage()
+                    .instance()
+                    .remove(&DataKey::Dependents(dep.clone()));
+            } else {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Dependents(dep.clone()), &updated);
+            }
+        }
+    }
+
     /// Checks if any other route depends on the given route name.
     ///
-    /// Scans all registered routes to determine if the specified route is
-    /// listed as a dependency by any other route.
+    /// Uses the [`DataKey::Dependents`] reverse index written by
+    /// [`set_route_dependency`](Self::set_route_dependency) for an O(1) lookup
+    /// instead of scanning every registered route.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -2548,16 +2615,11 @@ impl RouterCore {
     /// # Returns
     /// `true` if at least one other route depends on this route, `false` otherwise.
     fn route_has_dependents(env: &Env, name: &String) -> bool {
-        for dependent_name in Self::get_route_names(env).iter() {
-            if dependent_name != *name {
-                for dependency in Self::get_dependencies_for_route(env, dependent_name.clone()).iter() {
-                    if dependency == *name {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+        env.storage()
+            .instance()
+            .get::<DataKey, Vec<String>>(&DataKey::Dependents(name.clone()))
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
     }
 }
 
@@ -2757,6 +2819,168 @@ mod tests {
 
         let result = client.try_remove_route(&admin, &oracle);
         assert_eq!(result, Err(Ok(RouterError::RouteInUse)));
+    }
+
+    // ── Dependents reverse-index tests ───────────────────────────────────────
+
+    /// set_route_dependency must populate the reverse index so that
+    /// route_has_dependents (exercised indirectly via remove_route) can
+    /// correctly block removal of a depended-upon route.
+    #[test]
+    fn test_dependents_index_populated_on_set_route_dependency() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let dex = String::from_str(&env, "dex");
+
+        client.register_route(&admin, &oracle, &Address::generate(&env), &None);
+        client.register_route(&admin, &dex, &Address::generate(&env), &None);
+
+        // Before the edge is added, oracle has no dependents — removal must succeed.
+        client.remove_route(&admin, &oracle);
+
+        // Re-register oracle and wire the dependency dex -> oracle.
+        client.register_route(&admin, &oracle, &Address::generate(&env), &None);
+        client.set_route_dependency(&admin, &dex, &oracle);
+
+        // Now oracle has a dependent (dex), so removal must be rejected.
+        assert_eq!(
+            client.try_remove_route(&admin, &oracle),
+            Err(Ok(RouterError::RouteInUse))
+        );
+    }
+
+    /// Duplicate calls to set_route_dependency must NOT duplicate the entry in
+    /// the Dependents index — the removal guard should still hold after a
+    /// single depender is removed.
+    #[test]
+    fn test_dependents_index_no_duplicate_on_repeated_set_route_dependency() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let dex = String::from_str(&env, "dex");
+
+        client.register_route(&admin, &oracle, &Address::generate(&env), &None);
+        client.register_route(&admin, &dex, &Address::generate(&env), &None);
+
+        // Setting the same edge twice must be idempotent.
+        client.set_route_dependency(&admin, &dex, &oracle);
+        client.set_route_dependency(&admin, &dex, &oracle);
+
+        // oracle still has exactly one logical depender (dex).
+        assert_eq!(
+            client.try_remove_route(&admin, &oracle),
+            Err(Ok(RouterError::RouteInUse))
+        );
+
+        // Remove dex; now oracle should be removable.
+        client.remove_route(&admin, &dex);
+        assert!(client.try_remove_route(&admin, &oracle).is_ok());
+    }
+
+    /// After the last depender is removed, the Dependents index for the
+    /// target route must be cleaned up so that target can itself be removed.
+    #[test]
+    fn test_dependents_index_cleaned_up_after_depender_removed() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let dex = String::from_str(&env, "dex");
+
+        client.register_route(&admin, &oracle, &Address::generate(&env), &None);
+        client.register_route(&admin, &dex, &Address::generate(&env), &None);
+        client.set_route_dependency(&admin, &dex, &oracle);
+
+        // Removing oracle is blocked while dex depends on it.
+        assert_eq!(
+            client.try_remove_route(&admin, &oracle),
+            Err(Ok(RouterError::RouteInUse))
+        );
+
+        // Remove the depender.
+        client.remove_route(&admin, &dex);
+
+        // Now the index is clean — oracle can be removed without error.
+        assert!(client.try_remove_route(&admin, &oracle).is_ok());
+    }
+
+    /// With multiple dependers, removing one of them must leave the target
+    /// still protected (the index must not be erroneously emptied until the
+    /// last depender is gone).
+    #[test]
+    fn test_dependents_index_multiple_dependers_partial_cleanup() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let dex = String::from_str(&env, "dex");
+        let vault = String::from_str(&env, "vault");
+
+        client.register_route(&admin, &oracle, &Address::generate(&env), &None);
+        client.register_route(&admin, &dex, &Address::generate(&env), &None);
+        client.register_route(&admin, &vault, &Address::generate(&env), &None);
+        client.set_route_dependency(&admin, &dex, &oracle);
+        client.set_route_dependency(&admin, &vault, &oracle);
+
+        // Both dependers present — oracle is blocked.
+        assert_eq!(
+            client.try_remove_route(&admin, &oracle),
+            Err(Ok(RouterError::RouteInUse))
+        );
+
+        // Remove one depender.
+        client.remove_route(&admin, &dex);
+
+        // oracle is still blocked because vault still depends on it.
+        assert_eq!(
+            client.try_remove_route(&admin, &oracle),
+            Err(Ok(RouterError::RouteInUse))
+        );
+
+        // Remove the last depender.
+        client.remove_route(&admin, &vault);
+
+        // Now oracle can be removed.
+        assert!(client.try_remove_route(&admin, &oracle).is_ok());
+    }
+
+    /// Removing a route that itself declared dependencies must clean up those
+    /// dependency edges from the Dependents index so the targets can later be
+    /// removed once no other route depends on them.
+    #[test]
+    fn test_dependents_index_cleaned_up_via_remove_route_internal() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let dex = String::from_str(&env, "dex");
+        let vault = String::from_str(&env, "vault");
+
+        // dex depends on oracle; vault depends on oracle too
+        client.register_route(&admin, &oracle, &Address::generate(&env), &None);
+        client.register_route(&admin, &dex, &Address::generate(&env), &None);
+        client.register_route(&admin, &vault, &Address::generate(&env), &None);
+        client.set_route_dependency(&admin, &dex, &oracle);
+        client.set_route_dependency(&admin, &vault, &oracle);
+
+        // Remove vault (it has no dependents itself).
+        client.remove_route(&admin, &vault);
+
+        // oracle still has one depender left (dex) — must still be blocked.
+        assert_eq!(
+            client.try_remove_route(&admin, &oracle),
+            Err(Ok(RouterError::RouteInUse))
+        );
+
+        // Remove dex.
+        client.remove_route(&admin, &dex);
+
+        // oracle's Dependents index is now empty — removal must succeed.
+        assert!(client.try_remove_route(&admin, &oracle).is_ok());
+    }
+
+    /// A route that has never been a dependency target (no Dependents entry)
+    /// must be removable immediately — the O(1) lookup must not false-positive.
+    #[test]
+    fn test_route_without_dependents_can_always_be_removed() {
+        let (env, admin, client) = setup();
+        let standalone = String::from_str(&env, "standalone");
+        client.register_route(&admin, &standalone, &Address::generate(&env), &None);
+        // No dependency edges ever created.
+        assert!(client.try_remove_route(&admin, &standalone).is_ok());
     }
 
     #[test]
