@@ -1752,7 +1752,7 @@ impl RouterCore {
     /// A `Vec<String>` containing up to `limit` route names.
     pub fn get_routes_paginated(env: Env, start: u32, limit: u32) -> Vec<String> {
         router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
-        let names = Self::get_route_names(&env);
+        let names = Self::get_all_routes(env.clone());
         let total = names.len();
         let mut page = Vec::new(&env);
 

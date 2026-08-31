@@ -79,6 +79,23 @@ impl RateLimiter {
         entry.count <= self.config.max_requests
     }
 
+    pub fn check_and_remaining(&self, key: &str) -> (bool, u32) {
+        let now = Instant::now();
+        let mut entry = self.buckets.entry(key.to_string()).or_insert(BucketEntry {
+            count: 0,
+            window_start: now,
+        });
+
+        if now.duration_since(entry.window_start) >= self.config.window {
+            entry.count = 0;
+            entry.window_start = now;
+        }
+
+        entry.count += 1;
+        let allowed = entry.count <= self.config.max_requests;
+        (allowed, self.config.max_requests.saturating_sub(entry.count))
+    }
+
     pub fn remaining(&self, key: &str) -> u32 {
         if let Some(entry) = self.buckets.get(key) {
             let now = Instant::now();
@@ -139,8 +156,7 @@ pub async fn rate_limit_middleware(
     let key = remote_addr.ip().to_string();
 
     let limiter = &state.rate_limiter;
-    let allowed = limiter.check(&key);
-    let remaining = limiter.remaining(&key);
+    let (allowed, remaining) = limiter.check_and_remaining(&key);
 
     if allowed {
         let mut response = next.run(req).await;

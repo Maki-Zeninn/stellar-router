@@ -229,11 +229,6 @@ impl RouterMulticall {
         }
         env.storage().instance().set(&DataKey::Executing, &true);
 
-        if calls.is_empty() {
-            env.storage().instance().remove(&DataKey::Executing);
-            return Err(MulticallError::EmptyBatch);
-        }
-
         let max: u32 = match env.storage().instance().get(&DataKey::MaxBatchSize) {
             Some(v) => v,
             None => {
@@ -241,6 +236,11 @@ impl RouterMulticall {
                 return Err(MulticallError::NotInitialized);
             }
         };
+
+        if calls.is_empty() {
+            env.storage().instance().remove(&DataKey::Executing);
+            return Err(MulticallError::EmptyBatch);
+        }
 
         if calls.len() > max {
             env.storage().instance().remove(&DataKey::Executing);
@@ -317,7 +317,7 @@ impl RouterMulticall {
 
             env.events().publish(
                 (Symbol::new(&env, router_common::EVENT_CALL_RESULT),),
-                (&caller, &call.target, &call.function, success, call_index),
+                (&caller, &call.target, &call.function, success, call_index, simulate),
             );
 
             if !success {
@@ -381,7 +381,7 @@ impl RouterMulticall {
         let failed = result.failures.len();
         env.events().publish(
             (Symbol::new(&env, router_common::EVENT_BATCH_EXECUTED),),
-            (&caller, batch_id, succeeded, failed, call_index),
+            (&caller, batch_id, succeeded, failed, call_index, simulate),
         );
 
         Ok(result)
