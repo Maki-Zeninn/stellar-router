@@ -442,11 +442,14 @@ impl RouterMulticall {
     ///
     /// # Returns
     /// The total number of batches that have been executed.
-    pub fn total_batches(env: Env) -> u64 {
+    ///
+    /// # Errors
+    /// * [`MulticallError::NotInitialized`] — if the contract has not been initialized.
+    pub fn total_batches(env: Env) -> Result<u64, MulticallError> {
         env.storage()
             .instance()
             .get(&DataKey::TotalBatches)
-            .unwrap_or(0)
+            .ok_or(MulticallError::NotInitialized)
     }
 
     /// Get the max batch size.

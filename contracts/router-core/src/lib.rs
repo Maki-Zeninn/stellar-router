@@ -1150,6 +1150,8 @@ impl RouterCore {
     /// * [`RouterError::RouteNotFound`] — if `name` or any of its dependencies
     ///   does not exist.
     /// * [`RouterError::RoutePaused`] — if `name` or any of its dependencies is paused.
+    /// * [`RouterError::RouteExpired`] — if `name` or any of its dependencies has an
+    ///   elapsed TTL.
     /// * [`RouterError::CircularDependency`] — if the dependency graph contains a cycle.
     /// * [`RouterError::RecursionLimitExceeded`] — if the dependency graph is too deep.
     pub fn resolve_with_dependencies(
@@ -2174,6 +2176,9 @@ impl RouterCore {
             .ok_or(RouterError::RouteNotFound)?;
         if entry.paused {
             return Err(RouterError::RoutePaused);
+        }
+        if is_route_expired(env, &entry) {
+            return Err(RouterError::RouteExpired);
         }
 
         resolved.push_back((name.clone(), entry.address.clone()));
