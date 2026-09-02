@@ -876,3 +876,155 @@ fn test_build_cors_layer_invalid_origin_does_not_panic() {
     // Must complete without panicking; the invalid entry is dropped + warned.
     let _ = build_cors_layer(&origins);
 }
+
+// ---------------------------------------------------------------------------
+// Regression test for #1161: `parse_route_entry_from_rpc` previously turned
+// every contract-level simulation error (`result.error` populated by
+// `simulateTransaction`) into `Ok(None)`, which `handlers::get_route`
+// mapped to HTTP 404. That made transient RPC/contract failures
+// indistinguishable from a genuinely missing route on the client side.
+//
+// The fix returns `Err(...)` from `parse_route_entry_from_rpc` whenever the
+// `error` field is set, so `handlers::get_route` produces HTTP 500. This
+// test stands up a small in-process axum mock that *always* replies with
+// `{"result": {"error": "..."}}` (a contract-level failure) and asserts
+// that the API surfaces it as 500, not 404.
+// ---------------------------------------------------------------------------
+
+async fn spawn_mock_rpc_returning(body: serde_json::Value) -> String {
+    use axum::{routing::post, Json as AxJson, Router};
+    use std::net::SocketAddr;
+    use tokio::net::TcpListener;
+
+    let app = Router::new().route(
+        "/",
+        post(move || {
+            let body = body.clone();
+            async move { AxJson(body) }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .await
+        .expect("bind mock RPC");
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    // Give the listener a moment to start accepting.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    format!("http://{}", addr)
+}
+
+#[tokio::test]
+async fn test_get_route_simulation_error_returns_500_not_404() {
+    use crate::rate_limit::{RateLimitConfig, RateLimiter};
+    use crate::state::AppState;
+
+    // Simulate-level error: `simulateTransaction` ran but the contract
+    // panicked (or argument/auth failed). This is a server-side problem,
+    // not "route does not exist".
+    let rpc_body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "error": "contract panicked: unauthorized",
+            "results": []
+        }
+    });
+    let rpc_url = spawn_mock_rpc_returning(rpc_body).await;
+
+    let rate_limiter = RateLimiter::new(RateLimitConfig::default());
+    let state = AppState::new(
+        rpc_url,
+        "".to_string(),
+        VALID_CONTRACT_ID.to_string(),
+        rate_limiter,
+        10,
+    );
+
+    let app = Router::new()
+        .route("/routes/:name", get(handlers::get_route))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::rate_limit::rate_limit_middleware,
+        ))
+        .with_state(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/routes/missing-route")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Pre-fix: this was 404 (Ok(None) → handler returned NotFound).
+    // Post-fix: must be 500 (Err(...) → handler returned RpcError).
+    assert_eq!(
+        resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "contract-level simulation errors must surface as HTTP 500, not 404"
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["error"]["code"].as_str().unwrap(), "RPC_ERROR");
+    // Error message should mention the underlying simulation failure.
+    let msg = json["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains("contract simulation error"),
+        "expected message to mention 'contract simulation error', got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn test_get_route_empty_results_still_returns_404() {
+    // Companion to the test above: when the RPC returns NO error and an
+    // empty `results` array, the route genuinely does not exist and the
+    // API should still answer 404 — we only fixed the error-vs-missing
+    // conflation, not the not-found path itself.
+    use crate::rate_limit::{RateLimitConfig, RateLimiter};
+    use crate::state::AppState;
+
+    let rpc_body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "results": []
+        }
+    });
+    let rpc_url = spawn_mock_rpc_returning(rpc_body).await;
+
+    let rate_limiter = RateLimiter::new(RateLimitConfig::default());
+    let state = AppState::new(
+        rpc_url,
+        "".to_string(),
+        VALID_CONTRACT_ID.to_string(),
+        rate_limiter,
+        10,
+    );
+
+    let app = Router::new()
+        .route("/routes/:name", get(handlers::get_route))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::rate_limit::rate_limit_middleware,
+        ))
+        .with_state(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/routes/does-not-exist")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
