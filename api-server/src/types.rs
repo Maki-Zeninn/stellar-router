@@ -70,6 +70,11 @@ pub struct SimulationDetail {
     pub target: String,
     pub function: String,
     pub would_succeed: bool,
+    /// Diagnostic / contract events reported by the Soroban RPC
+    /// `simulateTransaction` call. Empty when the RPC was unreachable
+    /// (heuristic fallback) or returned no events. See #1162.
+    #[serde(default)]
+    pub events: Vec<serde_json::Value>,
 }
 
 
