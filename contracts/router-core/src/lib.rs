@@ -623,6 +623,13 @@ impl RouterCore {
         env.storage()
             .instance()
             .remove(&DataKey::Metadata(name.clone()));
+        // Clear any outbound dependency edges declared by this route so a
+        // re-registered route with the same name cannot silently inherit
+        // them. Mirrors the cleanup performed by `remove_route_internal`
+        // for `remove_routes_batch`. See issue #1165.
+        env.storage()
+            .instance()
+            .remove(&DataKey::Dependencies(name.clone()));
 
         let route_names = Self::get_route_names(&env);
         let mut updated_route_names = Vec::new(&env);
@@ -2694,6 +2701,41 @@ mod tests {
         client.remove_route(&admin, &name);
         let result = client.try_resolve(&name);
         assert_eq!(result, Err(Ok(RouterError::RouteNotFound)));
+    }
+
+    #[test]
+    fn test_remove_route_clears_outbound_dependencies() {
+        // Regression for #1165: `remove_route` left the route's outbound
+        // dependency edge (`Dependencies(name)`) in instance storage, so a
+        // later re-registration of a different route with the same name
+        // silently inherited the stale edge.
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let dex = String::from_str(&env, "dex");
+        let oracle_addr = Address::generate(&env);
+        let dex_addr = Address::generate(&env);
+
+        client.register_route(&admin, &oracle, &oracle_addr, &None);
+        client.register_route(&admin, &dex, &dex_addr, &None);
+        client.set_route_dependency(&admin, &dex, &oracle);
+
+        // Sanity check the dep was recorded.
+        assert_eq!(client.get_route_dependencies(&dex).len(), 1);
+
+        // Remove `dex`. Nothing depends on it, so this is allowed.
+        client.remove_route(&admin, &dex);
+
+        // Register a brand new `dex` route, completely unrelated to the
+        // previous one. It must NOT inherit the old `[oracle]` edge.
+        let dex_addr_v2 = Address::generate(&env);
+        client.register_route(&admin, &dex, &dex_addr_v2, &None);
+
+        let dependencies_after = client.get_route_dependencies(&dex);
+        assert_eq!(
+            dependencies_after.len(),
+            0,
+            "re-registered route must not inherit stale Dependencies() entries"
+        );
     }
 
     #[test]
