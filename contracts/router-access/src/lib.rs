@@ -1880,4 +1880,49 @@ mod tests {
         client.unblacklist(&admin, &addr);
         assert!(!client.is_blacklisted(&addr));
     }
+
+    // -----------------------------------------------------------------------
+    // Tests for `set_role_limits` / `get_role_limits` (see issue #1047).
+    // Before this PR the two admin-facing configuration entry points had
+    // zero direct test coverage. The tests below mirror the style of the
+    // existing `test_set_role_admin_*` / `test_grant_role_*` cases.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_get_role_limits_defaults() {
+        // Before any `set_role_limits` call, the contract must report the
+        // compile-time defaults.
+        let (env, _admin, client) = setup();
+        assert_eq!(client.get_role_limits(), (100, 1_000));
+    }
+
+    #[test]
+    fn test_set_role_limits_updates_and_persists() {
+        // A non-zero (max_roles, max_grants_per_role) must be stored, and
+        // a subsequent `get_role_limits` must reflect the new values.
+        let (env, admin, client) = setup();
+        client.set_role_limits(&admin, &5, &2);
+        assert_eq!(client.get_role_limits(), (5, 2));
+    }
+
+    #[test]
+    fn test_set_role_limits_zero_resets_to_defaults() {
+        // Passing 0 for either field must restore the compile-time default
+        // for that field (per the `if max_roles == 0 { DEFAULT_MAX_ROLES }`
+        // and analogous logic in `set_role_limits`).
+        let (env, admin, client) = setup();
+        client.set_role_limits(&admin, &5, &2);
+        client.set_role_limits(&admin, &0, &0);
+        assert_eq!(client.get_role_limits(), (100, 1_000));
+    }
+
+    #[test]
+    fn test_set_role_limits_unauthorized_fails() {
+        // Non-super-admin callers must be rejected with `Unauthorized`,
+        // matching the rest of the admin-only entry points in this contract.
+        let (env, _admin, client) = setup();
+        let attacker = Address::generate(&env);
+        let result = client.try_set_role_limits(&attacker, &5, &2);
+        assert_eq!(result, Err(Ok(AccessError::Unauthorized)));
+    }
 }
