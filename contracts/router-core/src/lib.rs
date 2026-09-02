@@ -2012,14 +2012,17 @@ impl RouterCore {
         let mut best_score: i64 = i64::MIN;
 
         for name in candidates.iter() {
-            // Skip paused or expired routes
-            let entry: Option<RouteEntry> =
-                env.storage().instance().get(&DataKey::Route(name.clone()));
-            let entry = match entry {
-                Some(e) if !e.paused && !is_route_expired(&env, &e) => e,
+            // Skip paused or expired routes. The `Option<RouteEntry>` is
+            // only used for its paused/expired flags here -- its other
+            // fields are read further down from the score lookup -- so
+            // match-and-discard is clearer than bind-and-discard.
+            // (See issue #1046.)
+            match env.storage().instance().get::<RouteEntry>(&DataKey::Route(
+                name.clone(),
+            )) {
+                Some(e) if !e.paused && !is_route_expired(&env, &e) => {}
                 _ => continue,
-            };
-            let _ = entry; // entry validated, not needed further
+            }
 
             // Skip routes without a score
             let score: RouteScore =
