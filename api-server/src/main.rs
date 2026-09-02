@@ -37,6 +37,9 @@ use crate::{
         crate::handlers::simulate,
         crate::handlers::list_routes,
         crate::handlers::get_route,
+        // Documented as a plain GET for discovery purposes; the actual
+        // endpoint upgrades to a WebSocket. See issue #1164.
+        crate::websocket::ws_handler,
     ),
     components(schemas(
         crate::types::HealthResponse,
@@ -51,6 +54,8 @@ use crate::{
         crate::types::ErrorResponse,
         crate::types::ErrorDetail,
         crate::types::ErrorCode,
+        // WebSocket subscription protocol message shape.
+        crate::types::SubscribeMessage,
     )),
     tags(
         (name = "health", description = "Health check"),

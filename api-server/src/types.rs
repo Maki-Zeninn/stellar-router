@@ -167,9 +167,14 @@ pub enum TransactionStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SubscribeMessage {
+    /// Action the client is requesting. Currently only `"subscribe"` and
+    /// `"unsubscribe"` are recognized.
     pub action: String,
+    /// Transaction id the client wants to follow. Matches the `tx_id`
+    /// field on `TransactionStatusEvent` published by
+    /// `AppState::broadcast_status`.
     pub tx_id: String,
 }
 
