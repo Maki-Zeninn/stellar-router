@@ -23,6 +23,9 @@ use crate::{
     )
 )]
 /// GET /health
+///
+/// Returns the current service health status and Soroban RPC availability.
+/// Responds with 200 when the RPC is reachable, 503 when it is not.
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     match state.rpc.health_check().await {
         Ok(()) => (
