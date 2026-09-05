@@ -73,6 +73,7 @@ pub struct CallDescriptor {
     /// mid-call. Budget overruns at the transaction level are still caught by
     /// the host and will cause the entire transaction to fail.
     pub instruction_budget: Option<u64>,
+    /// Arguments to pass to the target function, as a vector of Soroban .
     pub args: Vec<Val>,
 }
 
