@@ -1,4 +1,5 @@
-/// Soroban RPC client for simulation, fee estimation, and contract reads.
+//! Soroban RPC client for simulation, fee estimation, and contract reads.
+
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
