@@ -247,6 +247,78 @@ impl RouterRegistry {
     }
 
     /// Register multiple contract entries in one call.
+    ///
+    /// When  is , the first validation failure stops the
+    /// entire batch and returns immediately with a single failure record.
+    /// When , every entry is attempted and individual successes /
+    /// failures are collected into the returned [].
+    ///
+    /// # Arguments
+    /// * BLOCKSIZE=512
+BROWSER_USE_AVAILABLE_BACKENDS=chrome,iab
+CODEX_CI=1
+CODEX_HOME=/Users/mac/.codex
+CODEX_PERMISSION_PROFILE=:danger-full-access
+CODEX_THREAD_ID=01a06d3b-0ca0-7483-a270-b4cac77c939f
+COLORTERM=
+COMMAND_MODE=unix2003
+GH_PAGER=cat
+GIT_PAGER=cat
+HOME=/Users/mac
+LANG=C.UTF-8
+LC_ALL=C.UTF-8
+LC_CTYPE=C.UTF-8
+LOGNAME=mac
+MACH_PORT_RENDEZVOUS_PEER_VALDATION=1
+MallocNanoZone=0
+NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S=028a14b6eaa6d98dac2aae00764345ab9f244801ed8493d42b9af3be5575006e,8785b5437d98636c3002d3d7e64b98db79c3b66870b1bd3d18dea953a99b1562
+NODE_REPL_TRUSTED_CODE_PATHS=/Users/mac/.codex
+NO_COLOR=1
+OSLogRateLimit=64
+PAGER=cat
+PATH=/Users/mac/.local/bin:/Users/mac/.codebuddy/bin:/Users/mac/.bun/bin:/Users/mac/.bun/bin:/Users/mac/.workbuddy/bin:/Users/mac/.codebuddy/bin:/opt/homebrew/Cellar/node/25.8.0/bin:“/opt/homebrew/Cellar/mysql-client/8.0.31/bin:/Users/mac/.yarn/bin:/Users/mac/.config/yarn/global/node_modules/.bin:/opt/homebrew/bin:/opt/local/bin:/opt/local/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/pkg/env/global/bin:/Library/Apple/usr/bin:/Applications/VMware Fusion.app/Contents/Public:/Users/mac/.cargo/bin:/Users/mac/.codex/tmp/arg0/codex-arg0RKURes”
+SHELL=/bin/zsh
+SSH_AUTH_SOCK=/var/run/com.apple.launchd.0p6DtypD4Y/Listeners
+TERM=dumb
+TMPDIR=/var/folders/7t/cc7bs7ld1jj2chr2m7yy4gkm0000gp/T/
+USER=mac
+XPC_FLAGS=0x0
+XPC_SERVICE_NAME=0
+__CFBundleIdentifier=com.google.Chrome
+__CF_USER_TEXT_ENCODING=0x1F6:0x19:0x34
+SHLVL=1
+PWD=/Users/mac/Documents/Codex/2026-09-05/jian
+OLDPWD=/Users/mac/Documents/Codex/2026-09-05/jian
+APPCODE_VM_OPTIONS=/Applications/mac2022-2023/vmoptions/appcode.vmoptions
+BUN_INSTALL=/Users/mac/.bun
+CLION_VM_OPTIONS=/Applications/mac2022-2023/vmoptions/clion.vmoptions
+COMPOSER_CACHE_DIR=
+DATAGRIP_VM_OPTIONS=/Applications/mac2022-2023/vmoptions/datagrip.vmoptions
+DATASPELL_VM_OPTIONS=/Applications/mac2022-2023/vmoptions/dataspell.vmoptions
+DEVECOSTUDIO_VM_OPTIONS=/Applications/mac2022-2023/vmoptions/devecostudio.vmoptions
+GATEWAY_VM_OPTIONS=/Applications/mac2022-2023/vmoptions/gateway.vmoptions
+GOLAND_VM_OPTIONS=/Applications/mac2022-2023/vmoptions/goland.vmoptions
+IDEA_VM_OPTIONS=/Applications/mac2022-2023/vmoptions/idea.vmoptions
+JETBRAINSCLIENT_VM_OPTIONS=/Applications/mac2022-2023/vmoptions/jetbrainsclient.vmoptions
+JETBRAINS_CLIENT_VM_OPTIONS=/Applications/mac2022-2023/vmoptions/jetbrains_client.vmoptions
+PHPSTORM_VM_OPTIONS=/Applications/mac2022-2023/vmoptions/phpstorm.vmoptions
+PYCHARM_VM_OPTIONS=/Applications/mac2022-2023/vmoptions/pycharm.vmoptions
+RIDER_VM_OPTIONS=/Applications/mac2022-2023/vmoptions/rider.vmoptions
+RUBYMINE_VM_OPTIONS=/Applications/mac2022-2023/vmoptions/rubymine.vmoptions
+STUDIO_VM_OPTIONS=/Applications/mac2022-2023/vmoptions/studio.vmoptions
+WEBIDE_VM_OPTIONS=/Applications/mac2022-2023/vmoptions/webide.vmoptions
+WEBSTORM_VM_OPTIONS=/Applications/mac2022-2023/vmoptions/webstorm.vmoptions
+_=/usr/bin/env - The Soroban environment.
+    /// *  - The admin address; must authenticate.
+    /// *  - A vector of [] items to register.
+    /// *  - If , abort on first failure; if , process all entries.
+    ///
+    /// # Returns
+    /// A [] summarizing how many entries succeeded / failed and why.
+    ///
+    /// # Errors
+    /// * [] — if  is not the admin.
+    /// * [] — if the contract has not been initialized.
     pub fn bulk_register(
         env: Env,
         caller: Address,
