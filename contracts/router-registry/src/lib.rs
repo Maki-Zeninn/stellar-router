@@ -88,6 +88,14 @@ pub enum RegistryError {
 /// out-of-bounds indexing at runtime.
 const MAX_CONSTRAINT_LEN: usize = 32;
 
+/// Minimum remaining TTL (in ledgers) before instance storage is extended.
+/// ~30 days at 5 s/ledger.
+const INSTANCE_TTL_THRESHOLD: u32 = 17280 * 30;
+
+/// Target TTL (in ledgers) applied to instance storage on every entry point.
+/// ~60 days at 5 s/ledger.
+const INSTANCE_TTL_EXTEND_TO: u32 = 17280 * 60;
+
 // ── Contract ──────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -110,6 +118,7 @@ impl RouterRegistry {
     /// # Errors
     /// * [`RegistryError::AlreadyInitialized`] — if the contract has already been initialized.
     pub fn initialize(env: Env, admin: Address) -> Result<(), RegistryError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(RegistryError::AlreadyInitialized);
         }
@@ -147,6 +156,7 @@ impl RouterRegistry {
         version: u32,
     ) -> Result<(), RegistryError> {
         caller.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RegistryError)?;
         Self::register_entry(&env, &caller, name, address, version)
     }
@@ -209,6 +219,7 @@ impl RouterRegistry {
         health_fn: Option<Symbol>,
     ) -> Result<(), RegistryError> {
         caller.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RegistryError)?;
 
         if let Some(fn_sym) = health_fn {
@@ -243,6 +254,7 @@ impl RouterRegistry {
         fail_fast: bool,
     ) -> Result<router_common::BatchResult, RegistryError> {
         caller.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RegistryError)?;
         let mut result = router_common::BatchResult::new(&env);
 
@@ -303,6 +315,7 @@ impl RouterRegistry {
     /// # Errors
     /// * [`RegistryError::NotFound`] — if no entry exists for `(name, version)`.
     pub fn get(env: Env, name: String, version: u32) -> Result<ContractEntry, RegistryError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         env.storage()
             .instance()
             .get(&DataKey::Entry(name, version))
@@ -327,7 +340,12 @@ impl RouterRegistry {
     /// # Errors
     /// * [`RegistryError::NotFound`] — if no entry exists for `(name, version)`.
     pub fn is_deprecated(env: Env, name: String, version: u32) -> Result<bool, RegistryError> {
-        Self::get(env, name, version).map(|entry| entry.deprecated)
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+        env.storage()
+            .instance()
+            .get(&DataKey::Entry(name, version))
+            .map(|entry: ContractEntry| entry.deprecated)
+            .ok_or(RegistryError::NotFound)
     }
 
     /// Get the latest (highest version) non-deprecated entry for a name.
@@ -345,6 +363,7 @@ impl RouterRegistry {
     /// # Errors
     /// * [`RegistryError::NotFound`] — if no non-deprecated entry exists for `name`.
     pub fn get_latest(env: Env, name: String) -> Result<ContractEntry, RegistryError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         let versions = Self::get_versions_list(&env, &name);
         if versions.is_empty() {
             return Err(RegistryError::NotFound);
@@ -373,6 +392,7 @@ impl RouterRegistry {
         name: String,
         constraint: Option<String>,
     ) -> Result<ContractEntry, RegistryError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         let versions = Self::get_versions_list(&env, &name);
 
         // If no constraint, delegate to the shared helper (same semantics as get_latest)
@@ -449,6 +469,7 @@ impl RouterRegistry {
         reason: Option<String>,
     ) -> Result<(), RegistryError> {
         caller.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RegistryError)?;
         Self::deprecate_one(&env, name, version, reason)
     }
@@ -463,6 +484,7 @@ impl RouterRegistry {
         reason: Option<String>,
     ) -> Result<(), RegistryError> {
         caller.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RegistryError)?;
         let versions = Self::get_versions_list(&env, &name);
         if versions.is_empty() {
@@ -510,6 +532,7 @@ impl RouterRegistry {
         fail_fast: bool,
     ) -> Result<router_common::BatchResult, RegistryError> {
         caller.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RegistryError)?;
         let mut result = router_common::BatchResult::new(&env);
         for (index, (name, version)) in entries.iter().enumerate() {
@@ -549,6 +572,7 @@ impl RouterRegistry {
         new_admin: Address,
     ) -> Result<(), RegistryError> {
         current.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         router_common::require_admin_simple!(&env, &current, &DataKey::Admin, RegistryError)?;
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         env.events().publish(
@@ -575,6 +599,7 @@ impl RouterRegistry {
     /// # Errors
     /// * [`RegistryError::NotInitialized`] — if the contract has not been initialized.
     pub fn admin(env: Env) -> Result<Address, RegistryError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         env.storage()
             .instance()
             .get(&DataKey::Admin)
@@ -594,6 +619,7 @@ impl RouterRegistry {
     /// A [`Vec<u32>`] of version numbers. Returns an empty vector if `name`
     /// has no registered versions.
     pub fn versions(env: Env, name: String) -> Vec<u32> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         // Invariant: versions for a given `name` are stored in ascending order.
         //
         // This is guaranteed by `register_entry()` enforcing that each new
@@ -614,6 +640,7 @@ impl RouterRegistry {
     /// # Returns
     /// A [`Vec<ContractEntry>`] of all entries for `name`.
     pub fn get_all_versions(env: Env, name: String) -> Vec<ContractEntry> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         let versions = Self::get_versions_list(&env, &name);
         let mut entries = Vec::new(&env);
         for v in versions.iter() {
@@ -639,6 +666,7 @@ impl RouterRegistry {
     /// # Returns
     /// A [`Vec<String>`] of all registered contract names.
     pub fn get_all_names(env: Env) -> Vec<String> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         env.storage()
             .instance()
             .get(&DataKey::ContractNames)
@@ -657,6 +685,7 @@ impl RouterRegistry {
     /// # Returns
     /// An [`Option<ContractEntry>`] containing the entry if found, `None` otherwise.
     pub fn get_entry_by_address(env: Env, address: Address) -> Option<ContractEntry> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         let (name, version): (String, u32) = env
             .storage()
             .instance()
@@ -711,8 +740,8 @@ impl RouterRegistry {
             return Err(RegistryError::AlreadyRegistered);
         }
         let versions = Self::get_versions_list(env, name);
-        for v in versions.iter() {
-            if version <= v {
+        if let Some(last) = versions.last() {
+            if version <= last {
                 return Err(RegistryError::InvalidVersion);
             }
         }
@@ -742,17 +771,18 @@ impl RouterRegistry {
             .set(&DataKey::Entry(name.clone(), version), &entry);
 
         let mut versions = Self::get_versions_list(env, &name);
+        let is_new_name = versions.is_empty();
         versions.push_back(version);
         env.storage()
             .instance()
             .set(&DataKey::Versions(name.clone()), &versions);
 
-        let mut names: Vec<String> = env
-            .storage()
-            .instance()
-            .get(&DataKey::ContractNames)
-            .unwrap_or_else(|| Vec::new(env));
-        if !names.contains(&name) {
+        if is_new_name {
+            let mut names: Vec<String> = env
+                .storage()
+                .instance()
+                .get(&DataKey::ContractNames)
+                .unwrap_or_else(|| Vec::new(env));
             names.push_back(name.clone());
             env.storage()
                 .instance()
@@ -1383,6 +1413,31 @@ mod tests {
         assert_eq!(result.successes.len(), 0);
         assert_eq!(result.failures.len(), 1);
         assert_eq!(result.failures.get(0).unwrap().index, 0);
+    }
+
+    #[test]
+    fn test_bulk_register_unauthorized_caller_fails() {
+        let (env, _admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let attacker = Address::generate(&env);
+        let entries = vec![
+            &env,
+            BulkRegistrationInput {
+                name: name.clone(),
+                address: Address::generate(&env),
+                version: 1,
+            },
+            BulkRegistrationInput {
+                name: name.clone(),
+                address: Address::generate(&env),
+                version: 2,
+            },
+        ];
+        let result = client.try_bulk_register(&attacker, &entries, &false);
+        assert_eq!(result, Err(Ok(RegistryError::Unauthorized)));
+        // Verify no entries were registered
+        assert_eq!(client.try_get(&name, &1), Err(Ok(RegistryError::NotFound)));
+        assert_eq!(client.try_get(&name, &2), Err(Ok(RegistryError::NotFound)));
     }
 
     #[test]
