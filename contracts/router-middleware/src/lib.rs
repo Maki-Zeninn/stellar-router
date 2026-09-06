@@ -84,7 +84,8 @@ pub struct RouteConfig {
     pub enabled: bool,
     /// Circuit breaker failure threshold (0 = disabled)
     pub failure_threshold: u32,
-    /// Circuit breaker recovery window in seconds
+    /// Circuit breaker recovery window in seconds (0 = circuit never
+    /// auto-recovers; requires an admin to call `reset_circuit_breaker`)
     pub recovery_window_seconds: u64,
     /// Max call log entries to keep (0 = disabled)
     pub log_retention: u32,
