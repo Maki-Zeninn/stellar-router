@@ -73,6 +73,9 @@ pub struct CallDescriptor {
     /// mid-call. Budget overruns at the transaction level are still caught by
     /// the host and will cause the entire transaction to fail.
     pub instruction_budget: Option<u64>,
+    /// Arguments to pass to the invoked function, forwarded as-is to
+    /// `env.try_invoke_contract`. Limited to [`MAX_ARGS_PER_CALL`] entries;
+    /// exceeding this returns [`MulticallError::ArgsTooLarge`].
     pub args: Vec<Val>,
 }
 
