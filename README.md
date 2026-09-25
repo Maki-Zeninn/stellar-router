@@ -420,3 +420,6 @@ MIT
 
 <!-- handsoff-issue-1330 -->
 - #1330: testing(router-multicall): no test verifies execute_batch succeeds when calls.len() exactly equals max_batch_size
+
+<!-- handsoff-issue-1331 -->
+- #1331: security(router-multicall): `simulate=true` is documented as "dry-run mode" but invoked calls execute for real and their state changes are permanently persisted
