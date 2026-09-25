@@ -417,3 +417,6 @@ MIT
 
 <!-- handsoff-issue-1329 -->
 - #1329: docs(router-multicall): module-level Events list omits `call_failed` and under-documents `call_result`'s payload
+
+<!-- handsoff-issue-1330 -->
+- #1330: testing(router-multicall): no test verifies execute_batch succeeds when calls.len() exactly equals max_batch_size
