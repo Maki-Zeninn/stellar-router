@@ -1509,3 +1509,130 @@ mod tests {
         assert_eq!(client.get_route_fee(&existing), 20);
     }
 }
+
+    // ── Issue #1343: MAX_FEE_TIERS_PER_ROUTE coverage ──────────────────────────
+
+    #[test]
+    fn test_set_route_fee_tiers_rejects_more_than_max_tiers() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+
+        // Create 101 tiers — should exceed MAX_FEE_TIERS_PER_ROUTE (100)
+        let mut tiers = Vec::new(&env);
+        for i in 0..101 {
+            tiers.push_back(FeeTier {
+                min_amount: i as i128 * 1000,
+                fee_bps: 10,
+            });
+        }
+
+        let result = client.try_set_route_fee_tiers(&admin, &route, &tiers);
+        assert_eq!(result, Err(Ok(QuoteError::TooManyTiers)));
+    }
+
+    #[test]
+    fn test_set_route_fee_tiers_allows_exactly_max_tiers() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+
+        // Create exactly 100 tiers — should be accepted (at the limit)
+        let mut tiers = Vec::new(&env);
+        for i in 0..100 {
+            tiers.push_back(FeeTier {
+                min_amount: i as i128 * 1000,
+                fee_bps: 10,
+            });
+        }
+
+        client.set_route_fee_tiers(&admin, &route, &tiers);
+        let retrieved_tiers = client.get_route_fee_tiers(&route);
+        assert_eq!(retrieved_tiers.len(), 100);
+    }
+
+    // ── Issue #1344: unset_route_fee test coverage ─────────────────────────────
+
+    #[test]
+    fn test_unset_route_fee_reverts_to_default() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+
+        // Set a custom fee
+        client.set_route_fee(&admin, &route, &50);
+        assert_eq!(client.get_route_fee(&route), 50);
+
+        // Unset the fee — should revert to default (100)
+        client.unset_route_fee(&admin, &route);
+        assert_eq!(client.get_route_fee(&route), 100);
+    }
+
+    #[test]
+    fn test_unset_route_fee_clears_fee_tiers() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+
+        // Set tiered fees
+        let tiers = vec![
+            &env,
+            FeeTier {
+                min_amount: 0,
+                fee_bps: 50,
+            },
+            FeeTier {
+                min_amount: 10000,
+                fee_bps: 30,
+            },
+        ];
+        client.set_route_fee_tiers(&admin, &route, &tiers);
+        assert_eq!(client.get_route_fee_tiers(&route).len(), 2);
+
+        // Unset the fee — should clear tiered config (regression test for #1183)
+        client.unset_route_fee(&admin, &route);
+        assert_eq!(client.get_route_fee_tiers(&route).len(), 0);
+        // Verify fee reverts to default
+        assert_eq!(client.get_route_fee(&route), 100);
+    }
+
+    #[test]
+    fn test_unauthorized_unset_route_fee_fails() {
+        let (env, admin, client) = setup();
+        let unauthorized = Address::generate(&env);
+        let route = String::from_str(&env, "uniswap");
+
+        // Set a custom fee first
+        client.set_route_fee(&admin, &route, &50);
+
+        // Attempt to unset with unauthorized caller
+        let result = client.try_unset_route_fee(&unauthorized, &route);
+        assert_eq!(result, Err(Ok(QuoteError::Unauthorized)));
+
+        // Verify fee is still custom (unchanged)
+        assert_eq!(client.get_route_fee(&route), 50);
+    }
+
+    #[test]
+    fn test_unset_route_fee_emits_event() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+
+        // Set a custom fee first
+        client.set_route_fee(&admin, &route, &50);
+
+        // Unset the fee
+        client.unset_route_fee(&admin, &route);
+
+        // Verify event emission
+        let events = env.events().all();
+        let (_, topics, data) = events
+            .iter()
+            .rev()
+            .find(|(_, topics, _)| {
+                topics
+                    .get(0)
+                    .map(|v| Symbol::from_val(&env, &v) == Symbol::new(&env, router_common::EVENT_ROUTE_FEE_UNSET))
+                    .unwrap_or(false)
+            })
+            .expect("route_fee_unset event not found");
+
+        let emitted_route: String = data.into_val(&env);
+        assert_eq!(emitted_route, route);
+    }
