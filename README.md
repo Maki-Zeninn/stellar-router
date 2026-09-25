@@ -423,3 +423,6 @@ MIT
 
 <!-- handsoff-issue-1331 -->
 - #1331: security(router-multicall): `simulate=true` is documented as "dry-run mode" but invoked calls execute for real and their state changes are permanently persisted
+
+<!-- handsoff-issue-1332 -->
+- #1332: docs(router-multicall): crate-level doc claims the contract batches "read calls" only, but execute_batch supports arbitrary state-mutating calls
