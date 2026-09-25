@@ -302,6 +302,11 @@ impl RouterQuote {
     /// * [`QuoteError::TooManyTiers`] — if tiers.len() exceeds [`MAX_FEE_TIERS_PER_ROUTE`].
     /// * [`QuoteError::InvalidFeeTier`] — if any tier has a negative `min_amount`.
     /// * [`QuoteError::InvalidFeeBps`] — if any tier's `fee_bps` > 10000.
+    ///
+    /// # Note
+    /// Passing an empty `tiers` vector clears any previously-configured tier
+    /// schedule for the route. After clearing, quotes for the route fall back
+    /// to the flat route fee (if any) or the default fee.
     /// * [`QuoteError::TooManyRoutes`] — if the configured-routes index is full ([`MAX_TRACKED_ROUTES`]).
     pub fn set_route_fee_tiers(
         env: Env,
@@ -914,6 +919,47 @@ mod tests {
         assert_eq!(retrieved_tiers.get(1).unwrap().fee_bps, 30);
         assert_eq!(retrieved_tiers.get(2).unwrap().min_amount, 100000);
         assert_eq!(retrieved_tiers.get(2).unwrap().fee_bps, 10);
+    }
+
+    #[test]
+    fn test_set_route_fee_tiers_with_empty_vec_clears_existing_tiers() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+
+        // First configure a non-empty tier schedule and verify it is quoted.
+        let tiers = vec![
+            &env,
+            FeeTier {
+                min_amount: 0,
+                fee_bps: 50,
+            },
+            FeeTier {
+                min_amount: 10000,
+                fee_bps: 30,
+            },
+        ];
+        client.set_route_fee_tiers(&admin, &route, &tiers);
+        assert_eq!(client.get_route_fee_tiers(&route).len(), 2);
+
+        let token_in = Address::generate(&env);
+        let token_out = Address::generate(&env);
+        let request = QuoteRequest {
+            route: route.clone(),
+            token_in: token_in.clone(),
+            token_out: token_out.clone(),
+            amount_in: 20000,
+        };
+        assert_eq!(client.get_quote(&request).fee_bps, 30);
+
+        // Passing an empty Vec clears the schedule: the tier storage becomes
+        // empty, no tier matches, and the quote falls back to the default fee.
+        let empty_tiers = Vec::new(&env);
+        client.set_route_fee_tiers(&admin, &route, &empty_tiers);
+
+        assert!(client.get_route_fee_tiers(&route).is_empty());
+
+        let response = client.get_quote(&request);
+        assert_eq!(response.fee_bps, 100); // 1% default fee
     }
 
     #[test]

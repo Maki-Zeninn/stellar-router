@@ -494,7 +494,7 @@ impl RouterRegistry {
     ///
     /// # Errors
     /// * [`RegistryError::Unauthorized`] — if `caller` is not the admin.
-    /// * [`RegistryError::NotFound`] — if no entry exists for `(name, version)`.
+    /// * [`RegistryError::VersionNotFound`] — if no entry exists for `(name, version)`.
     /// * [`RegistryError::AlreadyDeprecated`] — if the entry is already deprecated.
     /// * [`RegistryError::NotInitialized`] — if the contract has not been initialized.
     pub fn deprecate(
@@ -631,11 +631,7 @@ impl RouterRegistry {
         current.require_auth();
         router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         router_common::require_admin_simple!(&env, &current, &DataKey::Admin, RegistryError)?;
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
-        env.events().publish(
-            (Symbol::new(&env, router_common::EVENT_ADMIN_TRANSFERRED),),
-            (current, new_admin),
-        );
+        router_common::admin_transfer_complete!(&env, &current, &new_admin, &DataKey::Admin);
         Ok(())
     }
 
@@ -756,7 +752,11 @@ impl RouterRegistry {
     /// `router-multicall`'s `batch_executed` event so a subscriber watching
     /// only the event stream can see that a batch ran (and how it went) even
     /// when every item in it failed — per-item events alone don't cover that.
-    fn emit_bulk_register_completed(env: &Env, caller: &Address, result: &router_common::BatchResult) {
+    fn emit_bulk_register_completed(
+        env: &Env,
+        caller: &Address,
+        result: &router_common::BatchResult,
+    ) {
         env.events().publish(
             (Symbol::new(env, router_common::EVENT_BATCH_EXECUTED),),
             (
@@ -770,7 +770,11 @@ impl RouterRegistry {
 
     /// Aggregate completion event for `deprecate_many` — see
     /// `emit_bulk_register_completed`.
-    fn emit_deprecate_many_completed(env: &Env, caller: &Address, result: &router_common::BatchResult) {
+    fn emit_deprecate_many_completed(
+        env: &Env,
+        caller: &Address,
+        result: &router_common::BatchResult,
+    ) {
         env.events().publish(
             (Symbol::new(env, router_common::EVENT_BATCH_EXECUTED),),
             (
@@ -888,13 +892,14 @@ impl RouterRegistry {
                 .set(&DataKey::ContractNames, &names);
         }
 
-        env.storage()
-            .instance()
-            .set(&DataKey::AddressIndex(address), &(name.clone(), version));
+        env.storage().instance().set(
+            &DataKey::AddressIndex(address.clone()),
+            &(name.clone(), version),
+        );
 
         env.events().publish(
             (Symbol::new(env, router_common::EVENT_CONTRACT_REGISTERED),),
-            (name, version),
+            (name, version, address),
         );
     }
 
@@ -1302,9 +1307,10 @@ mod tests {
                 Symbol::new(&env, "contract_registered").into_val(&env)
             ]
         );
-        let (n, v): (String, u32) = event.2.into_val(&env);
+        let (n, v, a): (String, u32, Address) = event.2.into_val(&env);
         assert_eq!(n, name);
         assert_eq!(v, 1u32);
+        assert_eq!(a, addr);
     }
 
     #[test]
