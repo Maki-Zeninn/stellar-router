@@ -412,3 +412,8 @@ Only move to **mainnet** when your contracts are fully tested and audited.
 ## License
 
 MIT
+
+## Handsoff notes
+
+<!-- handsoff-issue-1328 -->
+- #1328: refactor(router-middleware): public view-function naming inconsistently omits the get_ prefix used by most other read-only functions
