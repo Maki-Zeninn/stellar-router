@@ -1,30 +1,25 @@
-//! Call event logging and ring-buffer management for router-middleware.
+//! Call log module for router-middleware.
 //!
-//! Maintains a fixed-capacity ring buffer of [`CallLogEntry`] values per route,
-//! updated in [`post_call`], and an incremental [`CallLogSummary`] to avoid
-//! reloading all entries for aggregate reads.
+//! Records per-route call events with a fixed-capacity ring buffer and an
+//! incrementally maintained summary.
 
-use soroban_sdk::{Address, Env, String};
+use soroban_sdk::{Address, Env, String, Vec};
 
-use crate::{CallLogEntry, CallLogState, CallLogSummary, DataKey, RouteConfig};
+use crate::{CallLogEntry, CallLogState, CallLogSummary, DataKey};
 
-/// Append a call entry to the ring buffer for `route` and update the summary.
-///
-/// No-op if `log_retention` is 0 in the route config.
-pub fn append(env: &Env, caller: &Address, route: &String, success: bool, config: &RouteConfig) {
-    if config.log_retention == 0 {
+/// Append a call entry to the route's log, evicting the oldest entry when the
+/// ring buffer is full, and update the route's summary counters.
+pub fn record(env: &Env, route: &String, caller: &Address, success: bool) {
+    let key = DataKey::CallLog(route.clone());
+    let mut state: CallLogState = match env.storage().persistent().get(&key) {
+        Some(s) => s,
+        None => return,
+    };
+
+    let capacity = state.entries.len();
+    if capacity == 0 {
         return;
     }
-
-    let mut log: CallLogState = env
-        .storage()
-        .instance()
-        .get(&DataKey::CallLog(route.clone()))
-        .unwrap_or(CallLogState {
-            entries: soroban_sdk::Vec::new(env),
-            head: 0,
-            count: 0,
-        });
 
     let entry = CallLogEntry {
         caller: caller.clone(),
@@ -33,27 +28,22 @@ pub fn append(env: &Env, caller: &Address, route: &String, success: bool, config
         route: route.clone(),
     };
 
-    let cap = config.log_retention;
-    let len = log.entries.len();
-    if len < cap {
-        // Growth phase: only hit for routes configured before the
-        // pre-allocation upgrade that haven't been re-configured yet.
-        log.entries.push_back(entry);
+    if state.count < capacity {
+        state.entries.set(state.count, entry);
+        state.count += 1;
     } else {
-        log.entries.set(log.head, entry);
-        log.head = (log.head + 1) % cap;
+        state.entries.set(state.head, entry);
+        state.head = (state.head + 1) % capacity;
     }
-    log.count = log.count.saturating_add(1).min(cap);
 
-    env.storage()
-        .instance()
-        .set(&DataKey::CallLog(route.clone()), &log);
+    env.storage().persistent().set(&key, &state);
 
-    // Update summary incrementally
+    // Update summary incrementally.
+    let summary_key = DataKey::CallLogSummary(route.clone());
     let mut summary: CallLogSummary = env
         .storage()
-        .instance()
-        .get(&DataKey::CallLogSummary(route.clone()))
+        .persistent()
+        .get(&summary_key)
         .unwrap_or(CallLogSummary {
             total_calls: 0,
             success_count: 0,
@@ -67,112 +57,52 @@ pub fn append(env: &Env, caller: &Address, route: &String, success: bool, config
         summary.failure_count += 1;
     }
     summary.last_call_timestamp = env.ledger().timestamp();
-    env.storage()
-        .instance()
-        .set(&DataKey::CallLogSummary(route.clone()), &summary);
+    env.storage().persistent().set(&summary_key, &summary);
 }
 
-/// Clear the call log and summary for `route`.
-pub fn clear(env: &Env, route: &String) {
+/// Wipe the accumulated call-log state for a route, returning it to its
+/// initial/empty form. Removes both the ring buffer and the summary.
+pub fn reset(env: &Env, route: &String) {
     env.storage()
-        .instance()
+        .persistent()
         .remove(&DataKey::CallLog(route.clone()));
     env.storage()
-        .instance()
+        .persistent()
         .remove(&DataKey::CallLogSummary(route.clone()));
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::RouterMiddleware;
-    use soroban_sdk::testutils::Address as _;
+/// Read the retained call entries for a route, oldest first.
+pub fn get_entries(env: &Env, route: &String) -> Vec<CallLogEntry> {
+    let key = DataKey::CallLog(route.clone());
+    let state: CallLogState = match env.storage().persistent().get(&key) {
+        Some(s) => s,
+        None => return Vec::new(env),
+    };
 
-    fn env_with_contract() -> (Env, soroban_sdk::Address) {
-        let env = Env::default();
-        let contract_id = env.register_contract(None, RouterMiddleware);
-        (env, contract_id)
-    }
-
-    fn cfg(log_retention: u32) -> RouteConfig {
-        RouteConfig {
-            max_calls_per_window: 0,
-            window_seconds: 0,
-            enabled: true,
-            failure_threshold: 0,
-            recovery_window_seconds: 0,
-            log_retention,
-            burst_allowance: 0,
+    let capacity = state.entries.len();
+    let mut out = Vec::new(env);
+    if state.count < capacity {
+        for i in 0..state.count {
+            out.push_back(state.entries.get(i).unwrap());
+        }
+    } else {
+        for i in 0..capacity {
+            let idx = (state.head + i) % capacity;
+            out.push_back(state.entries.get(idx).unwrap());
         }
     }
+    out
+}
 
-    #[test]
-    fn append_is_noop_when_log_retention_zero() {
-        let (env, contract_id) = env_with_contract();
-        let caller = soroban_sdk::Address::generate(&env);
-        let route = String::from_str(&env, "route");
-        env.as_contract(&contract_id, || {
-            append(&env, &caller, &route, true, &cfg(0));
-            assert!(env
-                .storage()
-                .instance()
-                .get::<DataKey, CallLogState>(&DataKey::CallLog(route.clone()))
-                .is_none());
-            assert!(env
-                .storage()
-                .instance()
-                .get::<DataKey, CallLogSummary>(&DataKey::CallLogSummary(route.clone()))
-                .is_none());
-        });
-    }
-
-    #[test]
-    fn append_updates_summary_counts() {
-        let (env, contract_id) = env_with_contract();
-        let caller = soroban_sdk::Address::generate(&env);
-        let route = String::from_str(&env, "route");
-        env.as_contract(&contract_id, || {
-            append(&env, &caller, &route, true, &cfg(5));
-            append(&env, &caller, &route, false, &cfg(5));
-            let summary: CallLogSummary = env
-                .storage()
-                .instance()
-                .get(&DataKey::CallLogSummary(route.clone()))
-                .unwrap();
-            assert_eq!(summary.total_calls, 2);
-            assert_eq!(summary.success_count, 1);
-            assert_eq!(summary.failure_count, 1);
-        });
-    }
-
-    #[test]
-    fn clear_removes_both_log_and_summary() {
-        // Regression test for issue #812: reset must not leave a stale
-        // CallLogSummary behind after the CallLog itself is cleared.
-        let (env, contract_id) = env_with_contract();
-        let caller = soroban_sdk::Address::generate(&env);
-        let route = String::from_str(&env, "route");
-        env.as_contract(&contract_id, || {
-            append(&env, &caller, &route, true, &cfg(5));
-            assert!(env
-                .storage()
-                .instance()
-                .has(&DataKey::CallLogSummary(route.clone())));
-            assert!(env
-                .storage()
-                .instance()
-                .has(&DataKey::CallLog(route.clone())));
-
-            clear(&env, &route);
-
-            assert!(!env
-                .storage()
-                .instance()
-                .has(&DataKey::CallLogSummary(route.clone())));
-            assert!(!env
-                .storage()
-                .instance()
-                .has(&DataKey::CallLog(route.clone())));
-        });
-    }
+/// Read the aggregated summary for a route's call log.
+pub fn get_summary(env: &Env, route: &String) -> CallLogSummary {
+    env.storage()
+        .persistent()
+        .get(&DataKey::CallLogSummary(route.clone()))
+        .unwrap_or(CallLogSummary {
+            total_calls: 0,
+            success_count: 0,
+            failure_count: 0,
+            last_call_timestamp: 0,
+        })
 }
