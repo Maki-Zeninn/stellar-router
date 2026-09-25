@@ -8,6 +8,13 @@
 //! resolving which one applies is the caller's job (see [`crate::pre_call`]);
 //! this module only owns the window/counter arithmetic so it isn't
 //! duplicated between the route-level and per-caller-override paths.
+//!
+//! Note on violation accounting: there is a single shared `total_violations`
+//! counter on [`RateLimitState`]. It is incremented identically whenever a
+//! call exceeds the effective limit, regardless of which
+//! [`crate::RateLimitStrategy`] the route is configured with. The strategies
+//! do not maintain any strategy-specific counters — they differ only in how
+//! the caller reacts to an exceeded limit (reject vs. allow-and-emit-event).
 
 use soroban_sdk::{Address, Env, String};
 
@@ -32,6 +39,10 @@ pub struct RateLimitCheck {
 /// is expected to apply `updated_state` to `route_call_state.rate_limits`
 /// and decide how to react to `exceeded` (reject / throttle / log-only) and
 /// when to persist the result.
+///
+/// When the limit is exceeded, the shared `total_violations` counter is
+/// incremented by one. This is the only violation counter in the contract;
+/// it is not specific to any [`crate::RateLimitStrategy`].
 pub fn check_and_increment(
     env: &Env,
     caller: &Address,
