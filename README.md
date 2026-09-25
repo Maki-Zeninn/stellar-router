@@ -412,3 +412,8 @@ Only move to **mainnet** when your contracts are fully tested and audited.
 ## License
 
 MIT
+
+## Handsoff notes
+
+<!-- handsoff-issue-1329 -->
+- #1329: docs(router-multicall): module-level Events list omits `call_failed` and under-documents `call_result`'s payload
