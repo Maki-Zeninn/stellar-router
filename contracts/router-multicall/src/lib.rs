@@ -248,12 +248,16 @@ impl RouterMulticall {
             return Err(MulticallError::BatchTooLarge);
         }
 
-        // Pre-flight: check declared cumulative instruction budgets against max_total_gas.
+        // Pre-flight checks: validate args length and check declared cumulative instruction budgets.
         // Because Soroban does not expose per-call instruction counters to guest contracts
         // at runtime, this is a declared-budget check rather than a live measurement.
-        if let Some(gas_limit) = max_total_gas {
-            let mut cumulative: u64 = 0;
-            for call in calls.iter() {
+        let mut cumulative: u64 = 0;
+        for call in calls.iter() {
+            if call.args.len() > MAX_ARGS_PER_CALL {
+                env.storage().instance().remove(&DataKey::Executing);
+                return Err(MulticallError::ArgsTooLarge);
+            }
+            if let Some(gas_limit) = max_total_gas {
                 if let Some(budget) = call.instruction_budget {
                     cumulative = cumulative.saturating_add(budget);
                     if cumulative > gas_limit {
@@ -261,14 +265,6 @@ impl RouterMulticall {
                         return Err(MulticallError::GasLimitExceeded);
                     }
                 }
-            }
-        }
-
-        // Validate args length for each call before executing any of them.
-        for call in calls.iter() {
-            if call.args.len() > MAX_ARGS_PER_CALL {
-                env.storage().instance().remove(&DataKey::Executing);
-                return Err(MulticallError::ArgsTooLarge);
             }
         }
 
@@ -302,17 +298,14 @@ impl RouterMulticall {
             if success {
                 result.record_success(call_index, call_result);
             } else {
-                let failure_error = if call.instruction_budget.is_some() {
-                    router_common::BatchItemError::Custom(soroban_sdk::String::from_str(
-                        &env,
-                        router_common::FAILURE_REASON_BUDGET_EXCEEDED,
-                    ))
+                let reason = if call.instruction_budget.is_some() {
+                    router_common::FAILURE_REASON_BUDGET_EXCEEDED
                 } else {
-                    router_common::BatchItemError::Custom(soroban_sdk::String::from_str(
-                        &env,
-                        router_common::FAILURE_REASON_INVOKE_FAILED,
-                    ))
+                    router_common::FAILURE_REASON_INVOKE_FAILED
                 };
+                let failure_error = router_common::BatchItemError::Custom(
+                    soroban_sdk::String::from_str(&env, reason),
+                );
                 result.record_failure(call_index, failure_error);
             }
 
@@ -332,7 +325,7 @@ impl RouterMulticall {
                 if call.required {
                     env.events().publish(
                         (Symbol::new(&env, router_common::EVENT_CALL_FAILED),),
-                        (call_index, &call.target, &call.function),
+                        (call_index, &call.target, &call.function, simulate),
                     );
                     env.storage().instance().remove(&DataKey::Executing);
                     return Err(MulticallError::RequiredCallFailed);
@@ -516,7 +509,8 @@ impl RouterMulticall {
     ///
     /// # Example
     /// ```ignore
-    /// let result = RouterMulticall::get_batch_result(&env, 0u64, 0u32)?;
+    /// // Using the generated client (recommended):
+    /// let result = client.get_batch_result(&0u64, &0u32)?;
     /// if let Some(call_result) = result {
     ///     println!("Call succeeded: {}", call_result.success);
     /// }
@@ -557,7 +551,8 @@ impl RouterMulticall {
     ///
     /// # Example
     /// ```ignore
-    /// let results = RouterMulticall::get_batch_results(&env, 0u64)?;
+    /// // Using the generated client (recommended):
+    /// let results = client.get_batch_results(&0u64)?;
     /// for (idx, call_result) in results.iter().enumerate() {
     ///     println!("Call {}: {}", idx, if call_result.success { "OK" } else { "FAIL" });
     /// }
