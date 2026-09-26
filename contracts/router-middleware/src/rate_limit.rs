@@ -16,7 +16,7 @@
 //! do not maintain any strategy-specific counters — they differ only in how
 //! the caller reacts to an exceeded limit (reject vs. allow-and-emit-event).
 
-use soroban_sdk::{Address, Env, String};
+use soroban_sdk::{Address, Env, String, Symbol};
 
 use crate::{DataKey, RateLimitState, RouteCallState};
 
@@ -38,7 +38,8 @@ pub struct RateLimitCheck {
 /// This function does not mutate or persist any storage itself — the caller
 /// is expected to apply `updated_state` to `route_call_state.rate_limits`
 /// and decide how to react to `exceeded` (reject / throttle / log-only) and
-/// when to persist the result.
+/// when to persist the result. The events for the throttle / log-only
+/// reactions are published via [`publish_throttled`] / [`publish_exceeded`].
 ///
 /// When the limit is exceeded, the shared `total_violations` counter is
 /// incremented by one. This is the only violation counter in the contract;
@@ -92,6 +93,24 @@ pub fn check_and_increment(
             },
         }
     }
+}
+
+/// Publish a `rate_limit_throttled` event for a call that exceeded its limit
+/// on a route using [`crate::RateLimitStrategy::Throttle`].
+pub fn publish_throttled(env: &Env, caller: &Address, route: &String) {
+    env.events().publish(
+        (Symbol::new(env, router_common::EVENT_RATE_LIMIT_THROTTLED),),
+        (caller.clone(), route.clone()),
+    );
+}
+
+/// Publish a `rate_limit_exceeded` event for a call that exceeded its limit
+/// on a route using [`crate::RateLimitStrategy::LogOnly`].
+pub fn publish_exceeded(env: &Env, caller: &Address, route: &String) {
+    env.events().publish(
+        (Symbol::new(env, router_common::EVENT_RATE_LIMIT_EXCEEDED),),
+        (caller.clone(), route.clone()),
+    );
 }
 
 /// Reset the rate limit state for a specific caller on a route.

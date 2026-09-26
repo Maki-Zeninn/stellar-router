@@ -3,12 +3,12 @@
 //! # router-middleware
 //!
 //! Pre/post call hook middleware for the stellar-router suite.
-//! Supports rate limiting, call logging, and per-route fee configuration.
+//! Supports rate limiting, call logging, and per-route circuit breaking.
 //!
 //! ## Features
 //! - Per-caller rate limiting (max calls per time window)
 //! - Call event logging with timestamps
-//! - Configurable per-route fees
+//! - Per-route circuit breaker (failure threshold + recovery window)
 //! - Admin-controlled hook enable/disable
 //!
 //! ## Events (following naming convention: past tense verbs in snake_case)
@@ -18,7 +18,16 @@
 //! - `circuit_closed` — Circuit breaker closed after successful recovery
 //! - `middleware_enabled` — Global middleware enabled/disabled
 //! - `call_log_cleared` — Call log cleared for route
+//! - `rate_limit_throttled` / `rate_limit_exceeded` — Limit exceeded under the
+//!   `Throttle` / `LogOnly` strategy
 //! - `admin_transferred` — Admin transferred to new address
+//!
+//! ## Event ownership
+//! Events for a state transition performed by one of the per-concern modules
+//! (`call_log`, `circuit_breaker`, `rate_limit`) are published by that module,
+//! so every call site that triggers the transition gets the event. `lib.rs`
+//! only publishes events for state it mutates directly (admin, global enable,
+//! route/caller configuration, hook invocations).
 
 pub mod call_log;
 pub mod circuit_breaker;
@@ -292,7 +301,11 @@ impl RouterMiddleware {
         }
 
         if previous_log_retention != Some(log_retention) {
-            call_log::clear(&env, &route);
+            // A route being configured for the first time has no log to
+            // clear, so skip the clear (and its `call_log_cleared` event).
+            if previous_log_retention.is_some() {
+                call_log::clear(&env, &route);
+            }
 
             if log_retention > 0 {
                 let log = Self::empty_call_log(&env, &caller, &route, log_retention);
@@ -459,17 +472,11 @@ impl RouterMiddleware {
                             return Err(MiddlewareError::RateLimitExceeded);
                         }
                         RateLimitStrategy::Throttle => {
-                            env.events().publish(
-                                (Symbol::new(&env, router_common::EVENT_RATE_LIMIT_THROTTLED),),
-                                (caller.clone(), route.clone()),
-                            );
+                            rate_limit::publish_throttled(&env, &caller, &route);
                             state_changed = true;
                         }
                         RateLimitStrategy::LogOnly => {
-                            env.events().publish(
-                                (Symbol::new(&env, router_common::EVENT_RATE_LIMIT_EXCEEDED),),
-                                (caller.clone(), route.clone()),
-                            );
+                            rate_limit::publish_exceeded(&env, &caller, &route);
                             state_changed = true;
                         }
                     }
@@ -703,13 +710,9 @@ impl RouterMiddleware {
 
         // Delegates to call_log::clear, which removes both the CallLog ring
         // buffer *and* the CallLogSummary for the route (issue #812: previously
-        // this only cleared CallLog inline and left CallLogSummary stale).
+        // this only cleared CallLog inline and left CallLogSummary stale) and
+        // publishes the `call_log_cleared` event.
         call_log::clear(&env, &route);
-
-        env.events().publish(
-            (Symbol::new(&env, router_common::EVENT_CALL_LOG_CLEARED),),
-            route,
-        );
         Ok(())
     }
 
@@ -932,6 +935,14 @@ impl RouterMiddleware {
     }
 
     /// Configure a per-caller rate limit override for a specific route.
+    ///
+    /// When a `CallerRateLimit` entry is present for `(route, target_caller)`,
+    /// `pre_call` uses `max_calls` / `window_secs` instead of the route-level
+    /// `max_calls_per_window` / `window_seconds` for that caller only. This
+    /// allows privileged callers to receive higher limits and suspicious
+    /// addresses to receive tighter limits without touching the global config.
+    ///
+    /// Admin only. Emits a `caller_rate_limit_set` event.
     pub fn configure_caller_rate_limit(
         env: Env,
         caller: Address,
@@ -966,27 +977,6 @@ impl RouterMiddleware {
             (route, target_caller, max_calls, window_secs),
         );
         Ok(())
-    }
-
-    /// Set a per-caller rate limit override for a specific route.
-    ///
-    /// When a `CallerRateLimit` entry is present for `(route, target_caller)`,
-    /// `pre_call` uses `max_calls` / `window_secs` instead of the route-level
-    /// `max_calls_per_window` / `window_seconds` for that caller only. This
-    /// allows privileged callers to receive higher limits and suspicious
-    /// addresses to receive tighter limits without touching the global config.
-    ///
-    /// Admin only. Emits a `caller_rate_limit_set` event.
-    pub fn set_caller_rate_limit(
-        env: Env,
-        caller: Address,
-        route: String,
-        target_caller: Address,
-        max_calls: u32,
-        window_secs: u64,
-    ) -> Result<(), MiddlewareError> {
-        // Delegate to configure_caller_rate_limit for DRY implementation.
-        Self::configure_caller_rate_limit(env, caller, route, target_caller, max_calls, window_secs)
     }
 
     /// Remove a per-caller rate limit override, restoring the route-level default.
@@ -2501,7 +2491,7 @@ mod tests {
         let privileged = Address::generate(&env);
 
         // Grant privileged caller 10 calls per window
-        client.set_caller_rate_limit(&admin, &route, &privileged, &10, &60);
+        client.configure_caller_rate_limit(&admin, &route, &privileged, &10, &60);
 
         // Verify override is stored
         let cfg = client.get_caller_rate_limit(&route, &privileged).unwrap();
@@ -2534,7 +2524,7 @@ mod tests {
         let restricted = Address::generate(&env);
 
         // Restrict suspicious caller to 1 call per window
-        client.set_caller_rate_limit(&admin, &route, &restricted, &1, &60);
+        client.configure_caller_rate_limit(&admin, &route, &restricted, &1, &60);
 
         // First call succeeds
         assert!(client.try_pre_call(&restricted, &route).is_ok());
@@ -2563,7 +2553,7 @@ mod tests {
         let privileged = Address::generate(&env);
 
         // Grant 10-call override, then remove it
-        client.set_caller_rate_limit(&admin, &route, &privileged, &10, &60);
+        client.configure_caller_rate_limit(&admin, &route, &privileged, &10, &60);
         client.remove_caller_rate_limit(&admin, &route, &privileged);
 
         // Override must be gone
@@ -2579,13 +2569,13 @@ mod tests {
     }
 
     #[test]
-    fn test_set_caller_rate_limit_emits_event() {
+    fn test_configure_caller_rate_limit_emits_event() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
         client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0, &0);
 
         let target = Address::generate(&env);
-        client.set_caller_rate_limit(&admin, &route, &target, &20, &120);
+        client.configure_caller_rate_limit(&admin, &route, &target, &20, &120);
 
         let events = env.events().all();
         let topic = Symbol::new(&env, router_common::EVENT_CALLER_RATE_LIMIT_SET);
@@ -2604,7 +2594,7 @@ mod tests {
         client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0, &0);
 
         let target = Address::generate(&env);
-        client.set_caller_rate_limit(&admin, &route, &target, &20, &120);
+        client.configure_caller_rate_limit(&admin, &route, &target, &20, &120);
         client.remove_caller_rate_limit(&admin, &route, &target);
 
         let events = env.events().all();
@@ -2670,18 +2660,7 @@ mod tests {
     }
 
     #[test]
-    fn test_set_caller_rate_limit_zero_window_with_max_calls_fails() {
-        let (env, admin, client) = setup();
-        let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &5, &60, &true, &0, &0, &0, &0);
-        let caller = Address::generate(&env);
-
-        let result = client.try_set_caller_rate_limit(&admin, &route, &caller, &1, &0);
-        assert_eq!(result, Err(Ok(MiddlewareError::InvalidConfig)));
-    }
-
-    #[test]
-    fn test_set_caller_rate_limit_zero_window_and_zero_max_is_unlimited_and_succeeds() {
+    fn test_configure_caller_rate_limit_zero_window_and_zero_max_is_unlimited_and_succeeds() {
         // window_secs == 0 is only invalid when paired with a nonzero max_calls;
         // 0/0 (unlimited) must still be accepted, mirroring configure_route.
         let (env, admin, client) = setup();
@@ -2690,15 +2669,42 @@ mod tests {
         let caller = Address::generate(&env);
 
         assert!(client
-            .try_set_caller_rate_limit(&admin, &route, &caller, &0, &0)
+            .try_configure_caller_rate_limit(&admin, &route, &caller, &0, &0)
             .is_ok());
     }
 
     // ── Reentrancy guard tests ────────────────────────────────────────────────
 
-    /// A second concurrent call to pre_call on the same route while the guard
-    /// is set must return Reentrancy. After the first call completes the guard
-    /// must be cleared, so a subsequent independent call must succeed.
+    /// pre_call on a route whose `Executing` guard is already set (i.e. a call
+    /// is in flight on that route) must return Reentrancy. Soroban's test env
+    /// can't interleave two calls, so the in-flight state is simulated by
+    /// writing the guard directly to storage.
+    #[test]
+    fn test_pre_call_returns_reentrancy_when_guard_set() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &10, &60, &true, &0, &0, &0, &0);
+        let caller = Address::generate(&env);
+
+        env.as_contract(&client.address, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::Executing(route.clone()), &true);
+        });
+
+        assert_eq!(
+            client.try_pre_call(&caller, &route),
+            Err(Ok(MiddlewareError::Reentrancy))
+        );
+        // The rejected call must not clear the in-flight call's guard.
+        assert_eq!(
+            client.try_pre_call(&caller, &route),
+            Err(Ok(MiddlewareError::Reentrancy))
+        );
+    }
+
+    /// After a pre_call completes the guard must be cleared, so a subsequent
+    /// independent call must succeed.
     #[test]
     fn test_reentrancy_guard_cleared_after_successful_pre_call() {
         let (env, admin, client) = setup();
@@ -2932,7 +2938,7 @@ mod tests {
         let caller = Address::generate(&env);
 
         // Set a per-caller override: 2 calls per 60s
-        client.set_caller_rate_limit(&admin, &route, &caller, &2, &60);
+        client.configure_caller_rate_limit(&admin, &route, &caller, &2, &60);
 
         // Under the override limit
         assert!(client.check_caller_rate_limit(&route, &caller));
@@ -2954,7 +2960,7 @@ mod tests {
         let caller = Address::generate(&env);
 
         // Set a per-caller override: 2 calls per 60s
-        client.set_caller_rate_limit(&admin, &route, &caller, &2, &60);
+        client.configure_caller_rate_limit(&admin, &route, &caller, &2, &60);
 
         // Exhaust the override limit
         client.pre_call(&caller, &route);
