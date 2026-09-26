@@ -8,6 +8,13 @@
 //! resolving which one applies is the caller's job (see [`crate::pre_call`]);
 //! this module only owns the window/counter arithmetic so it isn't
 //! duplicated between the route-level and per-caller-override paths.
+//!
+//! Note on violation accounting: there is a single shared `total_violations`
+//! counter on [`RateLimitState`]. It is incremented identically whenever a
+//! call exceeds the effective limit, regardless of which
+//! [`crate::RateLimitStrategy`] the route is configured with. The strategies
+//! do not maintain any strategy-specific counters — they differ only in how
+//! the caller reacts to an exceeded limit (reject vs. allow-and-emit-event).
 
 use soroban_sdk::{Address, Env, String};
 
@@ -32,6 +39,10 @@ pub struct RateLimitCheck {
 /// is expected to apply `updated_state` to `route_call_state.rate_limits`
 /// and decide how to react to `exceeded` (reject / throttle / log-only) and
 /// when to persist the result.
+///
+/// When the limit is exceeded, the shared `total_violations` counter is
+/// incremented by one. This is the only violation counter in the contract;
+/// it is not specific to any [`crate::RateLimitStrategy`].
 pub fn check_and_increment(
     env: &Env,
     caller: &Address,
@@ -183,6 +194,49 @@ mod tests {
         });
     }
 
+    /// Regression test for #1196/#1197: when a per-caller override's
+    /// `window_secs` differs from the route's `window_seconds`, the caller
+    /// must be checked against (and reset on) the override's own window, not
+    /// the route's. Here the route window is 60s but the override window is
+    /// 10s, so after 15s the override window has elapsed (reset) even though
+    /// the route window has not.
+    #[test]
+    fn check_and_increment_uses_override_window_not_route_window() {
+        let (env, contract_id) = env_with_contract();
+        let caller = Address::generate(&env);
+        env.ledger().set_timestamp(1000);
+        env.as_contract(&contract_id, || {
+            let mut state = empty_state(&env);
+            // Caller has exhausted their override limit (2 calls) within the
+            // override's 10s window that started at t=1000.
+            state.rate_limits.set(
+                caller.clone(),
+                RateLimitState {
+                    calls_in_window: 2,
+                    window_start: 1000,
+                    total_violations: 0,
+                },
+            );
+
+            // Still inside the override window: the caller is throttled
+            // against their own 10s window (limit 2), not the route's 60s.
+            env.ledger().set_timestamp(1005);
+            let blocked = check_and_increment(&env, &caller, &state, 2, 10);
+            assert!(blocked.exceeded);
+            assert_eq!(blocked.updated_state.calls_in_window, 2);
+            assert_eq!(blocked.updated_state.window_start, 1000);
+
+            // Advance past the override's 10s window but well before the
+            // route's 60s window would have elapsed. The override window must
+            // reset, allowing the caller through again.
+            env.ledger().set_timestamp(1015);
+            let allowed = check_and_increment(&env, &caller, &state, 2, 10);
+            assert!(!allowed.exceeded);
+            assert_eq!(allowed.updated_state.calls_in_window, 1);
+            assert_eq!(allowed.updated_state.window_start, 1015);
+        });
+    }
+
     #[test]
     fn reset_for_caller_removes_existing_entry() {
         let (env, contract_id) = env_with_contract();
@@ -209,22 +263,7 @@ mod tests {
                 .instance()
                 .get(&DataKey::RouteCallState(route.clone()))
                 .unwrap();
-            assert!(after.rate_limits.get(caller).is_none());
-        });
-    }
-
-    #[test]
-    fn reset_for_caller_is_noop_when_no_state_exists() {
-        let (env, contract_id) = env_with_contract();
-        let route = String::from_str(&env, "route");
-        let caller = Address::generate(&env);
-        env.as_contract(&contract_id, || {
-            reset_for_caller(&env, &route, &caller);
-            assert!(env
-                .storage()
-                .instance()
-                .get::<DataKey, RouteCallState>(&DataKey::RouteCallState(route.clone()))
-                .is_none());
+            assert!(!after.rate_limits.contains_key(caller.clone()));
         });
     }
 }

@@ -415,6 +415,8 @@ MIT
 
 ## Handsoff notes
 
+<!-- handsoff-issue-1328 -->
+- #1328: refactor(router-middleware): public view-function naming inconsistently omits the get_ prefix used by most other read-only functions
 <!-- handsoff-issue-1329 -->
 - #1329: docs(router-multicall): module-level Events list omits `call_failed` and under-documents `call_result`'s payload
 
