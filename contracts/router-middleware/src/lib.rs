@@ -324,6 +324,20 @@ impl RouterMiddleware {
             }
         }
 
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROUTE_CONFIGURED),),
+            (
+                route.clone(),
+                max_calls_per_window,
+                window_seconds,
+                enabled,
+                failure_threshold,
+                recovery_window_seconds,
+                log_retention,
+                burst_allowance,
+            ),
+        );
+
         Ok(())
     }
 
