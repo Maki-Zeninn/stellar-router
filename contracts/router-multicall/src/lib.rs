@@ -7,8 +7,9 @@
 //!
 //! ## Features
 //! - Aggregate up to N calls in one transaction
-//! - Per-call success/failure tracking (non-atomic mode)
-//! - Atomic mode: revert all if any call fails
+//! - Per-call atomicity control: each `CallDescriptor` has a `required` flag.
+//!   When `required=true`, failure of that call aborts the entire batch.
+//!   When `required=false`, the call's failure is recorded but the batch continues.
 //! - Call result storage for async inspection
 //! - `simulate` — dry-run mode: execute all calls without incrementing the batch counter
 //! - `fail_fast` — abort the batch on the first optional-call failure
@@ -1954,3 +1955,59 @@ mod tests {
         );
     }
 }
+
+    // ── Issue #1342: NotInitialized test coverage ──────────────────────────────
+
+    #[test]
+    fn test_execute_batch_returns_not_initialized_when_not_initialized() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, RouterMulticall);
+        let client = RouterMulticallClient::new(&env, &contract_id);
+        let caller = Address::generate(&env);
+        let mock_id = env.register_contract(None, MockContract);
+
+        let mut calls = Vec::new(&env);
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: true,
+            instruction_budget: None,
+            args: Vec::new(&env),
+        });
+
+        let result = client.try_execute_batch(&caller, &calls, &false, &false, &false, &None);
+        assert_eq!(result, Err(Ok(MulticallError::NotInitialized)));
+    }
+
+    #[test]
+    fn test_set_max_batch_size_returns_not_initialized_when_not_initialized() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, RouterMulticall);
+        let client = RouterMulticallClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        let result = client.try_set_max_batch_size(&admin, &5);
+        assert_eq!(result, Err(Ok(MulticallError::NotInitialized)));
+    }
+
+    #[test]
+    fn test_transfer_admin_returns_not_initialized_when_not_initialized() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, RouterMulticall);
+        let client = RouterMulticallClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        let result = client.try_transfer_admin(&admin, &new_admin);
+        assert_eq!(result, Err(Ok(MulticallError::NotInitialized)));
+    }
+
+    #[test]
+    fn test_total_batches_returns_not_initialized_when_not_initialized() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, RouterMulticall);
+        let client = RouterMulticallClient::new(&env, &contract_id);
+
+        let result = client.try_total_batches();
+        assert_eq!(result, Err(Ok(MulticallError::NotInitialized)));
+    }
