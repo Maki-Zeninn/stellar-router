@@ -278,6 +278,7 @@ impl RouterMulticall {
             .unwrap_or(0);
 
         let mut result = router_common::BatchCallResult::new(&env);
+        let call_result_topic = Symbol::new(&env, router_common::EVENT_CALL_RESULT);
         let mut call_index = 0u32;
         for call in calls.iter() {
             let args: Vec<Val> = call.args.clone();
@@ -315,7 +316,7 @@ impl RouterMulticall {
             }
 
             env.events().publish(
-                (Symbol::new(&env, router_common::EVENT_CALL_RESULT),),
+                (call_result_topic.clone(),),
                 (
                     &caller,
                     &call.target,
@@ -440,8 +441,10 @@ impl RouterMulticall {
 
     /// Get total batches executed.
     ///
-    /// Returns the cumulative count of successful `execute_batch`
-    /// invocations since the contract was initialized.
+    /// Returns the cumulative count of successful, non-simulated
+    /// `execute_batch` invocations since the contract was initialized.
+    /// Batches run with `simulate=true` do not increment this counter,
+    /// even though they return `Ok`.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -1153,6 +1156,28 @@ mod tests {
     }
 
     #[test]
+    fn test_get_batch_result_uninitialized_returns_none() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, RouterMulticall);
+        let client = RouterMulticallClient::new(&env, &contract_id);
+
+        // Never initialized — documented to return Ok(None), not NotInitialized.
+        assert_eq!(client.try_get_batch_result(&0u64, &0u32), Ok(Ok(None)));
+    }
+
+    #[test]
+    fn test_get_batch_results_uninitialized_returns_empty() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, RouterMulticall);
+        let client = RouterMulticallClient::new(&env, &contract_id);
+
+        // Never initialized — documented to return Ok(empty), not NotInitialized.
+        let results = client.try_get_batch_results(&0u64);
+        assert!(results.is_ok());
+        assert_eq!(results.unwrap().unwrap().len(), 0);
+    }
+
+    #[test]
     fn test_budget_exceeded_count_increments_on_budgeted_failure() {
         let (env, _admin, client) = setup();
         let mock_id = env.register_contract(None, MockContract);
@@ -1794,6 +1819,37 @@ mod tests {
         let result =
             client.try_execute_batch(&caller, &calls, &false, &false, &false, &Some(1_000_000u64));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_max_total_gas_exactly_at_limit_succeeds() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: true,
+            instruction_budget: Some(600_000),
+            args: Vec::new(&env),
+        });
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: true,
+            instruction_budget: Some(400_000),
+            args: Vec::new(&env),
+        });
+
+        // Total declared budget = 1_000_000, limit = 1_000_000 → exactly at limit, should pass
+        let result =
+            client.try_execute_batch(&caller, &calls, &false, &false, &false, &Some(1_000_000u64));
+        assert!(result.is_ok());
+        let summary = result.unwrap().unwrap();
+        assert_eq!(summary.successes.len(), 2);
+        assert_eq!(client.total_batches(), 1);
     }
 
     #[test]
