@@ -412,3 +412,17 @@ Only move to **mainnet** when your contracts are fully tested and audited.
 ## License
 
 MIT
+
+## Handsoff notes
+
+<!-- handsoff-issue-1329 -->
+- #1329: docs(router-multicall): module-level Events list omits `call_failed` and under-documents `call_result`'s payload
+
+<!-- handsoff-issue-1330 -->
+- #1330: testing(router-multicall): no test verifies execute_batch succeeds when calls.len() exactly equals max_batch_size
+
+<!-- handsoff-issue-1331 -->
+- #1331: security(router-multicall): `simulate=true` is documented as "dry-run mode" but invoked calls execute for real and their state changes are permanently persisted
+
+<!-- handsoff-issue-1332 -->
+- #1332: docs(router-multicall): crate-level doc claims the contract batches "read calls" only, but execute_batch supports arbitrary state-mutating calls
