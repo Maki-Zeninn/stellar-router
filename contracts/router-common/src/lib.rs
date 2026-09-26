@@ -145,6 +145,9 @@ pub const EVENT_SIMULATION_RESULT: &str = "simulation_result";
 /// Standard event topic for fee estimations
 pub const EVENT_FEE_ESTIMATED: &str = "fee_estimated";
 
+/// Standard event topic for backoff configuration updates
+pub const EVENT_BACKOFF_CONFIG_UPDATED: &str = "backoff_config_updated";
+
 /// Standard event topic for pre-call middleware hooks
 pub const EVENT_PRE_CALL: &str = "pre_call";
 

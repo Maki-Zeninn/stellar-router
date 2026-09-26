@@ -321,12 +321,26 @@ impl RouterExecution {
         if !(MIN_BACKOFF_MULTIPLIER..=MAX_BACKOFF_MULTIPLIER).contains(&backoff_multiplier) {
             return Err(ExecutionError::InvalidConfig);
         }
+        let old_base_ms: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::BackoffBaseMs)
+            .unwrap_or(0);
+        let old_multiplier: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::BackoffMultiplier)
+            .unwrap_or(FIXED_POINT_SCALE);
         env.storage()
             .instance()
             .set(&DataKey::BackoffBaseMs, &backoff_base_ms);
         env.storage()
             .instance()
             .set(&DataKey::BackoffMultiplier, &backoff_multiplier);
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_BACKOFF_CONFIG_UPDATED),),
+            (old_base_ms, old_multiplier, backoff_base_ms, backoff_multiplier),
+        );
         Ok(())
     }
 
