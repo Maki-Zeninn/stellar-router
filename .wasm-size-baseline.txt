@@ -1,8 +1,8 @@
 router_core:88940
 router_registry:47225
 router_access:40252
-router_middleware:56847
+router_middleware:56411
 router_timelock:41722
-router_multicall:29765
+router_multicall:29795
 router_execution:40966
 router_quote:35741
