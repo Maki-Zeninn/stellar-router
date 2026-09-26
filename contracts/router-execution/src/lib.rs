@@ -174,7 +174,8 @@ pub struct ExecutionResult {
     pub target: Address,
     pub function: Symbol,
     pub success: bool,
-    /// Number of attempts made (1 = first try succeeded or non-retryable failure).
+    /// Number of attempts made before success (1 = succeeded on first try, 2 = succeeded after 1 retry, etc.).
+    /// Only populated on successful execution; failures return `Err(ExecutionError)` instead.
     pub attempts: u32,
     /// Whether simulation was run before execution.
     pub simulated: bool,
