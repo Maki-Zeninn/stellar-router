@@ -56,6 +56,8 @@ pub enum DataKey {
     /// `reset_guard(route)` is provided for emergency recovery in case the
     /// flag is ever left set by an unexpected panic path.
     Executing(String), // route_name -> bool
+    /// Timestamp of the last rate limit pruning for a route (to throttle O(n) pruning operations).
+    LastRateLimitPrune(String), // route_name -> u64
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -136,6 +138,13 @@ pub struct RouteCallState {
 /// Multiplier applied to a route's `window_seconds` to decide when an idle
 /// caller's rate-limit entry is considered stale and safe to evict.
 const RATE_LIMIT_STALE_WINDOW_MULTIPLIER: u64 = 4;
+
+/// Minimum interval (in seconds) between rate-limit pruning operations for a route.
+/// Pruning is an O(n) scan through all historical callers, so it's throttled to run
+/// at most once per this interval to avoid scaling call costs with caller cardinality.
+/// Stale entries are still evicted on window boundary — this just throttles full
+/// scans of the map to avoid redundant work on consecutive calls.
+const RATE_LIMIT_PRUNE_INTERVAL: u64 = 3600;
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -315,6 +324,20 @@ impl RouterMiddleware {
             }
         }
 
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_ROUTE_CONFIGURED),),
+            (
+                route.clone(),
+                max_calls_per_window,
+                window_seconds,
+                enabled,
+                failure_threshold,
+                recovery_window_seconds,
+                log_retention,
+                burst_allowance,
+            ),
+        );
+
         Ok(())
     }
 
@@ -388,13 +411,29 @@ impl RouterMiddleware {
                     },
                 });
 
-            let mut state_changed = Self::prune_stale_rate_limits(
-                &env,
-                &route,
-                &mut route_call_state.rate_limits,
-                env.ledger().timestamp(),
-                config.window_seconds,
-            );
+            let now = env.ledger().timestamp();
+            let last_prune: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey::LastRateLimitPrune(route.clone()))
+                .unwrap_or(0);
+            let should_prune = now >= last_prune.saturating_add(RATE_LIMIT_PRUNE_INTERVAL);
+            let mut state_changed = if should_prune {
+                Self::prune_stale_rate_limits(
+                    &env,
+                    &route,
+                    &mut route_call_state.rate_limits,
+                    now,
+                    config.window_seconds,
+                )
+            } else {
+                false
+            };
+            if should_prune {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::LastRateLimitPrune(route.clone()), &now);
+            }
 
             // Circuit breaker check: transitions open→half-open if recovery
             // window has elapsed; returns true when the call must be blocked.
