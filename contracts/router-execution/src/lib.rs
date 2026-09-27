@@ -459,6 +459,7 @@ impl RouterExecution {
                     ExecutionError::SimulationFailed,
                     0,
                 );
+                Self::append_history(&env, &request.target, &request.function, false, 0);
                 return Err(ExecutionError::SimulationFailed);
             }
             carried_first_result = Some(sim_ok);
