@@ -762,6 +762,11 @@ impl RouterExecution {
         if new_max == 0 || new_max > MAX_HISTORY_SIZE_CAP {
             return Err(ExecutionError::InvalidConfig);
         }
+        let old_max: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxHistorySize)
+            .unwrap_or(DEFAULT_MAX_HISTORY_SIZE);
         env.storage()
             .instance()
             .set(&DataKey::MaxHistorySize, &new_max);
@@ -775,6 +780,11 @@ impl RouterExecution {
         env.storage()
             .instance()
             .set(&DataKey::ExecHistory, &history);
+
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_MAX_HISTORY_SIZE_UPDATED),),
+            (old_max, new_max),
+        );
 
         Ok(())
     }
