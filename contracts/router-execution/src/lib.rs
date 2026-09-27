@@ -723,7 +723,16 @@ impl RouterExecution {
         if new_max == 0 || new_max > 5 {
             return Err(ExecutionError::InvalidConfig);
         }
+        let old_max: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxRetries)
+            .unwrap_or(0);
         env.storage().instance().set(&DataKey::MaxRetries, &new_max);
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_MAX_RETRIES_UPDATED),),
+            (old_max, new_max),
+        );
         Ok(())
     }
 
