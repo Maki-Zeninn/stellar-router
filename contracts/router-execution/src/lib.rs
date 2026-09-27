@@ -1254,6 +1254,29 @@ mod tests {
     }
 
     #[test]
+    fn test_initialize_max_retries_at_max_boundary_succeeds() {
+        // Issue #1310: the upper boundary of the valid range (5) was never
+        // exercised by a passing test. Verify that initialize with max_retries=5
+        // succeeds and that max_retries() subsequently returns 5.
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &5, &0, &100);
+        assert_eq!(client.max_retries(), 5);
+    }
+
+    #[test]
+    fn test_set_max_retries_at_max_boundary_succeeds() {
+        // Issue #1310: verify that set_max_retries with new_max=5 (the maximum
+        // allowed value) succeeds and that max_retries() subsequently returns 5.
+        let (_, admin, client) = setup();
+        client.set_max_retries(&admin, &5);
+        assert_eq!(client.max_retries(), 5);
+    }
+
+    #[test]
     fn test_set_max_retries_unauthorized_fails() {
         let (env, _, client) = setup();
         let attacker = Address::generate(&env);
