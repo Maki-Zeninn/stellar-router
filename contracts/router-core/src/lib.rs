@@ -124,7 +124,7 @@ pub struct RouteScoreInput {
     pub score: RouteScore,
 }
 
-/// Maximum upper bound allowed for liquidity and reliability scores.
+/// Maximum upper bound allowed for route scores, including fee basis points.
 pub const MAX_SCORE_VALUE: u32 = 100;
 
 /// Maximum allowed multiplier for each configurable scoring weight.
@@ -1944,7 +1944,10 @@ impl RouterCore {
             return Err(RouterError::RouteNotFound);
         }
 
-        if score.liquidity_score > MAX_SCORE_VALUE || score.reliability_score > MAX_SCORE_VALUE {
+        if score.liquidity_score > MAX_SCORE_VALUE
+            || score.fee_bps > MAX_SCORE_VALUE
+            || score.reliability_score > MAX_SCORE_VALUE
+        {
             return Err(RouterError::InvalidScore);
         }
 
@@ -1989,6 +1992,7 @@ impl RouterCore {
             }
 
             if item.score.liquidity_score > MAX_SCORE_VALUE
+                || item.score.fee_bps > MAX_SCORE_VALUE
                 || item.score.reliability_score > MAX_SCORE_VALUE
             {
                 return Err(RouterError::InvalidScore);
@@ -4352,6 +4356,34 @@ mod tests {
     }
 
     #[test]
+    fn test_route_score_rejects_fee_above_maximum() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        let score = RouteScore {
+            liquidity_score: MAX_SCORE_VALUE,
+            fee_bps: MAX_SCORE_VALUE + 1,
+            reliability_score: MAX_SCORE_VALUE,
+        };
+        let result = client.try_set_route_score(&admin, &name, &score);
+        assert_eq!(result, Err(Ok(RouterError::InvalidScore)));
+        assert_eq!(client.get_route_score(&name), None);
+
+        let batch = vec![
+            &env,
+            RouteScoreInput {
+                name: name.clone(),
+                score,
+            },
+        ];
+        let result = client.try_set_route_scores_batch(&admin, &batch);
+        assert_eq!(result, Err(Ok(RouterError::InvalidScore)));
+        assert_eq!(client.get_route_score(&name), None);
+    }
+
+    #[test]
     fn test_set_route_scores_batch() {
         let (env, admin, client) = setup();
 
@@ -4478,6 +4510,29 @@ mod tests {
         let candidates = vec![&env, r1, r2.clone(), r3];
         let best = client.get_best_route(&candidates, &0, &None);
         assert_eq!(best, Some(r2));
+    }
+
+    #[test]
+    fn test_cached_best_route_keeps_first_route_on_equal_scores() {
+        let (env, admin, client) = setup();
+        let first = String::from_str(&env, "route-first");
+        let second = String::from_str(&env, "route-second");
+        let first_address = Address::generate(&env);
+        let second_address = Address::generate(&env);
+        client.register_route(&admin, &first, &first_address, &None);
+        client.register_route(&admin, &second, &second_address, &None);
+
+        let score = RouteScore {
+            liquidity_score: 80,
+            fee_bps: 20,
+            reliability_score: 80,
+        };
+        client.set_route_score(&admin, &first, &score);
+        client.set_route_score(&admin, &second, &score);
+
+        // Equal composite scores retain the first route encountered.
+        assert_eq!(client.resolve(&first), first_address);
+        assert_eq!(client.resolve(&second), first_address);
     }
 
     #[test]
@@ -5348,6 +5403,35 @@ mod tests {
         // Pausing the best route promotes r1 in the cache.
         client.set_route_paused(&admin, &r2, &true);
         assert_eq!(client.resolve(&r1), addr1);
+    }
+
+    #[test]
+    fn test_cached_best_route_is_removed_when_no_eligible_route_remains() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "route-only");
+        let address = Address::generate(&env);
+        client.register_route(&admin, &route, &address, &None);
+        client.set_route_score(
+            &admin,
+            &route,
+            &RouteScore {
+                liquidity_score: 80,
+                fee_bps: 20,
+                reliability_score: 80,
+            },
+        );
+
+        let cache_present = env.as_contract(&client.address, || {
+            env.storage().instance().has(&DataKey::BestRoute)
+        });
+        assert!(cache_present);
+
+        client.set_route_paused(&admin, &route, &true);
+
+        let cache_present = env.as_contract(&client.address, || {
+            env.storage().instance().has(&DataKey::BestRoute)
+        });
+        assert!(!cache_present);
     }
 
     #[test]
