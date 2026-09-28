@@ -15,7 +15,7 @@
 //! ## Events (following naming convention: past tense verbs in snake_case)
 //! - `route_registered` ΓÇö Route registered (route_name, address)
 //! - `route_updated` ΓÇö Route updated (route_name)
-//! - `route_overwritten` ΓÇö Route overwritten by same name (route_name)
+//! - `route_overwritten` ΓÇö Route overwritten by same name (route_name, old_address, new_address)
 //! - `route_removed` ΓÇö Route removed (route_name)
 //! - `route_paused` ΓÇö Route paused/unpaused (route_name, paused)
 //! - `route_resolve_paused` ΓÇö Route resolution paused (route_name)
@@ -30,7 +30,7 @@
 //! - `alias_added` ΓÇö Route alias added (existing_name, alias_name)
 //! - `alias_removed` ΓÇö Route alias removed (alias_name)
 //! - `alias_resolved` ΓÇö Route alias resolved (alias_name, selected_route_name)
-//! - `route_scored` ΓÇö Route score updated (route_name, score)
+//! - `route_scored` ΓÇö Route score updated (route_name, liquidity_score, fee_bps, reliability_score)
 //! - `best_route_selected` ΓÇö Best route selected (route_name)
 //! - `admin_transferred` ΓÇö Admin transferred (old_admin, new_admin)
 
@@ -447,6 +447,10 @@ impl RouterCore {
         router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
+
+        if ttl_ledgers == Some(0) {
+            return Err(RouterError::InvalidTtlExtension);
+        }
 
         let expires_at = ttl_ledgers.map(|ttl| env.ledger().sequence().saturating_add(ttl));
 
@@ -4455,6 +4459,40 @@ mod tests {
     }
 
     #[test]
+    fn test_get_best_route_skips_expired() {
+        let (env, admin, client) = setup();
+        let expired = String::from_str(&env, "expired-route");
+        let active = String::from_str(&env, "active-route");
+        let addr = Address::generate(&env);
+
+        client.register_route_with_ttl(&admin, &expired, &addr, &Some(1));
+        client.register_route(&admin, &active, &addr, &None);
+        client.set_route_score(
+            &admin,
+            &expired,
+            &RouteScore {
+                liquidity_score: 100,
+                fee_bps: 0,
+                reliability_score: 100,
+            },
+        );
+        client.set_route_score(
+            &admin,
+            &active,
+            &RouteScore {
+                liquidity_score: 10,
+                fee_bps: 0,
+                reliability_score: 10,
+            },
+        );
+
+        env.ledger().with_mut(|li| li.sequence_number += 2);
+
+        let candidates = vec![&env, expired, active.clone()];
+        assert_eq!(client.get_best_route(&candidates, &0, &None), Some(active));
+    }
+
+    #[test]
     fn test_get_best_route_returns_none_when_all_unscored() {
         let (env, admin, client) = setup();
         let r1 = String::from_str(&env, "route-a");
@@ -5071,6 +5109,40 @@ mod tests {
     }
 
     #[test]
+    fn test_register_routes_batch_fail_fast_rejects_without_partial_commit() {
+        let (env, admin, client) = setup();
+        let existing = String::from_str(&env, "oracle");
+        let new_route = String::from_str(&env, "vault");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &existing, &addr, &None);
+
+        let routes = vec![
+            &env,
+            RouteRegisterInput {
+                name: existing.clone(),
+                address: Address::generate(&env),
+            },
+            RouteRegisterInput {
+                name: new_route.clone(),
+                address: Address::generate(&env),
+            },
+        ];
+
+        let result = client.register_routes_batch(&admin, &routes, &true);
+        assert_eq!(result.successes.len(), 0);
+        assert_eq!(result.failures.len(), 1);
+        assert_eq!(result.failures.get(0).unwrap().index, 0);
+        assert_eq!(
+            result.failures.get(0).unwrap().error,
+            router_common::BatchItemError::AlreadyExists
+        );
+        assert_eq!(
+            client.try_resolve(&new_route),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+    }
+
+    #[test]
     fn test_remove_routes_batch_partial_errors() {
         let (env, admin, client) = setup();
         let name = String::from_str(&env, "oracle");
@@ -5627,6 +5699,20 @@ mod tests {
 
         env.ledger().with_mut(|li| li.sequence_number += 100);
         assert_eq!(client.resolve(&name), addr);
+    }
+
+    #[test]
+    fn test_register_route_with_ttl_rejects_zero() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "zero-ttl-route");
+        let addr = Address::generate(&env);
+
+        let result = client.try_register_route_with_ttl(&admin, &name, &addr, &Some(0));
+        assert_eq!(result, Err(Ok(RouterError::InvalidTtlExtension)));
+        assert_eq!(
+            client.try_resolve(&name),
+            Err(Ok(RouterError::RouteNotFound))
+        );
     }
 
     #[test]
