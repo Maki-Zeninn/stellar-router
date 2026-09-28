@@ -1192,6 +1192,39 @@ mod tests {
         assert_eq!(result, Err(Ok(ExecutionError::InvalidAmount)));
     }
 
+    // ── Issue #1311: MIN_RESOURCE_FEE_STROOPS floor coverage ────────────────
+    //
+    // Every existing estimate_fee test uses amount=1_000_000, which scales to
+    // 1000 (well above the MIN_RESOURCE_FEE_STROOPS=100 floor). These two tests
+    // use small amounts whose scaled values fall below the floor, exercising the
+    // `if scaled < MIN_RESOURCE_FEE_STROOPS` branch in compute_base_and_resource_fee.
+
+    #[test]
+    fn test_fee_estimate_small_amount_applies_min_resource_fee_floor() {
+        let (env, _, client) = setup();
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        // amount=1 → scaled = 1 / 1000 = 0, which is below MIN_RESOURCE_FEE_STROOPS (100)
+        // → resource_fee must be floored at 100.
+        let estimate = client.estimate_fee(&target, &function, &1, &5000);
+        assert_eq!(estimate.resource_fee, 100); // MIN_RESOURCE_FEE_STROOPS
+        assert_eq!(estimate.base_fee, 100); // BASE_FEE_STROOPS
+        // No surge (load_bps=5000 < 8000), so total = (100 + 100) * 1 = 200.
+        assert_eq!(estimate.total_fee, 200);
+        assert!(!estimate.high_load);
+    }
+
+    #[test]
+    fn test_fee_estimate_amount_just_below_floor_threshold_applies_min_resource_fee() {
+        let (env, _, client) = setup();
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        // amount=50_000 → scaled = 50_000 / 1000 = 50, which is below MIN_RESOURCE_FEE_STROOPS (100)
+        // → resource_fee must be floored at 100.
+        let estimate = client.estimate_fee(&target, &function, &50_000, &5000);
+        assert_eq!(estimate.resource_fee, 100); // MIN_RESOURCE_FEE_STROOPS
+    }
+
     #[test]
     fn test_stats_initial() {
         let (_, _, client) = setup();
@@ -1883,6 +1916,53 @@ mod tests {
         }
     }
 
+    // ── Issue #1312: execute() InvalidAmount guard coverage ──────────────────
+    //
+    // execute() validates request.amount the same way estimate_fee validates its
+    // amount parameter (line 380: `if request.amount <= 0`). The existing
+    // execute() tests all use amount=1_000_000 and never exercise this guard.
+    // These tests assert the check fires for amount=0 and a negative amount.
+
+    #[test]
+    fn test_execute_invalid_amount_zero_returns_error() {
+        let (env, _, client) = setup();
+        let caller = Address::generate(&env);
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+
+        let request = ExecutionRequest {
+            target: target.clone(),
+            function: function.clone(),
+            simulate_first: false,
+            max_retries: 0,
+            args: Vec::new(&env),
+            amount: 0,
+        };
+
+        let result = client.try_execute(&caller, &request);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidAmount)));
+    }
+
+    #[test]
+    fn test_execute_invalid_amount_negative_returns_error() {
+        let (env, _, client) = setup();
+        let caller = Address::generate(&env);
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+
+        let request = ExecutionRequest {
+            target: target.clone(),
+            function: function.clone(),
+            simulate_first: false,
+            max_retries: 0,
+            args: Vec::new(&env),
+            amount: -1,
+        };
+
+        let result = client.try_execute(&caller, &request);
+        assert_eq!(result, Err(Ok(ExecutionError::InvalidAmount)));
+    }
+
     // ── Issue #811: execute() success path coverage ──────────────────────────
     //
     // Every other `execute()` test drives the failure/exhaustion branch by
@@ -2109,5 +2189,159 @@ mod tests {
         assert_eq!(evt_target, mock_id);
         assert_eq!(evt_function, function);
         assert!(evt_success);
+    }
+
+    // ── Issue #1313: ArgsTooLarge guard coverage for execute() and simulate() ─
+    //
+    // Both execute() (line 386-388) and simulate() (line 616-618) reject
+    // argument vectors longer than MAX_ARGS_PER_CALL (20). Neither entry point
+    // has any existing test that exercises this guard.
+
+    #[test]
+    fn test_execute_args_too_large_returns_error() {
+        let (env, _, client) = setup();
+        let caller = Address::generate(&env);
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+
+        // Build a Vec<Val> with 21 elements (MAX_ARGS_PER_CALL + 1).
+        let mut oversized_args: Vec<Val> = Vec::new(&env);
+        for i in 0u32..21u32 {
+            oversized_args.push_back(i.into_val(&env));
+        }
+
+        let request = ExecutionRequest {
+            target: target.clone(),
+            function: function.clone(),
+            simulate_first: false,
+            max_retries: 0,
+            args: oversized_args,
+            amount: 1_000_000,
+        };
+
+        let result = client.try_execute(&caller, &request);
+        assert_eq!(result, Err(Ok(ExecutionError::ArgsTooLarge)));
+    }
+
+    #[test]
+    fn test_simulate_args_too_large_returns_error() {
+        let (env, _, client) = setup();
+        let caller = Address::generate(&env);
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+
+        // Build a Vec<Val> with 21 elements (MAX_ARGS_PER_CALL + 1).
+        let mut oversized_args: Vec<Val> = Vec::new(&env);
+        for i in 0u32..21u32 {
+            oversized_args.push_back(i.into_val(&env));
+        }
+
+        let result = client.try_simulate(&caller, &target, &function, &oversized_args);
+        assert_eq!(result, Err(Ok(ExecutionError::ArgsTooLarge)));
+    }
+
+    // ── Issue #1314: execute() simulate_first=true code path coverage ─────────
+    //
+    // All three existing execute()-driving tests set simulate_first=false.
+    // The entire simulation-before-execution branch — including the
+    // carried_first_result reuse mechanism and SimulationFailed early-return —
+    // has zero regression coverage.
+    //
+    // Test 1: simulate_first=true against a contract that succeeds — asserts
+    //   the target is invoked exactly once overall (via a call-counting static,
+    //   following FlakyTarget's pattern) and that result.simulated==true.
+    //
+    // Test 2: simulate_first=true against a non-existent contract — asserts
+    //   Err(ExecutionError::SimulationFailed) is returned and that TotalErrors
+    //   is incremented (via stats()).
+
+    // A static counter to track the total number of times SimulatedTarget
+    // is invoked (simulation + real invocation combined). Rolled back storage
+    // writes would not survive a failed call, so a process-global atomic is
+    // used to count across the simulated host boundary, following the same
+    // pattern as FLAKY_CALL_COUNT above.
+    static SIMULATED_CALL_COUNT: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+
+    #[contract]
+    pub struct SimulatedTarget;
+
+    #[contractimpl]
+    impl SimulatedTarget {
+        /// Increments SIMULATED_CALL_COUNT on every invocation and succeeds.
+        pub fn counted_ping(_env: Env) {
+            SIMULATED_CALL_COUNT.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn test_execute_simulate_first_true_success_invokes_target_once() {
+        // Reset the counter so this test is independent of test ordering.
+        SIMULATED_CALL_COUNT.store(0, core::sync::atomic::Ordering::SeqCst);
+
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, SimulatedTarget);
+        let caller = Address::generate(&env);
+        let function = Symbol::new(&env, "counted_ping");
+
+        let request = ExecutionRequest {
+            target: mock_id.clone(),
+            function: function.clone(),
+            simulate_first: true,
+            max_retries: 0,
+            args: Vec::new(&env),
+            amount: 1_000_000,
+        };
+
+        let result = client.execute(&caller, &request);
+
+        // The result must indicate success and that simulation was run.
+        assert!(result.success);
+        assert!(result.simulated);
+        assert_eq!(result.attempts, 1);
+
+        // The carried_first_result mechanism means the simulation result is
+        // reused as attempt #1 — the target must have been invoked exactly once
+        // total (not twice). Because Soroban rolls back storage on failed calls
+        // but our counter lives in a process-global static (outside ledger state),
+        // this accurately reflects the true invocation count.
+        let invocation_count = SIMULATED_CALL_COUNT.load(core::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            invocation_count, 1,
+            "target should be invoked exactly once when simulate_first=true succeeds"
+        );
+
+        // Stats: one success, no errors.
+        let (total_execs, total_errors) = client.stats();
+        assert_eq!(total_execs, 1);
+        assert_eq!(total_errors, 0);
+    }
+
+    #[test]
+    fn test_execute_simulate_first_true_failure_returns_simulation_failed() {
+        let (env, _admin, client) = setup();
+        let caller = Address::generate(&env);
+        // Use a random address with no registered contract — dry_run_invoke will
+        // return false and the SimulationFailed early-return fires.
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+
+        let request = ExecutionRequest {
+            target: target.clone(),
+            function: function.clone(),
+            simulate_first: true,
+            max_retries: 0,
+            args: Vec::new(&env),
+            amount: 1_000_000,
+        };
+
+        let result = client.try_execute(&caller, &request);
+        assert_eq!(result, Err(Ok(ExecutionError::SimulationFailed)));
+
+        // TotalErrors must have been incremented by log_error inside the
+        // SimulationFailed branch.
+        let (total_execs, total_errors) = client.stats();
+        assert_eq!(total_execs, 0);
+        assert_eq!(total_errors, 1);
     }
 }
