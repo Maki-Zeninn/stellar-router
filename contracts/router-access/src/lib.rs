@@ -135,6 +135,61 @@ impl RouterAccess {
     }
 
     /// Grant a role to multiple accounts in one call.
+    /// Grant a role to multiple accounts in one call, returning per-account results.
+    ///
+    /// This function processes a batch of accounts and attempts to grant the specified role
+    /// to each. Authorization (require_role_manager) is checked once up-front on behalf of
+    /// the `admin`; per-account failures are collected, not fatal.
+    ///
+    /// # Parameters
+    ///
+    /// * `admin` — Address making the request; must hold the role-manager privilege for `role`.
+    ///   Authorization is checked once at entry; the request fails with `AccessError::Unauthorized`
+    ///   if `admin` does not have the privilege.
+    /// * `accounts` — Vector of target addresses to grant the role to. Order is preserved in
+    ///   results; if `accounts` is empty, returns an empty-success BatchResult.
+    /// * `role` — String name of the role to grant. Must already exist in the system
+    ///   (introduced via assign_role or grant_role).
+    /// * `expires_in` — Optional expiry duration (seconds from now). Pass `None` for
+    ///   a permanent grant (no expiry). Pass `Some(n)` to automatically revoke the role
+    ///   after `n` seconds.
+    /// * `fail_fast` — Boolean controlling batch semantics on per-account failure:
+    ///   - `true` — stop processing accounts as soon as any account fails. Earlier successful
+    ///     grants remain persisted; results will include successes followed by zero or more
+    ///     failures depending on when processing stopped.
+    ///   - `false` — continue processing all accounts regardless of per-account failures.
+    ///     Results will reflect success/failure for every account in the original order.
+    ///
+    /// # Return Value
+    ///
+    /// `Result<router_common::BatchResult, AccessError>`
+    ///
+    /// **Error case (Err):** Reserved for fatal authorization failure (require_role_manager):
+    /// - Returns `AccessError::Unauthorized` if `admin` does not hold the role-manager
+    ///   privilege for `role`.
+    ///
+    /// **Success case (Ok(BatchResult)):** Always returned if authorization succeeds, even
+    /// if all per-account grants fail. The `BatchResult` contains:
+    /// - `successes` (Vec<u32>) — indices (0..accounts.len()) of successfully granted accounts.
+    /// - `failures` (Vec<BatchItemError>) — indices and errors for accounts that failed.
+    ///   Each `BatchItemError` contains an index and an `error` field mapping via
+    ///   `access_error_to_batch`. Common per-account failures:
+    ///   - `BatchItemError { index: i, error: AccessError::AlreadyHasRole }` — target
+    ///     already holds an active grant for `role`.
+    ///   - `BatchItemError { index: i, error: AccessError::MaxGrantsPerRoleExceeded }` —
+    ///     role has reached its per-role member limit.
+    ///   - `BatchItemError { index: i, error: AccessError::Blacklisted }` — target
+    ///     is blacklisted and cannot receive roles.
+    ///
+    /// # Behavior
+    ///
+    /// - If `fail_fast` is true and account[2] fails, results include successes for [0,1]
+    ///   and failures for [2]. Accounts [3..] are not processed.
+    /// - Storage writes are not atomic at the batch level; partially committed results persist
+    ///   even if fail_fast stops early or later accounts fail.
+    /// - All per-account errors are mapped via `access_error_to_batch`, converting AccessError
+    ///   variants (Blacklisted, AlreadyHasRole, etc.) into BatchItemError enum variants.
+    ///   Callers must match the error type to interpret the failure reason.
     pub fn grant_role_batch(
         env: Env,
         admin: Address,
@@ -496,13 +551,15 @@ impl RouterAccess {
             .get::<DataKey, u64>(&DataKey::RoleExpiry(role.clone(), from.clone()))
             .ok_or(AccessError::RoleNotFound)?;
 
+        // Check blacklist before any storage mutations (cheaper, has no side effects).
+        if Self::is_blacklisted_internal(&env, &to) {
+            return Err(AccessError::Blacklisted);
+        }
+
         // Remove grant from source (including member counters/lists).
         Self::deactivate_role_grant(&env, &role, &from);
 
         // Grant to destination with same expiry timestamp.
-        if Self::is_blacklisted_internal(&env, &to) {
-            return Err(AccessError::Blacklisted);
-        }
 
         // Track this role in AllRoles if it's the first time we've seen it.
         Self::track_role_in_all_roles(&env, &role)?;
