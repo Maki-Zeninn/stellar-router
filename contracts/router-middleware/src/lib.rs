@@ -246,6 +246,11 @@ impl RouterMiddleware {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::GlobalEnabled, &true);
         env.storage().instance().set(&DataKey::TotalCalls, &0u64);
+        router_common::extend_instance_ttl(
+            &env,
+            router_common::INSTANCE_TTL_THRESHOLD,
+            router_common::INSTANCE_TTL_EXTEND_TO,
+        );
         Ok(())
     }
 
@@ -662,6 +667,11 @@ impl RouterMiddleware {
         env.storage()
             .instance()
             .set(&DataKey::GlobalEnabled, &enabled);
+        router_common::extend_instance_ttl(
+            &env,
+            router_common::INSTANCE_TTL_THRESHOLD,
+            router_common::INSTANCE_TTL_EXTEND_TO,
+        );
         env.events().publish(
             (Symbol::new(&env, router_common::EVENT_MIDDLEWARE_ENABLED),),
             enabled,
@@ -994,6 +1004,11 @@ impl RouterMiddleware {
         env.storage()
             .instance()
             .set(&DataKey::RateLimitStrategy(route.clone()), &strategy);
+        router_common::extend_instance_ttl(
+            &env,
+            router_common::INSTANCE_TTL_THRESHOLD,
+            router_common::INSTANCE_TTL_EXTEND_TO,
+        );
         env.events().publish(
             (Symbol::new(
                 &env,
@@ -1098,6 +1113,11 @@ impl RouterMiddleware {
                 window_secs,
             },
         );
+        router_common::extend_instance_ttl(
+            &env,
+            router_common::INSTANCE_TTL_THRESHOLD,
+            router_common::INSTANCE_TTL_EXTEND_TO,
+        );
         env.events().publish(
             (Symbol::new(
                 &env,
@@ -1123,6 +1143,11 @@ impl RouterMiddleware {
 
         let key = DataKey::CallerRateLimit(route.clone(), target_caller.clone());
         env.storage().instance().remove(&key);
+        router_common::extend_instance_ttl(
+            &env,
+            router_common::INSTANCE_TTL_THRESHOLD,
+            router_common::INSTANCE_TTL_EXTEND_TO,
+        );
         env.events().publish(
             (Symbol::new(
                 &env,
