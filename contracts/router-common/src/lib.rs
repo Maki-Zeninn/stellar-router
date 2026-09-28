@@ -199,6 +199,12 @@ pub const EVENT_BATCH_EXECUTED: &str = "batch_executed";
 /// Standard event topic for max batch size updates
 pub const EVENT_MAX_BATCH_SIZE_UPDATED: &str = "max_batch_size_updated";
 
+/// Standard event topic for max retries updates
+pub const EVENT_MAX_RETRIES_UPDATED: &str = "max_retries_updated";
+
+/// Standard event topic for max history size updates
+pub const EVENT_MAX_HISTORY_SIZE_UPDATED: &str = "max_history_size_updated";
+
 /// Standard event topic for timelock operation queueing
 pub const EVENT_OP_QUEUED: &str = "op_queued";
 

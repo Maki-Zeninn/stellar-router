@@ -459,6 +459,7 @@ impl RouterExecution {
                     ExecutionError::SimulationFailed,
                     0,
                 );
+                Self::append_history(&env, &request.target, &request.function, false, 0);
                 return Err(ExecutionError::SimulationFailed);
             }
             carried_first_result = Some(sim_ok);
@@ -723,7 +724,16 @@ impl RouterExecution {
         if new_max == 0 || new_max > 5 {
             return Err(ExecutionError::InvalidConfig);
         }
+        let old_max: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxRetries)
+            .unwrap_or(0);
         env.storage().instance().set(&DataKey::MaxRetries, &new_max);
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_MAX_RETRIES_UPDATED),),
+            (old_max, new_max),
+        );
         Ok(())
     }
 
@@ -753,6 +763,11 @@ impl RouterExecution {
         if new_max == 0 || new_max > MAX_HISTORY_SIZE_CAP {
             return Err(ExecutionError::InvalidConfig);
         }
+        let old_max: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxHistorySize)
+            .unwrap_or(DEFAULT_MAX_HISTORY_SIZE);
         env.storage()
             .instance()
             .set(&DataKey::MaxHistorySize, &new_max);
@@ -766,6 +781,11 @@ impl RouterExecution {
         env.storage()
             .instance()
             .set(&DataKey::ExecHistory, &history);
+
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_MAX_HISTORY_SIZE_UPDATED),),
+            (old_max, new_max),
+        );
 
         Ok(())
     }
@@ -1231,6 +1251,29 @@ mod tests {
         let (_, admin, client) = setup();
         let result = client.try_set_max_retries(&admin, &6);
         assert_eq!(result, Err(Ok(ExecutionError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_initialize_max_retries_at_max_boundary_succeeds() {
+        // Issue #1310: the upper boundary of the valid range (5) was never
+        // exercised by a passing test. Verify that initialize with max_retries=5
+        // succeeds and that max_retries() subsequently returns 5.
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &5, &0, &100);
+        assert_eq!(client.max_retries(), 5);
+    }
+
+    #[test]
+    fn test_set_max_retries_at_max_boundary_succeeds() {
+        // Issue #1310: verify that set_max_retries with new_max=5 (the maximum
+        // allowed value) succeeds and that max_retries() subsequently returns 5.
+        let (_, admin, client) = setup();
+        client.set_max_retries(&admin, &5);
+        assert_eq!(client.max_retries(), 5);
     }
 
     #[test]
