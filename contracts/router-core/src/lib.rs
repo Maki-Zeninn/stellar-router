@@ -860,11 +860,16 @@ impl RouterCore {
     ///
     /// # Errors
     /// * [`RouterError::RouterPaused`] ΓÇö if the entire router is paused.
+    /// * [`RouterError::NotInitialized`] ΓÇö if the contract has not been initialized.
     /// * [`RouterError::RouteNotFound`] ΓÇö if no route with `name` exists.
     /// * [`RouterError::RoutePaused`] ΓÇö if the specific route is paused.
     /// * [`RouterError::RouteExpired`] ΓÇö if the route's TTL has lapsed.
     pub fn resolve(env: Env, name: String) -> Result<Address, RouterError> {
         router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(RouterError::NotInitialized);
+        }
+
         let paused: bool = env
             .storage()
             .instance()
@@ -1313,6 +1318,16 @@ impl RouterCore {
         let mut routes = Vec::new(&env);
 
         for name in Self::get_route_names(&env).iter() {
+            let expired = env
+                .storage()
+                .instance()
+                .get::<DataKey, RouteEntry>(&DataKey::Route(name.clone()))
+                .map(|entry| is_route_expired(&env, &entry))
+                .unwrap_or(false);
+            if expired {
+                continue;
+            }
+
             if let Some(metadata) = env
                 .storage()
                 .instance()
