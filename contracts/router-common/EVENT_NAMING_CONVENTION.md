@@ -42,8 +42,8 @@ All smart contracts in the stellar-router suite follow a consistent event naming
 - `role_granted` — (role, target, expiry_timestamp)
 - `role_revoked` — (role, target)
 - `role_parent_set` — (role, parent_role)
-- `role_parent_removed` — (role, parent_role)
 - `role_admin_set` — (role, admin)
+- `role_limits_set` — (max_roles, max_grants_per_role)
 - `address_blacklisted` — (address)
 - `address_unblacklisted` — (address)
 - `role_expired` — (role, target)
@@ -60,8 +60,10 @@ All smart contracts in the stellar-router suite follow a consistent event naming
 
 ### router-multicall
 - `call_result` — (caller, target, function, success)
+- `call_failed` — (caller, target, function, error)
 - `batch_executed` — (summary data)
 - `max_batch_size_updated` — (old_size, new_size)
+- `initialized` — (admin, max_batch_size)
 - `admin_transferred` — (old_admin, new_admin)
 
 ### router-quote
@@ -87,5 +89,9 @@ All smart contracts in the stellar-router suite follow a consistent event naming
 
 ### router-execution
 - `execution_result` — (target, function, success, attempts)
+- `execution_error` — (target, function, error)
+- `execution_retry` — (target, function, retry_count)
 - `fee_estimated` — (total_fee, surge_pricing)
 - `simulation_result` — (target, function, success)
+- `backoff_config_updated` — (new_backoff_config)
+- `admin_transferred` — (old_admin, new_admin)
