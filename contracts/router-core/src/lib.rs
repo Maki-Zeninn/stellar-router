@@ -30,6 +30,8 @@
 //! - `alias_added` ΓÇö Route alias added (existing_name, alias_name)
 //! - `alias_removed` ΓÇö Route alias removed (alias_name)
 //! - `alias_resolved` ΓÇö Route alias resolved (alias_name, selected_route_name)
+//! - `route_scored` ΓÇö Route score updated (route_name, score)
+//! - `best_route_selected` ΓÇö Best route selected (route_name, best_score)
 //! - `route_scored` ΓÇö Route score updated (route_name, liquidity_score, fee_bps, reliability_score)
 //! - `best_route_selected` ΓÇö Best route selected (route_name)
 //! - `admin_transferred` ΓÇö Admin transferred (old_admin, new_admin)
@@ -124,6 +126,12 @@ pub struct RouteScoreInput {
 
 /// Maximum upper bound allowed for liquidity and reliability scores.
 pub const MAX_SCORE_VALUE: u32 = 100;
+
+/// Maximum allowed multiplier for each configurable scoring weight.
+///
+/// Keeping weights bounded prevents the composite-score calculation from
+/// overflowing `i64` when multiplied by the route-score upper bound.
+pub const MAX_SCORING_WEIGHT: i64 = 1_000;
 
 /// Scoring attributes for a route used in path selection.
 ///
@@ -279,6 +287,7 @@ impl RouterCore {
     ///
     /// # Errors
     /// * [`RouterError::AlreadyInitialized`] ΓÇö if the contract has already been initialized.
+    /// * [`RouterError::InvalidRouteName`] ΓÇö if `max_routes` is `Some(0)`.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -288,6 +297,9 @@ impl RouterCore {
         router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(RouterError::AlreadyInitialized);
+        }
+        if max_routes == Some(0) {
+            return Err(RouterError::InvalidRouteName);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
@@ -1864,8 +1876,8 @@ impl RouterCore {
     /// # Errors
     /// * [`RouterError::Unauthorized`]          — if `caller` is not the admin.
     /// * [`RouterError::NotInitialized`]        — if the contract is not initialized.
-    /// * [`RouterError::InvalidScoringWeights`] — if `fee_divisor` is ≤ 0 or any
-    ///   weight is negative.
+    /// * [`RouterError::InvalidScoringWeights`] — if `fee_divisor` is ≤ 0, any
+    ///   weight is negative, or either weight exceeds [`MAX_SCORING_WEIGHT`].
     pub fn set_scoring_weights(
         env: Env,
         caller: Address,
@@ -1877,7 +1889,9 @@ impl RouterCore {
 
         if weights.fee_divisor <= 0
             || weights.liquidity_weight < 0
+            || weights.liquidity_weight > MAX_SCORING_WEIGHT
             || weights.reliability_weight < 0
+            || weights.reliability_weight > MAX_SCORING_WEIGHT
         {
             return Err(RouterError::InvalidScoringWeights);
         }
@@ -3292,6 +3306,17 @@ mod tests {
     }
 
     #[test]
+    fn test_initialize_zero_max_routes_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterCore);
+        let client = RouterCoreClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let result = client.try_initialize(&admin, &Some(0));
+        assert_eq!(result, Err(Ok(RouterError::InvalidRouteName)));
+    }
+
+    #[test]
     fn test_update_route_while_paused_succeeds() {
         let (env, admin, client) = setup();
         let name = String::from_str(&env, "oracle");
@@ -4281,6 +4306,39 @@ mod tests {
     }
 
     #[test]
+    fn test_scoring_weights_reject_values_above_maximum() {
+        let (env, admin, client) = setup();
+        let too_large = ScoringWeights {
+            liquidity_weight: MAX_SCORING_WEIGHT + 1,
+            reliability_weight: 1,
+            fee_divisor: 10,
+        };
+        assert_eq!(
+            client.try_set_scoring_weights(&admin, &too_large),
+            Err(Ok(RouterError::InvalidScoringWeights))
+        );
+
+        let too_large = ScoringWeights {
+            liquidity_weight: 1,
+            reliability_weight: MAX_SCORING_WEIGHT + 1,
+            fee_divisor: 10,
+        };
+        assert_eq!(
+            client.try_set_scoring_weights(&admin, &too_large),
+            Err(Ok(RouterError::InvalidScoringWeights))
+        );
+
+        let at_max = ScoringWeights {
+            liquidity_weight: MAX_SCORING_WEIGHT,
+            reliability_weight: MAX_SCORING_WEIGHT,
+            fee_divisor: 10,
+        };
+        client.set_scoring_weights(&admin, &at_max);
+        assert_eq!(client.get_scoring_weights(), at_max);
+        let _ = env;
+    }
+
+    #[test]
     fn test_set_route_score_nonexistent_fails() {
         let (env, admin, client) = setup();
         let name = String::from_str(&env, "ghost");
@@ -5082,6 +5140,19 @@ mod tests {
     }
 
     #[test]
+    fn test_register_routes_batch_empty_input() {
+        let (env, admin, client) = setup();
+        let routes: Vec<RouteRegisterInput> = Vec::new(&env);
+
+        for fail_fast in [false, true] {
+            let result = client.register_routes_batch(&admin, &routes, &fail_fast);
+            assert!(result.successes.is_empty());
+            assert!(result.failures.is_empty());
+        }
+        assert_eq!(client.route_count(), 0);
+    }
+
+    #[test]
     fn test_register_routes_batch_partial_errors() {
         let (env, admin, client) = setup();
         let name = String::from_str(&env, "oracle");
@@ -5158,6 +5229,28 @@ mod tests {
         );
         let resolve_result = client.try_resolve(&name);
         assert_eq!(resolve_result, Err(Ok(RouterError::RouteNotFound)));
+    }
+
+    #[test]
+    fn test_remove_routes_batch_empty_input() {
+        let (env, admin, client) = setup();
+        let names: Vec<String> = Vec::new(&env);
+
+        for fail_fast in [false, true] {
+            let result = client.remove_routes_batch(&admin, &names, &fail_fast);
+            assert!(result.successes.is_empty());
+            assert!(result.failures.is_empty());
+        }
+        assert_eq!(client.route_count(), 0);
+    }
+
+    #[test]
+    fn test_set_route_scores_batch_empty_input() {
+        let (env, admin, client) = setup();
+        let scores: Vec<RouteScoreInput> = Vec::new(&env);
+
+        client.set_route_scores_batch(&admin, &scores);
+        assert_eq!(client.route_count(), 0);
     }
 
     #[test]
