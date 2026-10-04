@@ -10,7 +10,7 @@ RUN apt-get update && \
 WORKDIR /build
 
 # Copy dependency files first for better layer caching
-COPY metrics/Cargo.toml ./
+COPY metrics/Cargo.toml metrics/Cargo.lock ./
 
 # Create a dummy main.rs to cache dependencies
 RUN mkdir src && \

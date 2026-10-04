@@ -1051,11 +1051,6 @@ impl RouterTimelock {
             // recursing further.
             return true;
         }
-        let deps: Vec<Bytes> = env
-            .storage()
-            .instance()
-            .get(&DataKey::Deps(op_id.clone()))
-            .unwrap_or_else(|| Vec::new(env));
         let now = env.ledger().timestamp();
         for dep_id in Self::load_deps(env, op_id).iter() {
             match env

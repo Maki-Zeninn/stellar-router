@@ -1949,13 +1949,13 @@ mod tests {
             "batch_executed event must be emitted after execute_batch"
         );
     }
-}
 
     // ── Issue #1342: NotInitialized test coverage ──────────────────────────────
 
     #[test]
     fn test_execute_batch_returns_not_initialized_when_not_initialized() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, RouterMulticall);
         let client = RouterMulticallClient::new(&env, &contract_id);
         let caller = Address::generate(&env);
@@ -1977,6 +1977,7 @@ mod tests {
     #[test]
     fn test_set_max_batch_size_returns_not_initialized_when_not_initialized() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, RouterMulticall);
         let client = RouterMulticallClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
@@ -1988,6 +1989,7 @@ mod tests {
     #[test]
     fn test_transfer_admin_returns_not_initialized_when_not_initialized() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, RouterMulticall);
         let client = RouterMulticallClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
@@ -2006,3 +2008,4 @@ mod tests {
         let result = client.try_total_batches();
         assert_eq!(result, Err(Ok(MulticallError::NotInitialized)));
     }
+}

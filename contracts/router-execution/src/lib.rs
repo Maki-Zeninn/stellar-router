@@ -345,8 +345,16 @@ impl RouterExecution {
             .instance()
             .set(&DataKey::BackoffMultiplier, &backoff_multiplier);
         env.events().publish(
-            (Symbol::new(&env, router_common::EVENT_BACKOFF_CONFIG_UPDATED),),
-            (old_base_ms, old_multiplier, backoff_base_ms, backoff_multiplier),
+            (Symbol::new(
+                &env,
+                router_common::EVENT_BACKOFF_CONFIG_UPDATED,
+            ),),
+            (
+                old_base_ms,
+                old_multiplier,
+                backoff_base_ms,
+                backoff_multiplier,
+            ),
         );
         Ok(())
     }
@@ -783,7 +791,10 @@ impl RouterExecution {
             .set(&DataKey::ExecHistory, &history);
 
         env.events().publish(
-            (Symbol::new(&env, router_common::EVENT_MAX_HISTORY_SIZE_UPDATED),),
+            (Symbol::new(
+                &env,
+                router_common::EVENT_MAX_HISTORY_SIZE_UPDATED,
+            ),),
             (old_max, new_max),
         );
 
@@ -1209,7 +1220,7 @@ mod tests {
         let estimate = client.estimate_fee(&target, &function, &1, &5000);
         assert_eq!(estimate.resource_fee, 100); // MIN_RESOURCE_FEE_STROOPS
         assert_eq!(estimate.base_fee, 100); // BASE_FEE_STROOPS
-        // No surge (load_bps=5000 < 8000), so total = (100 + 100) * 1 = 200.
+                                            // No surge (load_bps=5000 < 8000), so total = (100 + 100) * 1 = 200.
         assert_eq!(estimate.total_fee, 200);
         assert!(!estimate.high_load);
     }
@@ -2252,8 +2263,8 @@ mod tests {
     //   following FlakyTarget's pattern) and that result.simulated==true.
     //
     // Test 2: simulate_first=true against a non-existent contract — asserts
-    //   Err(ExecutionError::SimulationFailed) is returned and that TotalErrors
-    //   is incremented (via stats()).
+    //   Err(ExecutionError::SimulationFailed) is returned and that no
+    //   counters persist (the failed invocation's storage writes roll back).
 
     // A static counter to track the total number of times SimulatedTarget
     // is invoked (simulation + real invocation combined). Rolled back storage
@@ -2338,10 +2349,11 @@ mod tests {
         let result = client.try_execute(&caller, &request);
         assert_eq!(result, Err(Ok(ExecutionError::SimulationFailed)));
 
-        // TotalErrors must have been incremented by log_error inside the
-        // SimulationFailed branch.
+        // log_error does increment TotalErrors inside the SimulationFailed
+        // branch, but returning Err rolls back the invocation's storage writes,
+        // so nothing persists.
         let (total_execs, total_errors) = client.stats();
         assert_eq!(total_execs, 0);
-        assert_eq!(total_errors, 1);
+        assert_eq!(total_errors, 0);
     }
 }

@@ -4,8 +4,8 @@
 router-core 15 256
 router-registry 5 512
 router-access 11 128
-router-middleware 11 256
-router-timelock 6 512
+router-middleware 12 256
+router-timelock 7 512
 router-multicall 6 128
 router-common 0 128
 router-execution 8 256

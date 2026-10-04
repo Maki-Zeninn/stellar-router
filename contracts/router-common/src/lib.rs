@@ -277,7 +277,7 @@ pub const EVENT_OPS_CLEANED: &str = "ops_cleaned";
 
 // ── Batch types ───────────────────────────────────────────────────────────────
 
-use soroban_sdk::{contracttype, Address, Env, IntoVal, String, Symbol, Val, Vec};
+use soroban_sdk::{contracttype, Address, Env, String, Symbol, Vec};
 
 /// Per-call result payload used by multicall batch operations.
 #[contracttype]
@@ -493,7 +493,7 @@ mod tests {
     use soroban_sdk::{
         contract, contracterror,
         testutils::{Address as _, Events as _},
-        Env,
+        Env, IntoVal,
     };
 
     #[test]
@@ -746,7 +746,8 @@ mod tests {
 
             crate::admin_transfer_complete!(&env, &old_admin, &new_admin, &CommonDataKey::Admin);
 
-            assert_eq!(get_admin(&env, &CommonDataKey::Admin), Some(new_admin));
+            let stored: Option<Address> = env.storage().instance().get(&CommonDataKey::Admin);
+            assert_eq!(stored, Some(new_admin));
 
             let event = env.events().all().last().unwrap().clone();
             assert_eq!(event.0, id);
@@ -825,4 +826,3 @@ pub enum CommonDataKey {
 pub fn extend_instance_ttl(env: &Env, threshold: u32, extend_to: u32) {
     env.storage().instance().extend_ttl(threshold, extend_to);
 }
-
