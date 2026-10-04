@@ -762,7 +762,7 @@ mod tests {
     use alloc::format;
     use soroban_sdk::{
         testutils::{Address as _, Events},
-        vec, Env, IntoVal, String, Symbol,
+        vec, Env, FromVal, IntoVal, String, Symbol,
     };
 
     fn setup() -> (Env, Address, RouterQuoteClient<'static>) {
@@ -1703,7 +1703,6 @@ mod tests {
         let result = client.try_set_route_fee_tiers(&admin, &one_too_many, &tiers);
         assert_eq!(result, Err(Ok(QuoteError::TooManyRoutes)));
     }
-}
 
     // ── Issue #1343: MAX_FEE_TIERS_PER_ROUTE coverage ──────────────────────────
 
@@ -1817,13 +1816,16 @@ mod tests {
 
         // Verify event emission
         let events = env.events().all();
-        let (_, topics, data) = events
+        let (_, _, data) = events
             .iter()
             .rev()
             .find(|(_, topics, _)| {
                 topics
                     .get(0)
-                    .map(|v| Symbol::from_val(&env, &v) == Symbol::new(&env, router_common::EVENT_ROUTE_FEE_UNSET))
+                    .map(|v| {
+                        Symbol::from_val(&env, &v)
+                            == Symbol::new(&env, router_common::EVENT_ROUTE_FEE_UNSET)
+                    })
                     .unwrap_or(false)
             })
             .expect("route_fee_unset event not found");
@@ -1831,3 +1833,4 @@ mod tests {
         let emitted_route: String = data.into_val(&env);
         assert_eq!(emitted_route, route);
     }
+}

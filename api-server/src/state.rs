@@ -73,6 +73,9 @@ impl AppState {
 
     /// Returns true if a new connection was accepted, false if the limit is reached.
     pub fn try_acquire_ws_connection(&self) -> bool {
+        // `fetch_update` is deprecated in favour of `try_update` on newer
+        // toolchains, but the Docker images still build with Rust 1.88.
+        #[allow(deprecated)]
         self.ws_connection_count
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
                 if current < MAX_WS_CONNECTIONS {

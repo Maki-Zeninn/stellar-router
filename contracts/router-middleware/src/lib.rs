@@ -146,6 +146,14 @@ const RATE_LIMIT_STALE_WINDOW_MULTIPLIER: u64 = 4;
 /// scans of the map to avoid redundant work on consecutive calls.
 const RATE_LIMIT_PRUNE_INTERVAL: u64 = 3600;
 
+/// Minimum remaining TTL (in ledgers) before instance storage is extended.
+/// ~30 days at 5 s/ledger.
+const INSTANCE_TTL_THRESHOLD: u32 = 17280 * 30;
+
+/// Target TTL (in ledgers) applied to instance storage on state mutations.
+/// ~60 days at 5 s/ledger.
+const INSTANCE_TTL_EXTEND_TO: u32 = 17280 * 60;
+
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct CallLogEntry {
@@ -246,11 +254,7 @@ impl RouterMiddleware {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::GlobalEnabled, &true);
         env.storage().instance().set(&DataKey::TotalCalls, &0u64);
-        router_common::extend_instance_ttl(
-            &env,
-            router_common::INSTANCE_TTL_THRESHOLD,
-            router_common::INSTANCE_TTL_EXTEND_TO,
-        );
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         Ok(())
     }
 
@@ -493,8 +497,10 @@ impl RouterMiddleware {
                 .as_ref()
                 .filter(|c| c.max_calls > 0)
                 .cloned();
+            // A {0, 0} override exempts the caller from the route-level limit too.
+            let caller_unlimited = caller_override.is_some() && active_override.is_none();
 
-            if config.max_calls_per_window > 0 || active_override.is_some() {
+            if !caller_unlimited && (config.max_calls_per_window > 0 || active_override.is_some()) {
                 // Resolve effective limit: per-caller override takes precedence
                 // over the route-level default when present.
                 let (effective_limit, effective_window) = active_override
@@ -667,11 +673,7 @@ impl RouterMiddleware {
         env.storage()
             .instance()
             .set(&DataKey::GlobalEnabled, &enabled);
-        router_common::extend_instance_ttl(
-            &env,
-            router_common::INSTANCE_TTL_THRESHOLD,
-            router_common::INSTANCE_TTL_EXTEND_TO,
-        );
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         env.events().publish(
             (Symbol::new(&env, router_common::EVENT_MIDDLEWARE_ENABLED),),
             enabled,
@@ -876,12 +878,8 @@ impl RouterMiddleware {
                 // Resolve the effective window for this specific caller so
                 // callers with a per-caller override are checked against their
                 // own window, not the route's base window. (Issue #1317)
-                let effective_window = rate_limit::resolve_effective_window(
-                    &env,
-                    &route,
-                    &caller,
-                    cfg.window_seconds,
-                );
+                let effective_window =
+                    rate_limit::resolve_effective_window(&env, &route, &caller, cfg.window_seconds);
                 let window_elapsed = now >= state.window_start + effective_window;
                 if window_elapsed {
                     (0, now)
@@ -972,8 +970,7 @@ impl RouterMiddleware {
                 .get::<DataKey, RouteConfig>(&DataKey::RouteConfig(route))
             {
                 let recovers = config.recovery_window_seconds > 0
-                    && env.ledger().timestamp()
-                        >= cb.opened_at + config.recovery_window_seconds;
+                    && env.ledger().timestamp() >= cb.opened_at + config.recovery_window_seconds;
                 if recovers {
                     cb.is_open = false;
                     cb.is_half_open = true;
@@ -1004,11 +1001,7 @@ impl RouterMiddleware {
         env.storage()
             .instance()
             .set(&DataKey::RateLimitStrategy(route.clone()), &strategy);
-        router_common::extend_instance_ttl(
-            &env,
-            router_common::INSTANCE_TTL_THRESHOLD,
-            router_common::INSTANCE_TTL_EXTEND_TO,
-        );
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         env.events().publish(
             (Symbol::new(
                 &env,
@@ -1113,11 +1106,7 @@ impl RouterMiddleware {
                 window_secs,
             },
         );
-        router_common::extend_instance_ttl(
-            &env,
-            router_common::INSTANCE_TTL_THRESHOLD,
-            router_common::INSTANCE_TTL_EXTEND_TO,
-        );
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         env.events().publish(
             (Symbol::new(
                 &env,
@@ -1143,11 +1132,7 @@ impl RouterMiddleware {
 
         let key = DataKey::CallerRateLimit(route.clone(), target_caller.clone());
         env.storage().instance().remove(&key);
-        router_common::extend_instance_ttl(
-            &env,
-            router_common::INSTANCE_TTL_THRESHOLD,
-            router_common::INSTANCE_TTL_EXTEND_TO,
-        );
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         env.events().publish(
             (Symbol::new(
                 &env,
@@ -1474,6 +1459,7 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         // Drop mock_all_auths — from here auth is real.
+        env.set_auths(&[]);
         // A fresh Env without mocking will panic/trap on require_auth if the
         // invoker didn't sign.  We verify via try_ that it traps (Err).
         // In Soroban SDK tests an unauthorized require_auth panics the
@@ -1498,6 +1484,8 @@ mod tests {
         env.mock_all_auths();
         let admin = Address::generate(&env);
         client.initialize(&admin);
+        // Drop mock_all_auths — from here auth is real.
+        env.set_auths(&[]);
         let victim = Address::generate(&env);
         let route = String::from_str(&env, "oracle/get_price");
         let result = client.try_pre_call(&victim, &route);
@@ -1893,7 +1881,8 @@ mod tests {
         assert!(!state.is_half_open);
     }
 
-
+    #[test]
+    fn test_call_log_never_exceeds_retention() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
         client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &3, &0);
@@ -1998,7 +1987,10 @@ mod tests {
         let t0 = env.ledger().timestamp();
 
         let mid_window = client.rate_limit_state(&route, &caller).unwrap();
-        assert_eq!(mid_window.calls_in_window, 3, "3 calls inside the 10 s override window");
+        assert_eq!(
+            mid_window.calls_in_window, 3,
+            "3 calls inside the 10 s override window"
+        );
 
         // Advance 15 s — past the 10 s override window but well before the 60 s route window.
         env.ledger().set_timestamp(t0 + 15);
@@ -3131,8 +3123,6 @@ mod tests {
             Err(Ok(MiddlewareError::RateLimitExceeded))
         );
     }
-
-
 
     /// pre_call on a route whose `Executing` guard is already set (i.e. a call
     /// is in flight on that route) must return Reentrancy. Soroban's test env
