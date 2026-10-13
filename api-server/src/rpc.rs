@@ -242,8 +242,16 @@ impl SorobanRpcClient {
     }
 
     fn parse_route_entry_from_rpc(result: &Value) -> Result<Option<RouteEntryResponse>> {
-        if result.get("error").is_some() {
-            return Ok(None);
+        // A `result.error` indicates the contract simulation itself failed
+        // (contract panic, malformed argument, authorization failure, etc.).
+        // Surface it as an `Err` so `handlers::get_route` returns HTTP 500 —
+        // `Ok(None)` is reserved for the genuine "route not found" case
+        // (empty `results` / missing `address`), which `handlers::get_route`
+        // maps to HTTP 404. Conflating the two misreports transient RPC
+        // failures as 404s and makes the failure mode undebuggable from the
+        // client. See issue #1161.
+        if let Some(err) = result.get("error") {
+            return Err(anyhow!("contract simulation error: {}", err));
         }
 
         let results = match result.get("results").and_then(|r| r.as_array()) {
