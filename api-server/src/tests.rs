@@ -876,3 +876,144 @@ fn test_build_cors_layer_invalid_origin_does_not_panic() {
     // Must complete without panicking; the invalid entry is dropped + warned.
     let _ = build_cors_layer(&origins);
 }
+
+// ---------------------------------------------------------------------------
+// Regression test for #1162: `SimulateTransactionResult.events` was parsed
+// from the RPC response but always discarded before reaching the API client.
+// The fix threads `result.events` through `FeeBreakdown` -> `SimulationDetail`
+// so callers can see the diagnostic / contract events the RPC reported.
+//
+// Two companion tests:
+//
+// - One that exercises the live-RPC path via a small in-process axum mock
+//   that returns events alongside the regular fields, and asserts the API
+//   surfaces them.
+//
+// - One that exercises the heuristic-fallback path (RPC unreachable) and
+//   asserts the events array is present but empty.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_simulate_surfaces_rpc_events_in_simulation_detail() {
+    use crate::rate_limit::{RateLimitConfig, RateLimiter};
+    use crate::state::AppState;
+    use axum::{routing::post, Json as AxJson, Router};
+    use std::net::SocketAddr;
+    use tokio::net::TcpListener;
+
+    // Simulated RPC reply: a successful simulation that emitted a couple
+    // of contract events (e.g. a Transfer event) the RPC actually returned.
+    let rpc_body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "minResourceFee": "5000",
+            "events": [
+                {
+                    "eventType": "contract",
+                    "contractId": VALID_CONTRACT_ID,
+                    "topics": ["transfer", "from", "to"],
+                    "data": "AAA="
+                },
+                {
+                    "eventType": "diagnostic",
+                    "message": "fee bumped by surge multiplier"
+                }
+            ]
+        }
+    });
+
+    let app = Router::new().route(
+        "/",
+        post(move || {
+            let body = rpc_body.clone();
+            async move { AxJson(body) }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .await
+        .expect("bind mock RPC");
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let rpc_url = format!("http://{}", addr);
+
+    let rate_limiter = RateLimiter::new(RateLimitConfig::default());
+    let state = AppState::new(
+        rpc_url,
+        "".to_string(),
+        "".to_string(),
+        rate_limiter,
+        10,
+    );
+
+    let app = Router::new()
+        .route("/simulate", post(handlers::simulate))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::rate_limit::rate_limit_middleware,
+        ))
+        .with_state(state);
+
+    let body = json!({ "target": VALID_CONTRACT_ID, "function": "transfer" });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/simulate")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let parsed: SimulateResponse = serde_json::from_slice(&bytes).unwrap();
+
+    // The two RPC events should now be present in the response.
+    assert_eq!(
+        parsed.simulation.events.len(),
+        2,
+        "RPC events must be surfaced, not silently discarded"
+    );
+    assert_eq!(parsed.simulation.events[0]["eventType"], "contract");
+    assert_eq!(parsed.simulation.events[0]["topics"][1], "from");
+    assert_eq!(parsed.simulation.events[1]["eventType"], "diagnostic");
+    // Fee math must still be correct: 5000 + BASE_FEE (100) * NORMAL / 100
+    // — we just check the field is populated, not the exact number.
+    assert!(parsed.estimated_fees.resource_fee > 0);
+}
+
+#[tokio::test]
+async fn test_simulate_events_empty_on_heuristic_fallback() {
+    // When the RPC is unreachable, `simulate` falls back to a heuristic
+    // estimate and `events` must be present in the response (not absent)
+    // but empty — the heuristic path has no events to surface.
+    let app = test_app();
+    let body = json!({ "target": VALID_CONTRACT_ID, "function": "transfer" });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/simulate")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let parsed: SimulateResponse = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        parsed.simulation.events.is_empty(),
+        "heuristic fallback must produce an empty events array"
+    );
+}

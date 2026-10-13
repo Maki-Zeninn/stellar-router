@@ -109,6 +109,10 @@ pub async fn simulate(
             target: req.target,
             function: req.function,
             would_succeed: breakdown.would_succeed,
+            // Surface the diagnostic / contract events the RPC reported,
+            // so callers can see *why* a simulation reported what it did.
+            // Empty on the heuristic fallback path (RPC unreachable).
+            events: breakdown.events,
         },
         message: if breakdown.would_succeed {
             "Simulation successful".to_string()

@@ -76,6 +76,12 @@ pub struct FeeBreakdown {
     /// `false` when the heuristic fallback was used (RPC unreachable).
     #[allow(dead_code)]
     pub simulated: bool,
+    /// Diagnostic / contract events reported by `simulateTransaction`. Carried
+    /// through to `SimulationDetail` so callers (especially on
+    /// `success: false`) can see *why* the simulation reported what it did.
+    /// Empty when the RPC was unreachable (heuristic fallback) or when the
+    /// RPC returned no events.
+    pub events: Vec<serde_json::Value>,
 }
 
 impl SorobanRpcClient {
@@ -155,6 +161,10 @@ impl SorobanRpcClient {
                     would_succeed,
                     fee_estimated,
                     simulated: true,
+                    // Pass through the diagnostic/contract events reported
+                    // by the RPC so callers can see *why* a simulation failed
+                    // or which contract events were emitted. See #1162.
+                    events: result.events,
                 })
             }
             Err(_) => Ok(Self::heuristic_estimate(amount, network_load_bps)),
@@ -450,6 +460,8 @@ impl SorobanRpcClient {
             // Fees are a heuristic guess, not an RPC-derived measurement.
             fee_estimated: false,
             simulated: false,
+            // Heuristic fallback never has events to surface.
+            events: Vec::new(),
         }
     }
 }
