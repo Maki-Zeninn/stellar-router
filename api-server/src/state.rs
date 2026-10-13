@@ -49,6 +49,26 @@ impl AppState {
     }
 
     #[allow(dead_code)]
+    /// Broadcast a `TransactionStatusEvent` to every WebSocket subscriber
+    /// that has registered interest in the event's `tx_id`.
+    ///
+    /// **Status: stub (no production caller).** A repo-wide grep for
+    /// `broadcast_status` shows this method is invoked only from
+    /// `api-server/src/tests.rs` — none of `handlers.rs`, `websocket.rs`,
+    /// `rpc.rs`, or `main.rs` ever construct or send a
+    /// `TransactionStatusEvent`. As a result, the WebSocket subscribe /
+    /// unsubscribe machinery (`/ws`, `SubscribeMessage`,
+    /// `MAX_SUBSCRIPTIONS_PER_CONNECTION`, `tx_subscribers`,
+    /// `tx_status_tx`) is fully wired up and well tested, but in
+    /// production **a real client connecting to `/ws` and subscribing
+    /// to a `tx_id` will never receive a `status_update` message** —
+    /// there is simply no producer anywhere in the running server.
+    ///
+    /// Wiring up a real producer is out of scope for this small change;
+    /// in the meantime, this doc comment makes the stub state explicit
+    /// so a future reader of `websocket.rs` in isolation is not misled
+    /// into thinking the broadcast pipeline is working. See issue #1163.
+    #[allow(dead_code)]
     pub fn broadcast_status(&self, event: TransactionStatusEvent) {
         let _ = self.tx_status_tx.send(event);
     }
