@@ -20,6 +20,19 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 
 /// WebSocket upgrade handler
+///
+/// OpenAPI: documented as a `GET /ws` (utoipa does not represent
+/// protocol upgrades natively, but the path is real and clients
+/// need to know it exists; see issue #1164).
+#[utoipa::path(
+    get,
+    path = "/ws",
+    tag = "simulation",
+    responses(
+        (status = 101, description = "WebSocket upgrade successful"),
+        (status = 429, description = "WebSocket connection limit reached"),
+    )
+)]
 pub async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
     if !state.try_acquire_ws_connection() {
         return ws
