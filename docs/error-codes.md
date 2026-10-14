@@ -121,7 +121,8 @@ Uses range-based codes to distinguish error categories.
 | 6    | `MiddlewareDisabled` |
 | 7    | `InvalidConfig` |
 | 8    | `CircuitOpen` |
-| **9** | ← next available |
+| 9    | `Reentrancy` |
+| **10** | ← next available |
 
 ---
 
