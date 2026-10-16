@@ -141,7 +141,8 @@ Uses range-based codes to distinguish error categories.
 | 10   | `AllVersionsDeprecated` |
 | 11   | `ContractUnreachable` |
 | 12   | `InvalidHealthFn` |
-| **13** | ← next available |
+| 13   | `BatchTooLarge` |
+| **14** | ← next available |
 
 ---
 
