@@ -1288,6 +1288,48 @@ impl RouterMiddleware {
             count: 0,
         }
     }
+
+    // ── Issue #1328: get_-prefixed aliases for view functions ─────────────────
+    //
+    // Most read-only functions in this module already use the `get_` prefix
+    // (get_call_log, get_call_log_filtered, get_call_log_length, etc.). The
+    // following five public view functions were inconsistent — they are exposed
+    // under their original names for backward compatibility and also under a
+    // `get_`-prefixed name so callers can use the consistent naming convention.
+
+    /// Returns whether the middleware is currently globally enabled.
+    /// Alias for `is_global_enabled` using the standard `get_` prefix convention.
+    pub fn get_global_enabled(env: Env) -> bool {
+        Self::is_global_enabled(env)
+    }
+
+    /// Get total calls processed.
+    /// Alias for `total_calls` using the standard `get_` prefix convention.
+    pub fn get_total_calls(env: Env) -> u64 {
+        Self::total_calls(env)
+    }
+
+    /// Returns the RouteConfig for a specific route.
+    /// Alias for `route_config` using the standard `get_` prefix convention.
+    pub fn get_route_config(env: Env, route: String) -> Option<RouteConfig> {
+        Self::route_config(env, route)
+    }
+
+    /// Get the current circuit breaker state for a route.
+    /// Alias for `circuit_breaker_state` using the standard `get_` prefix convention.
+    pub fn get_circuit_breaker_state(env: Env, route: String) -> Option<CircuitBreakerState> {
+        Self::circuit_breaker_state(env, route)
+    }
+
+    /// Get rate limit state for a caller on a specific route.
+    /// Alias for `rate_limit_state` using the standard `get_` prefix convention.
+    pub fn get_rate_limit_state_for_caller(
+        env: Env,
+        route: String,
+        caller: Address,
+    ) -> Option<RateLimitState> {
+        Self::rate_limit_state(env, route, caller)
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

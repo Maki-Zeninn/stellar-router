@@ -476,23 +476,10 @@ macro_rules! require_admin_simple {
     };
 }
 
-/// Returns `true` if `s` is empty or consists entirely of ASCII whitespace
-/// (space 0x20, tab 0x09, newline 0x0A, vertical tab 0x0B, form feed 0x0C,
-/// carriage return 0x0D).
-///
-/// # Example
-///
-/// ```
-/// use router_common::is_whitespace_only;
-/// assert!(is_whitespace_only(""));
-/// assert!(is_whitespace_only("   "));
-/// assert!(is_whitespace_only("\t\n\r"));
-/// assert!(!is_whitespace_only("oracle"));
-/// assert!(!is_whitespace_only(" oracle "));
-/// ```
-pub fn is_whitespace_only(s: &str) -> bool {
-    s.is_empty() || s.bytes().all(|b| matches!(b, 9 | 10 | 11 | 12 | 13 | 32))
-}
+// Issue #1275: is_whitespace_only had zero callers anywhere in the workspace.
+// The function has been removed from the public API to avoid maintaining dead
+// code. It is preserved as a private helper inside the test module below so
+// its existing unit tests continue to compile and pass.
 
 #[cfg(test)]
 mod tests {

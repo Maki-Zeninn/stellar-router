@@ -2,8 +2,8 @@
 
 //! # router-multicall
 //!
-//! Batch multiple cross-contract read calls in a single transaction.
-//! Reduces round-trips when a client needs data from multiple contracts.
+//! Batch multiple cross-contract calls in a single transaction.
+//! Reduces round-trips when a caller needs to invoke multiple contracts at once.
 //!
 //! ## Features
 //! - Aggregate up to N calls in one transaction
@@ -11,13 +11,17 @@
 //!   When `required=true`, failure of that call aborts the entire batch.
 //!   When `required=false`, the call's failure is recorded but the batch continues.
 //! - Call result storage for async inspection
-//! - `simulate` — dry-run mode: execute all calls without incrementing the batch counter
+//! - `simulate` — counter-skip mode: execute all calls normally but skip incrementing the
+//!   batch counter and skip persisting results. Note: cross-contract calls still execute and
+//!   their state changes are permanently committed. Soroban does not support true dry-run
+//!   simulation at the contract level.
 //! - `fail_fast` — abort the batch on the first optional-call failure
 //! - `max_total_gas` — pre-flight cumulative instruction-budget cap to reject over-budget batches before execution
 //!
 //! ## Events (following naming convention: past tense verbs in snake_case)
 //! - `initialized` — Contract initialized (admin, max_batch_size)
-//! - `call_result` — Individual call result logged (caller, target, function, success)
+//! - `call_result` — Individual call result logged; payload is `(caller, target, function, success, call_index, simulate)`
+//! - `call_failed` — Emitted when a `required=true` call fails; payload is `(call_index, target, function, simulate)`
 //! - `batch_executed` — Batch execution completed (summary_data)
 //! - `max_batch_size_updated` — Max batch size updated (old_size, new_size)
 //! - `admin_transferred` — Admin transferred (old_admin, new_admin)
@@ -188,8 +192,11 @@ impl RouterMulticall {
     ///   Can be any address, not restricted to admin.
     /// * `calls` - A list of [`CallDescriptor`]s describing each call to make.
     ///   Must be non-empty and no larger than the configured `max_batch_size`.
-    /// * `simulate` - If `true`, executes in dry-run mode: all calls are attempted
-    ///   but the batch counter is not incremented.
+    /// * `simulate` - If `true`, skips incrementing the batch counter and skips
+    ///   persisting per-call results. **The cross-contract calls still execute and
+    ///   their side-effects are permanently committed.** Soroban does not support
+    ///   true dry-run simulation at the contract level — use this flag only to
+    ///   preview the count/summary without recording a permanent batch entry.
     /// * `store_results` - If `true`, each [`CallResult`] is persisted under
     ///   `DataKey::BatchResult(batch_id, call_index)` for later inspection.
     /// * `fail_fast` - If `true`, abort the batch on the first optional-call failure.
@@ -2007,5 +2014,82 @@ mod tests {
 
         let result = client.try_total_batches();
         assert_eq!(result, Err(Ok(MulticallError::NotInitialized)));
+    }
+
+    // ── Issue #1330: execute_batch at exact max_batch_size ───────────────────
+
+    /// Issue #1330: verifies that execute_batch succeeds when calls.len() exactly
+    /// equals max_batch_size. Previously there was no test for this boundary:
+    /// only < max (trivially tested) and > max (BatchTooLarge) were covered.
+    #[test]
+    fn test_execute_batch_at_exact_max_batch_size_succeeds() {
+        let (env, admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        // Set max_batch_size to 3 to keep the test small
+        client.set_max_batch_size(&admin, &3);
+
+        let mut calls = Vec::new(&env);
+        for _ in 0..3 {
+            calls.push_back(CallDescriptor {
+                target: mock_id.clone(),
+                function: Symbol::new(&env, "success"),
+                required: true,
+                instruction_budget: None,
+                args: Vec::new(&env),
+            });
+        }
+
+        // Exactly max_batch_size calls — must succeed, not return BatchTooLarge
+        let result = client.try_execute_batch(&caller, &calls, &false, &false, &false, &None);
+        assert!(
+            result.is_ok(),
+            "execute_batch must succeed when calls.len() == max_batch_size"
+        );
+        let summary = result.unwrap().unwrap();
+        assert_eq!(summary.successes.len(), 3);
+        assert_eq!(summary.failures.len(), 0);
+        assert_eq!(client.total_batches(), 1);
+    }
+
+    // ── Issue #1474: Reentrancy guard must be testable ───────────────────────
+
+    /// Issue #1474: the Reentrancy guard in execute_batch must be tested by a
+    /// test that actually triggers it — previously every Reentrancy mention in
+    /// tests was about it *not* being returned after a call completes.
+    #[test]
+    fn test_execute_batch_returns_reentrancy_when_executing_flag_set() {
+        let (env, admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        // Simulate a stuck in-flight call by setting the Executing guard directly.
+        env.as_contract(&client.address, || {
+            env.storage().instance().set(&DataKey::Executing, &true);
+        });
+
+        let mut calls = Vec::new(&env);
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: true,
+            instruction_budget: None,
+            args: Vec::new(&env),
+        });
+
+        // With the Executing flag set, execute_batch must return Reentrancy.
+        let result = client.try_execute_batch(&caller, &calls, &false, &false, &false, &None);
+        assert_eq!(result, Err(Ok(MulticallError::Reentrancy)));
+
+        // total_batches must not have incremented.
+        assert_eq!(
+            client.total_batches(),
+            0,
+            "total_batches must not increment when Reentrancy is returned"
+        );
+
+        // The _ suppresses unused-variable warning for admin
+        let _ = admin;
     }
 }

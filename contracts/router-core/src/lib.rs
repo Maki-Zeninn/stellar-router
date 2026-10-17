@@ -605,6 +605,7 @@ impl RouterCore {
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
 
+        // Validate address is not the zero address (issue #1278)
         // Validate address is not the zero address (same guard as register_route)
         if Self::is_zero_address(&env, &new_address) {
             return Err(RouterError::InvalidAddress);
@@ -764,6 +765,12 @@ impl RouterCore {
         let mut result = router_common::BatchResult::new(&env);
 
         if fail_fast {
+            // Issue #1280: use Map<String, bool> as an O(1) set instead of
+            // Vec::contains (which is O(n)) for within-batch duplicate detection.
+            let mut seen: soroban_sdk::Map<String, bool> = soroban_sdk::Map::new(&env);
+            for (index, route) in routes.iter().enumerate() {
+                let idx = index as u32;
+                // Detect within-batch duplicates in O(1) via map lookup.
             // Use a Map for O(1) duplicate-name lookups instead of Vec::contains
             // which would make this loop O(n²) (issue #1280).
             let mut seen = Map::new(&env);
@@ -773,6 +780,10 @@ impl RouterCore {
                     result.record_failure(idx, router_common::BatchItemError::AlreadyExists);
                     return Ok(result);
                 }
+                // validate_route_name checks both name format AND whether the
+                // route/alias already exists in storage — the previous redundant
+                // `has(&DataKey::Route(...))` block after this call has been
+                // removed (issue #1279: it was unreachable).
                 // validate_route_name already checks if the route or an alias
                 // with this name already exists in storage, returning
                 // RouteAlreadyExists — so no separate storage check is needed
@@ -1612,6 +1623,8 @@ impl RouterCore {
             .instance()
             .set(&DataKey::MaxRoutes, &max_routes);
         env.events().publish(
+            (Symbol::new(&env, "max_routes_updated"),),
+            max_routes,
             (Symbol::new(&env, router_common::EVENT_MAX_ROUTES_UPDATED),),
             (old_max, max_routes),
         );
@@ -1967,6 +1980,11 @@ impl RouterCore {
 
         // Re-rank routes using the new weights.
         Self::recompute_best_route(&env);
+
+        env.events().publish(
+            (Symbol::new(&env, "scoring_weights_updated"),),
+            (weights.liquidity_weight, weights.reliability_weight, weights.fee_divisor),
+        );
 
         Ok(())
     }
@@ -6628,7 +6646,7 @@ mod tests {
     /// is_zero_address. This test confirms that zero-address validation is
     /// only enforced at registration time, not when updating an existing route.
     #[test]
-    fn test_update_route_allows_zero_address() {
+    fn test_update_route_rejects_zero_address() {
         let (env, admin, client) = setup();
         let name = String::from_str(&env, "oracle");
         let valid_addr = Address::generate(&env);
@@ -6640,10 +6658,16 @@ mod tests {
         // Register with a valid address first
         client.register_route(&admin, &name, &valid_addr, &None);
 
-        // update_route does not call is_zero_address, so this should succeed
-        // (though it's semantically questionable to point a route at the zero address)
-        client.update_route(&admin, &name, &zero_addr);
-        assert_eq!(client.resolve(&name), zero_addr);
+        // update_route must reject the zero address (issue #1278)
+        let result = client.try_update_route(&admin, &name, &zero_addr);
+        assert_eq!(
+            result,
+            Err(Ok(RouterError::InvalidAddress)),
+            "update_route should reject zero address"
+        );
+
+        // Original address must still be intact
+        assert_eq!(client.resolve(&name), valid_addr);
     }
 
     /// Verifies that a valid address (not the zero address) is accepted.
