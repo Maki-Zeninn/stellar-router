@@ -6786,4 +6786,220 @@ mod tests {
         assert_eq!(result, Err(Ok(RouterError::Unauthorized)));
         assert_eq!(client.resolve(&name), addr);
     }
+
+    // ── Issue #1458: NotInitialized on an uninitialized contract ─────────────
+
+    /// Registers the contract without calling `initialize`, so entry points
+    /// that require an admin observe `RouterError::NotInitialized`.
+    fn setup_uninitialized() -> (Env, RouterCoreClient<'static>) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RouterCore);
+        let client = RouterCoreClient::new(&env, &contract_id);
+        (env, client)
+    }
+
+    #[test]
+    fn test_resolve_on_uninitialized_contract_returns_not_initialized() {
+        let (env, client) = setup_uninitialized();
+        let name = String::from_str(&env, "oracle");
+        assert_eq!(
+            client.try_resolve(&name),
+            Err(Ok(RouterError::NotInitialized))
+        );
+    }
+
+    #[test]
+    fn test_admin_on_uninitialized_contract_returns_not_initialized() {
+        let (_env, client) = setup_uninitialized();
+        assert_eq!(client.try_admin(), Err(Ok(RouterError::NotInitialized)));
+    }
+
+    #[test]
+    fn test_register_route_on_uninitialized_contract_returns_not_initialized() {
+        let (env, client) = setup_uninitialized();
+        let admin = Address::generate(&env);
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        assert_eq!(
+            client.try_register_route(&admin, &name, &addr, &None),
+            Err(Ok(RouterError::NotInitialized))
+        );
+    }
+
+    #[test]
+    fn test_batch_resolve_on_uninitialized_contract_returns_not_initialized() {
+        let (env, client) = setup_uninitialized();
+        let name = String::from_str(&env, "oracle");
+        let names = vec![&env, name.clone()];
+        let results = client.batch_resolve(&names);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results.get(0).unwrap(),
+            BatchResolveResult::Err(ResolveError::NotInitialized)
+        );
+    }
+
+    // ── Issue #1459: add_route_tag validation and auto-created metadata ──────
+
+    #[test]
+    fn test_add_route_tag_sixth_tag_returns_invalid_metadata() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+
+        let mut tags = Vec::new(&env);
+        for i in 0..MAX_METADATA_TAGS {
+            tags.push_back(String::from_str(
+                &env,
+                &alloc::string::String::from("tag").repeat((i + 1) as usize),
+            ));
+        }
+        let metadata = RouteMetadata {
+            description: String::from_str(&env, "valid description"),
+            tags,
+            owner: admin.clone(),
+        };
+        client.register_route(&admin, &name, &addr, &Some(metadata));
+
+        let new_tag = String::from_str(&env, "sixth-tag");
+        let result = client.try_add_route_tag(&admin, &name, &new_tag);
+        assert_eq!(result, Err(Ok(RouterError::InvalidMetadata)));
+
+        let stored = client.get_metadata(&name).unwrap();
+        assert_eq!(stored.tags.len(), MAX_METADATA_TAGS);
+        assert!(!stored.tags.contains(&new_tag));
+    }
+
+    #[test]
+    fn test_add_route_tag_empty_tag_returns_invalid_metadata_and_creates_no_metadata() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+        assert!(client.get_metadata(&name).is_none());
+
+        let empty_tag = String::from_str(&env, "");
+        let result = client.try_add_route_tag(&admin, &name, &empty_tag);
+        assert_eq!(result, Err(Ok(RouterError::InvalidMetadata)));
+
+        assert!(client.get_metadata(&name).is_none());
+    }
+
+    #[test]
+    fn test_add_route_tag_creates_metadata_with_empty_description_and_admin_owner() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+        assert!(client.get_metadata(&name).is_none());
+
+        let tag = String::from_str(&env, "defi");
+        client.add_route_tag(&admin, &name, &tag);
+
+        let stored = client.get_metadata(&name).unwrap();
+        assert_eq!(stored.description, String::from_str(&env, ""));
+        assert_eq!(stored.owner, admin);
+        assert_eq!(stored.tags.len(), 1);
+        assert_eq!(stored.tags.get(0).unwrap(), tag);
+    }
+
+    // ── Issue #1460: remove_route clears metadata and dependencies ───────────
+
+    /// Registers `oracle` and `dex` (with metadata + a dependency on oracle),
+    /// removes `dex`, re-registers it without metadata, and asserts that no
+    /// per-route state survived the removal.
+    fn assert_remove_clears_route_state(use_batch: bool) {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let dex = String::from_str(&env, "dex");
+        let tag = String::from_str(&env, "defi");
+
+        client.register_route(&admin, &oracle, &Address::generate(&env), &None);
+
+        let mut tags = Vec::new(&env);
+        tags.push_back(tag.clone());
+        let metadata = RouteMetadata {
+            description: String::from_str(&env, "dex route"),
+            tags,
+            owner: admin.clone(),
+        };
+        client.register_route(&admin, &dex, &Address::generate(&env), &Some(metadata));
+        client.set_route_dependency(&admin, &dex, &oracle);
+
+        assert_eq!(client.get_route_dependencies(&dex).len(), 1);
+        assert!(client.get_routes_by_tag(&tag).contains(&dex));
+
+        if use_batch {
+            let names = vec![&env, dex.clone()];
+            let result = client.remove_routes_batch(&admin, &names, &false);
+            assert_eq!(result.successes.len(), 1);
+            assert_eq!(result.failures.len(), 0);
+        } else {
+            client.remove_route(&admin, &dex);
+        }
+
+        // Re-register the same name without metadata.
+        client.register_route(&admin, &dex, &Address::generate(&env), &None);
+
+        assert!(client.get_metadata(&dex).is_none());
+        assert!(client.get_route_dependencies(&dex).is_empty());
+        assert!(!client.get_routes_by_tag(&tag).contains(&dex));
+
+        // The dependency edge is gone, so oracle is no longer in use.
+        assert!(client.try_remove_route(&admin, &oracle).is_ok());
+    }
+
+    #[test]
+    fn test_remove_route_clears_metadata_and_dependencies_on_reregister() {
+        assert_remove_clears_route_state(false);
+    }
+
+    #[test]
+    fn test_remove_routes_batch_clears_metadata_and_dependencies_on_reregister() {
+        assert_remove_clears_route_state(true);
+    }
+
+    // ── Issue #1461: remove_alias error paths ────────────────────────────────
+
+    #[test]
+    fn test_remove_alias_unknown_alias_returns_route_not_found() {
+        let (env, admin, client) = setup();
+        let unknown = String::from_str(&env, "unknown");
+        assert_eq!(
+            client.try_remove_alias(&admin, &unknown),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+    }
+
+    #[test]
+    fn test_remove_alias_with_route_name_returns_route_not_found_and_keeps_route() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+
+        assert_eq!(
+            client.try_remove_alias(&admin, &name),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+        assert_eq!(client.resolve(&name), addr);
+    }
+
+    #[test]
+    fn test_remove_alias_unauthorized_fails_and_alias_still_resolves() {
+        let (env, admin, client) = setup();
+        let attacker = Address::generate(&env);
+        let name = String::from_str(&env, "oracle");
+        let alias = String::from_str(&env, "oracle-v1");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr, &None);
+        client.add_alias(&admin, &name, &alias);
+
+        assert_eq!(
+            client.try_remove_alias(&attacker, &alias),
+            Err(Ok(RouterError::Unauthorized))
+        );
+        assert_eq!(client.resolve(&alias), addr);
+    }
 }
