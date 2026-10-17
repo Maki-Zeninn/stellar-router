@@ -3072,34 +3072,52 @@ mod tests {
     /// Removing a route that itself declared dependencies must clean up those
     /// dependency edges from the Dependents index so the targets can later be
     /// removed once no other route depends on them.
+    ///
+    /// This exercises the batch path (`remove_routes_batch` ->
+    /// `remove_route_internal`), which is the only caller of
+    /// `remove_route_internal` and therefore the only path that reaches its
+    /// `RouteInUse` branch and its `remove_dependency_edges_for_route` cleanup.
     #[test]
     fn test_dependents_index_cleaned_up_via_remove_route_internal() {
         let (env, admin, client) = setup();
         let oracle = String::from_str(&env, "oracle");
         let dex = String::from_str(&env, "dex");
-        let vault = String::from_str(&env, "vault");
+        let oracle_addr = Address::generate(&env);
 
-        // dex depends on oracle; vault depends on oracle too
-        client.register_route(&admin, &oracle, &Address::generate(&env), &None);
+        client.register_route(&admin, &oracle, &oracle_addr, &None);
         client.register_route(&admin, &dex, &Address::generate(&env), &None);
-        client.register_route(&admin, &vault, &Address::generate(&env), &None);
         client.set_route_dependency(&admin, &dex, &oracle);
-        client.set_route_dependency(&admin, &vault, &oracle);
 
-        // Remove vault (it has no dependents itself).
-        client.remove_route(&admin, &vault);
-
-        // oracle still has one depender left (dex) — must still be blocked.
+        // oracle is still a dependency target of dex: the batch path must
+        // report a RouteInUse failure for it and leave it registered.
+        let names = vec![&env, oracle.clone()];
+        let result = client.remove_routes_batch(&admin, &names, &false);
+        assert_eq!(result.successes.len(), 0);
+        assert_eq!(result.failures.len(), 1);
+        let failure = result.failures.get(0).unwrap();
+        assert_eq!(failure.index, 0);
         assert_eq!(
-            client.try_remove_route(&admin, &oracle),
-            Err(Ok(RouterError::RouteInUse))
+            failure.error,
+            BatchItemError::Custom(String::from_str(&env, "RouteInUse"))
         );
+        assert_eq!(client.resolve(&oracle), oracle_addr);
 
-        // Remove dex.
-        client.remove_route(&admin, &dex);
+        // Remove the depender through the batch path; this must clean up the
+        // Dependents index for oracle via remove_route_internal.
+        let names = vec![&env, dex.clone()];
+        let result = client.remove_routes_batch(&admin, &names, &false);
+        assert_eq!(result.successes.len(), 1);
+        assert_eq!(result.failures.len(), 0);
 
-        // oracle's Dependents index is now empty — removal must succeed.
-        assert!(client.try_remove_route(&admin, &oracle).is_ok());
+        // oracle's Dependents index is now empty — batch removal must succeed.
+        let names = vec![&env, oracle.clone()];
+        let result = client.remove_routes_batch(&admin, &names, &false);
+        assert_eq!(result.successes.len(), 1);
+        assert_eq!(result.failures.len(), 0);
+        assert_eq!(
+            client.try_resolve(&oracle),
+            Err(Ok(RouterError::RouteNotFound))
+        );
     }
 
     /// A route that has never been a dependency target (no Dependents entry)
@@ -6720,6 +6738,146 @@ mod tests {
         // r11 at depth 11), exceeding MAX_RECURSION_DEPTH.
         let result = client.try_resolve_with_dependencies(&names[0]);
         assert_eq!(result, Err(Ok(RouterError::RecursionLimitExceeded)));
+    }
+
+    // ── Issue #1462: resolve_with_dependencies error branches ─────────────
+
+    /// A globally paused router must reject dependency resolution with
+    /// `RouterPaused`, even for a registered route.
+    #[test]
+    fn test_resolve_with_dependencies_router_paused() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        client.register_route(&admin, &name, &Address::generate(&env), &None);
+
+        client.set_paused(&admin, &true);
+
+        let result = client.try_resolve_with_dependencies(&name);
+        assert_eq!(result, Err(Ok(RouterError::RouterPaused)));
+    }
+
+    /// Resolving dependencies for an unregistered name must fail with
+    /// `RouteNotFound`.
+    #[test]
+    fn test_resolve_with_dependencies_unknown_route() {
+        let (env, _admin, client) = setup();
+        let name = String::from_str(&env, "missing");
+
+        let result = client.try_resolve_with_dependencies(&name);
+        assert_eq!(result, Err(Ok(RouterError::RouteNotFound)));
+    }
+
+    /// A paused dependency must abort resolution with `RoutePaused` rather
+    /// than being silently included in the resolved list.
+    #[test]
+    fn test_resolve_with_dependencies_paused_dependency() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let dex = String::from_str(&env, "dex");
+
+        client.register_route(&admin, &oracle, &Address::generate(&env), &None);
+        client.register_route(&admin, &dex, &Address::generate(&env), &None);
+        client.set_route_dependency(&admin, &dex, &oracle);
+        client.set_route_paused(&admin, &oracle, &true);
+
+        let result = client.try_resolve_with_dependencies(&dex);
+        assert_eq!(result, Err(Ok(RouterError::RoutePaused)));
+    }
+
+    /// A paused root route must abort resolution with `RoutePaused`.
+    #[test]
+    fn test_resolve_with_dependencies_paused_root() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let dex = String::from_str(&env, "dex");
+
+        client.register_route(&admin, &oracle, &Address::generate(&env), &None);
+        client.register_route(&admin, &dex, &Address::generate(&env), &None);
+        client.set_route_dependency(&admin, &dex, &oracle);
+        client.set_route_paused(&admin, &dex, &true);
+
+        let result = client.try_resolve_with_dependencies(&dex);
+        assert_eq!(result, Err(Ok(RouterError::RoutePaused)));
+    }
+
+    // ── Issue #1463: set_route_dependency error branches ──────────────────
+
+    /// Setting a dependency on an unregistered route must fail with
+    /// `RouteNotFound`.
+    #[test]
+    fn test_set_route_dependency_missing_route() {
+        let (env, admin, client) = setup();
+        let missing = String::from_str(&env, "missing");
+        let oracle = String::from_str(&env, "oracle");
+        client.register_route(&admin, &oracle, &Address::generate(&env), &None);
+
+        let result = client.try_set_route_dependency(&admin, &missing, &oracle);
+        assert_eq!(result, Err(Ok(RouterError::RouteNotFound)));
+        assert!(client.get_route_dependencies(&missing).is_empty());
+    }
+
+    /// Setting a dependency on an unregistered dependency name must fail with
+    /// `RouteNotFound` and must not write an edge.
+    #[test]
+    fn test_set_route_dependency_missing_dependency() {
+        let (env, admin, client) = setup();
+        let dex = String::from_str(&env, "dex");
+        let missing = String::from_str(&env, "missing");
+        client.register_route(&admin, &dex, &Address::generate(&env), &None);
+
+        let result = client.try_set_route_dependency(&admin, &dex, &missing);
+        assert_eq!(result, Err(Ok(RouterError::RouteNotFound)));
+        assert!(client.get_route_dependencies(&dex).is_empty());
+    }
+
+    /// A non-admin caller must be rejected with `Unauthorized` and no edge
+    /// must be stored.
+    #[test]
+    fn test_set_route_dependency_unauthorized() {
+        let (env, admin, client) = setup();
+        let attacker = Address::generate(&env);
+        let oracle = String::from_str(&env, "oracle");
+        let dex = String::from_str(&env, "dex");
+        client.register_route(&admin, &oracle, &Address::generate(&env), &None);
+        client.register_route(&admin, &dex, &Address::generate(&env), &None);
+
+        let result = client.try_set_route_dependency(&attacker, &dex, &oracle);
+        assert_eq!(result, Err(Ok(RouterError::Unauthorized)));
+        assert!(client.get_route_dependencies(&dex).is_empty());
+    }
+
+    // ── Issue #1465: transfer_admin authorization ─────────────────────────
+
+    /// A non-admin caller must not be able to transfer admin rights.
+    #[test]
+    fn test_transfer_admin_unauthorized() {
+        let (env, admin, client) = setup();
+        let attacker = Address::generate(&env);
+
+        let result = client.try_transfer_admin(&attacker, &attacker);
+        assert_eq!(result, Err(Ok(RouterError::Unauthorized)));
+        assert_eq!(client.admin(), admin);
+    }
+
+    /// After a transfer, the previous admin loses access while the new admin
+    /// gains it.
+    #[test]
+    fn test_transfer_admin_old_admin_loses_access() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+
+        client.transfer_admin(&admin, &new_admin);
+
+        let result = client.try_register_route(&admin, &name, &addr, &None);
+        assert_eq!(result, Err(Ok(RouterError::Unauthorized)));
+        assert!(client.get_route(&name).is_none());
+
+        assert!(client
+            .try_register_route(&new_admin, &name, &addr, &None)
+            .is_ok());
+        assert_eq!(client.resolve(&name), addr);
     }
 
     #[test]
