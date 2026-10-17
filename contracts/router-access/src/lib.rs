@@ -1548,6 +1548,38 @@ mod tests {
         assert_eq!(result, Err(Ok(AccessError::RoleNotFound)));
     }
 
+    // ── Issue #1455: revoke_role on a naturally expired grant ────────────────
+
+    #[test]
+    fn test_revoke_role_succeeds_on_expired_grant() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let user = Address::generate(&env);
+
+        client.grant_role(&admin, &user, &role, &Some(10));
+        env.ledger().set_timestamp(env.ledger().timestamp() + 20);
+        assert!(!client.has_role(&user, &role));
+
+        // revoke_role checks the raw storage key, so expired grants can be cleaned up.
+        let result = client.try_revoke_role(&admin, &role, &user);
+        assert!(result.is_ok());
+
+        let (has_role_key, has_expiry_key) = env.as_contract(&client.address, || {
+            (
+                env.storage()
+                    .instance()
+                    .has(&DataKey::HasRole(role.clone(), user.clone())),
+                env.storage()
+                    .instance()
+                    .has(&DataKey::RoleExpiry(role.clone(), user.clone())),
+            )
+        });
+        assert!(!has_role_key);
+        assert!(!has_expiry_key);
+        assert!(!client.get_roles_for_address(&user).contains(&role));
+        assert!(!client.get_role_members(&role).contains(&user));
+    }
+
     #[test]
     fn test_expire_role_removes_access() {
         let (env, admin, client) = setup();
@@ -1730,6 +1762,26 @@ mod tests {
         assert_eq!(result.successes.len(), 0);
         assert_eq!(result.failures.len(), 1);
         assert!(!client.has_role(&u2, &role));
+    }
+
+    // ── Issue #1454: grant_role_batch fatal Unauthorized path ────────────────
+
+    #[test]
+    fn test_grant_role_batch_unauthorized_admin_is_fatal() {
+        let (env, _admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let stranger = Address::generate(&env);
+        let u1 = Address::generate(&env);
+        let u2 = Address::generate(&env);
+        let accounts = vec![&env, u1.clone(), u2.clone()];
+
+        let result = client.try_grant_role_batch(&stranger, &accounts, &role, &None, &false);
+        assert_eq!(result, Err(Ok(AccessError::Unauthorized)));
+
+        // No account may be processed when authorization fails up-front.
+        assert!(!client.has_role(&u1, &role));
+        assert!(!client.has_role(&u2, &role));
+        assert!(client.list_all_roles().is_empty());
     }
 
     // ── Issue #578: list_all_roles ────────────────────────────────────────────
@@ -1947,6 +1999,47 @@ mod tests {
         assert_eq!(client.get_role_parent(&role), None);
     }
 
+    // ── Issue #1456: set_role_parent self-cycle, auth gate, and event ────────
+
+    #[test]
+    fn test_set_role_parent_rejects_self_parent() {
+        let (env, admin, client) = setup();
+        let viewer = String::from_str(&env, "viewer");
+
+        let result = client.try_set_role_parent(&admin, &viewer, &viewer);
+        assert_eq!(result, Err(Ok(AccessError::HierarchyCycle)));
+        assert_eq!(client.get_role_parent(&viewer), None);
+    }
+
+    #[test]
+    fn test_set_role_parent_rejects_non_admin_caller() {
+        let (env, _admin, client) = setup();
+        let viewer = String::from_str(&env, "viewer");
+        let editor = String::from_str(&env, "editor");
+        let stranger = Address::generate(&env);
+
+        let result = client.try_set_role_parent(&stranger, &viewer, &editor);
+        assert_eq!(result, Err(Ok(AccessError::Unauthorized)));
+        assert_eq!(client.get_role_parent(&viewer), None);
+    }
+
+    #[test]
+    fn test_set_role_parent_emits_event() {
+        let (env, admin, client) = setup();
+        let viewer = String::from_str(&env, "viewer");
+        let editor = String::from_str(&env, "editor");
+
+        client.set_role_parent(&admin, &viewer, &editor);
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        let topic: Symbol = last.1.get(0).unwrap().into_val(&env);
+        assert_eq!(topic, Symbol::new(&env, "role_parent_set"));
+        let (emitted_role, emitted_parent): (String, String) = last.2.into_val(&env);
+        assert_eq!(emitted_role, viewer);
+        assert_eq!(emitted_parent, editor);
+    }
+
     #[test]
     fn test_is_blacklisted_reflects_blacklist_state() {
         // Directly exercises is_blacklisted: false → true after blacklist() → false after unblacklist().
@@ -2123,5 +2216,50 @@ mod tests {
         // State must be untouched.
         assert!(client.has_role(&from, &role));
         assert!(!client.has_role(&to, &role));
+    }
+
+    // ── Issue #1457: transfer_role_membership events ─────────────────────────
+
+    #[test]
+    fn test_transfer_role_membership_emits_granted_and_revoked_events() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+        client.grant_role(&admin, &from, &role, &Some(500));
+        let expiry = client.get_role_expiry(&role, &from).unwrap();
+
+        client.transfer_role_membership(&admin, &role, &from, &to);
+
+        let events = env.events().all();
+        let granted = events.get(events.len() - 2).unwrap();
+        let granted_topic: Symbol = granted.1.get(0).unwrap().into_val(&env);
+        assert_eq!(granted_topic, Symbol::new(&env, "role_granted"));
+        let (granted_to, granted_role, granted_expiry): (Address, String, u64) =
+            granted.2.into_val(&env);
+        assert_eq!(granted_to, to);
+        assert_eq!(granted_role, role);
+        assert_eq!(granted_expiry, expiry);
+
+        let revoked = events.last().unwrap();
+        let revoked_topic: Symbol = revoked.1.get(0).unwrap().into_val(&env);
+        assert_eq!(revoked_topic, Symbol::new(&env, "role_revoked"));
+        let (revoked_role, revoked_from): (String, Address) = revoked.2.into_val(&env);
+        assert_eq!(revoked_role, role);
+        assert_eq!(revoked_from, from);
+    }
+
+    #[test]
+    fn test_transfer_role_membership_self_transfer_emits_no_event() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let from = Address::generate(&env);
+        client.grant_role(&admin, &from, &role, &Some(100));
+
+        let events_before = env.events().all().len();
+        client.transfer_role_membership(&admin, &role, &from, &from);
+        let events_after = env.events().all().len();
+
+        assert_eq!(events_before, events_after);
     }
 }
