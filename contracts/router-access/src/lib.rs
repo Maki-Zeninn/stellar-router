@@ -1965,6 +1965,55 @@ mod tests {
         assert!(!client.is_blacklisted(&addr));
     }
 
+    // ── Issue #1453: RoleMemberCount adjustments on blacklist/unblacklist ────
+
+    #[test]
+    fn test_blacklist_unblacklist_adjusts_role_member_count_idempotently() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let user = Address::generate(&env);
+
+        client.grant_role(&admin, &user, &role, &None);
+        assert_eq!(client.get_role_member_count(&role), 1);
+
+        // First blacklist decrements the count.
+        client.blacklist(&admin, &user);
+        assert_eq!(client.get_role_member_count(&role), 0);
+
+        // Second blacklist is a no-op — must not decrement again.
+        client.blacklist(&admin, &user);
+        assert_eq!(client.get_role_member_count(&role), 0);
+
+        // First unblacklist re-increments the count.
+        client.unblacklist(&admin, &user);
+        assert_eq!(client.get_role_member_count(&role), 1);
+
+        // Second unblacklist is a no-op — must not increment again.
+        client.unblacklist(&admin, &user);
+        assert_eq!(client.get_role_member_count(&role), 1);
+    }
+
+    #[test]
+    fn test_unblacklist_does_not_recount_expired_grant() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let user = Address::generate(&env);
+
+        client.grant_role(&admin, &user, &role, &Some(10));
+        assert_eq!(client.get_role_member_count(&role), 1);
+
+        client.blacklist(&admin, &user);
+        assert_eq!(client.get_role_member_count(&role), 0);
+
+        // Advance past the grant's expiry while the address is blacklisted.
+        env.ledger().set_timestamp(env.ledger().timestamp() + 20);
+
+        // Unblacklisting must not re-count the now-expired grant.
+        client.unblacklist(&admin, &user);
+        assert_eq!(client.get_role_member_count(&role), 0);
+        assert!(!client.has_role(&user, &role));
+    }
+
     // ── Issue #1516: blacklist(admin, admin) must return CannotBlacklistAdmin ─
 
     #[test]

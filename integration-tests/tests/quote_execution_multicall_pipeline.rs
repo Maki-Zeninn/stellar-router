@@ -13,7 +13,7 @@
 //! 5. Execute the swap via router-execution
 //! 6. Verify middleware logged the call
 //! 7. Batch multiple swaps via router-multicall
-//! 8. Verify all events were emitted correctly
+//! 8. Verify router-core counters reflect the routed calls
 //! 9. Check rate limiting is enforced after the batch
 //!
 //! Run with:
@@ -446,6 +446,11 @@ fn test_quote_to_execution_to_multicall_pipeline() {
     };
 
     let quote = s.quote.get_quote(&quote_request);
+    // 50 bps fee on 1_000_000 => 5_000 fee, 995_000 out
+    assert_eq!(
+        quote.amount_out, 995_000,
+        "quote amount_out should be 995_000 (50 bps fee on 1_000_000)"
+    );
     println!("  ✓ Quote obtained: amount_out = {}", quote.amount_out);
 
     // ── Phase 2: Middleware Check ──────────────────────────────────────
@@ -512,12 +517,25 @@ fn test_quote_to_execution_to_multicall_pipeline() {
     println!("\nPhase 5: Testing rate limiting after batch...");
     let initial_calls = s.middleware.get_total_calls();
 
-    // Try to make more calls to hit the rate limit
+    // The route allows 10 calls per 60s window and phase 2 already used one,
+    // so of the next 10 attempts only 9 can succeed and the 10th is limited.
+    let mut last_result = None;
     for _ in 0..10 {
-        let _ = s.middleware.try_pre_call(&s.user, &route);
+        last_result = Some(s.middleware.try_pre_call(&s.user, &route));
     }
 
+    assert_eq!(
+        last_result,
+        Some(Err(Ok(router_middleware::MiddlewareError::RateLimitExceeded))),
+        "the last pre_call should be rate limited (10 call limit, 1 already used)"
+    );
+
     let final_calls = s.middleware.get_total_calls();
+    assert_eq!(
+        final_calls,
+        initial_calls + 9,
+        "total_calls should increase by the 9 accepted calls"
+    );
     println!(
         "  ✓ Total calls tracked: {} → {}",
         initial_calls, final_calls
@@ -527,14 +545,15 @@ fn test_quote_to_execution_to_multicall_pipeline() {
 
     println!("\nPhase 6: Verifying router core counters...");
     let total_routed = s.core.total_routed();
+    assert_eq!(
+        total_routed, 0,
+        "core total_routed should be 0 (no calls routed through router-core)"
+    );
     println!("  ✓ Total routed: {}", total_routed);
-
-    // ── All events should have been logged ──────────────────────────
 
     println!("\n✓ Complete pipeline executed successfully!");
     println!("  Quote → Execution → Multicall ✓");
     println!("  Middleware rate limiting ✓");
-    println!("  Event logging ✓");
 }
 
 /// Test 9: Verify circuit breaker trips on multiple failures

@@ -268,4 +268,115 @@ mod tests {
         let nonce = extract_nonce(&headers);
         assert_eq!(nonce, None);
     }
+
+    use axum::{
+        body::Body,
+        http::Request as HttpRequest,
+        middleware,
+        routing::get,
+        Router,
+    };
+    use tower::ServiceExt;
+
+    fn test_config(enabled: bool) -> ReplayProtectionConfig {
+        ReplayProtectionConfig {
+            enabled,
+            cache_size: 100,
+            nonce_ttl_secs: 3600,
+        }
+    }
+
+    fn test_router(config: ReplayProtectionConfig) -> Router {
+        Router::new()
+            .route("/", get(|| async { "ok" }))
+            .layer(middleware::from_fn_with_state(
+                NonceCache::new(config),
+                replay_protection_middleware,
+            ))
+    }
+
+    #[tokio::test]
+    async fn test_middleware_disabled_passes_through_without_nonce() {
+        let app = test_router(test_config(false));
+
+        let response = app
+            .oneshot(HttpRequest::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_middleware_missing_nonce_returns_400() {
+        let app = test_router(test_config(true));
+
+        let response = app
+            .oneshot(HttpRequest::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"Missing X-Nonce header");
+    }
+
+    #[tokio::test]
+    async fn test_middleware_duplicate_nonce_returns_409() {
+        let app = test_router(test_config(true));
+
+        let first = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/")
+                    .header("x-nonce", "nonce-dup")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/")
+                    .header("x-nonce", "nonce-dup")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(second.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"Duplicate nonce detected (replay attack)");
+    }
+
+    #[tokio::test]
+    async fn test_middleware_fresh_nonce_reaches_handler() {
+        let app = test_router(test_config(true));
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/")
+                    .header("x-nonce", "nonce-fresh")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"ok");
+    }
 }

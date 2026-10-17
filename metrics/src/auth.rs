@@ -134,6 +134,149 @@ impl IntoResponse for AuthError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        body::Body,
+        http::Request as HttpRequest,
+        middleware,
+        routing::get,
+        Router,
+    };
+    use tower::ServiceExt;
+
+    fn test_router(config: AuthConfig) -> Router {
+        Router::new()
+            .route("/", get(|| async { "ok" }))
+            .layer(middleware::from_fn_with_state(config, auth_middleware))
+    }
+
+    async fn body_string(response: Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_middleware_disabled_passes_through() {
+        let app = test_router(AuthConfig {
+            enabled: false,
+            api_key: Some("secret".to_string()),
+        });
+
+        let response = app
+            .oneshot(HttpRequest::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_string(response).await, "ok");
+    }
+
+    #[tokio::test]
+    async fn test_middleware_missing_key() {
+        let app = test_router(AuthConfig {
+            enabled: true,
+            api_key: Some("secret".to_string()),
+        });
+
+        let response = app
+            .oneshot(HttpRequest::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body_string(response).await, "Missing API key");
+    }
+
+    #[tokio::test]
+    async fn test_middleware_invalid_key() {
+        let app = test_router(AuthConfig {
+            enabled: true,
+            api_key: Some("secret".to_string()),
+        });
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/")
+                    .header("authorization", "Bearer wrong-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body_string(response).await, "Invalid API key");
+    }
+
+    #[tokio::test]
+    async fn test_middleware_valid_bearer_key() {
+        let app = test_router(AuthConfig {
+            enabled: true,
+            api_key: Some("secret".to_string()),
+        });
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/")
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_string(response).await, "ok");
+    }
+
+    #[tokio::test]
+    async fn test_middleware_valid_x_api_key() {
+        let app = test_router(AuthConfig {
+            enabled: true,
+            api_key: Some("secret".to_string()),
+        });
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/")
+                    .header("x-api-key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_string(response).await, "ok");
+    }
+
+    #[test]
+    fn test_from_env_enabled_without_key_falls_back_to_disabled() {
+        // Serialize env access with other tests via a unique guard is not
+        // available here, so save/restore the relevant variables.
+        let prev_enabled = env::var("ROUTER_AUTH_ENABLED").ok();
+        let prev_key = env::var("ROUTER_API_KEY").ok();
+
+        env::set_var("ROUTER_AUTH_ENABLED", "true");
+        env::remove_var("ROUTER_API_KEY");
+
+        let config = AuthConfig::from_env();
+        assert!(!config.enabled);
+        assert!(config.api_key.is_none());
+
+        match prev_enabled {
+            Some(v) => env::set_var("ROUTER_AUTH_ENABLED", v),
+            None => env::remove_var("ROUTER_AUTH_ENABLED"),
+        }
+        match prev_key {
+            Some(v) => env::set_var("ROUTER_API_KEY", v),
+            None => env::remove_var("ROUTER_API_KEY"),
+        }
+    }
 
     #[test]
     fn test_extract_bearer_token() {
