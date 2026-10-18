@@ -15,7 +15,7 @@ use axum::{
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
-    Json, Router,
+    Router,
 };
 use clap::Parser;
 use std::net::SocketAddr;
@@ -131,25 +131,7 @@ async fn main() -> Result<()> {
     );
 
     let cors = build_cors_layer(&args.cors_origins);
-
-    let docs = SwaggerUi::new("/docs/{tail:.*}").url("/openapi.json", ApiDoc::openapi());
-
-    let app = Router::new()
-        .route("/health", get(handlers::health))
-        .route("/simulate", post(handlers::simulate))
-        .route("/routes", get(handlers::list_routes))
-        .route("/routes/:name", get(handlers::get_route))
-        .route("/ws", get(websocket::ws_handler))
-        .route("/openapi.json", get(openapi_json))
-        .merge(docs)
-        .layer(middleware::from_fn(request_id_middleware))
-        .layer(cors)
-        .layer(DefaultBodyLimit::max(1024 * 1024))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            rate_limit::rate_limit_middleware,
-        ))
-        .with_state(state);
+    let app = build_app(state, cors);
 
     let addr: SocketAddr = args
         .listen
@@ -180,9 +162,31 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Serves the generated OpenAPI spec as JSON at `/openapi.json`.
-async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
-    Json(ApiDoc::openapi())
+/// Builds the application router with all routes and middleware layers.
+///
+/// In axum the last `.layer()` call is the outermost, so the rate limiter is
+/// added first: `request_id_middleware` and `cors` wrap it, which means 429
+/// responses still carry `X-Request-Id` and CORS headers, and CORS preflight
+/// requests are answered before they count against the limit.
+pub(crate) fn build_app(state: AppState, cors: CorsLayer) -> Router {
+    let docs = SwaggerUi::new("/docs").url("/openapi.json", ApiDoc::openapi());
+
+    Router::new()
+        .route("/health", get(handlers::health))
+        .route("/simulate", post(handlers::simulate))
+        .route("/routes", get(handlers::list_routes))
+        .route("/routes/:name", get(handlers::get_route))
+        .route("/ws", get(websocket::ws_handler))
+        // SwaggerUi already serves GET /openapi.json via `.url(...)` above.
+        .merge(docs)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::rate_limit_middleware,
+        ))
+        .layer(DefaultBodyLimit::max(1024 * 1024))
+        .layer(cors)
+        .layer(middleware::from_fn(request_id_middleware))
+        .with_state(state)
 }
 
 /// Attach a unique `request_id` (UUID v4) to every request span and response header.
