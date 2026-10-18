@@ -925,3 +925,76 @@ async fn test_build_cors_layer_mixed_invalid_valid_origins() {
         "valid origin should work even when invalid entries are present"
     );
 }
+
+// ── Issue #1430: 429 responses carry CORS + X-Request-Id ──────────────────────
+
+/// Full production router with a rate limit of one request per window.
+fn rate_limited_full_app() -> Router {
+    let rate_limiter = RateLimiter::new(RateLimitConfig {
+        max_requests: 1,
+        window: std::time::Duration::from_secs(60),
+    });
+    let state = AppState::new(
+        "http://localhost:1".to_string(),
+        "".to_string(),
+        "".to_string(),
+        rate_limiter,
+        10,
+    );
+    let cors = crate::build_cors_layer(&["https://example.com".to_string()]);
+    crate::build_app(state, cors)
+}
+
+/// `/routes` short-circuits to 503 (no core contract configured), so no RPC call is made.
+fn get_routes_with_origin() -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri("/routes")
+        .header("origin", "https://example.com")
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_rate_limited_response_has_cors_and_request_id() {
+    let app = rate_limited_full_app();
+
+    let first = app.clone().oneshot(get_routes_with_origin()).await.unwrap();
+    assert_ne!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let resp = app.oneshot(get_routes_with_origin()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        resp.headers()
+            .get("access-control-allow-origin")
+            .map(|h| h.to_str().unwrap()),
+        Some("https://example.com"),
+        "429 should carry access-control-allow-origin for an allowed origin"
+    );
+    assert!(
+        resp.headers().get("x-request-id").is_some(),
+        "429 should carry x-request-id"
+    );
+}
+
+#[tokio::test]
+async fn test_cors_preflight_not_counted_against_rate_limit() {
+    let app = rate_limited_full_app();
+
+    let preflight = Request::builder()
+        .method("OPTIONS")
+        .uri("/routes")
+        .header("origin", "https://example.com")
+        .header("access-control-request-method", "GET")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(preflight).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app.oneshot(get_routes_with_origin()).await.unwrap();
+    assert_ne!(
+        resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "preflight must be answered by CorsLayer without consuming rate-limit budget"
+    );
+}
