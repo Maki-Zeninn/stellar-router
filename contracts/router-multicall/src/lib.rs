@@ -112,14 +112,23 @@ pub struct BatchSummary {
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum MulticallError {
+    /// `initialize` was called but the contract already has an admin set.
     AlreadyInitialized = 1,
+    /// A function requiring initialization was called before `initialize`.
     NotInitialized = 2,
+    /// The caller is not the configured admin (returned by admin-only functions).
     Unauthorized = 3,
+    /// `calls.len()` in `execute_batch` exceeds the configured `max_batch_size`.
     BatchTooLarge = 4,
+    /// `execute_batch` was called with an empty `calls` vector.
     EmptyBatch = 5,
+    /// A `CallDescriptor` with `required = true` failed during `execute_batch`, aborting the batch.
     RequiredCallFailed = 6,
+    /// A configuration value (e.g. `max_batch_size`) was zero or otherwise invalid.
     InvalidConfig = 7,
+    /// `execute_batch` was re-entered while an existing invocation was still in progress.
     Reentrancy = 8,
+    /// The cumulative declared `instruction_budget` across `calls` exceeded `max_total_gas`.
     GasLimitExceeded = 9,
     /// A single [`CallDescriptor`]'s `args` vector exceeds [`MAX_ARGS_PER_CALL`].
     ArgsTooLarge = 10,
