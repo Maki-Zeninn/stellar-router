@@ -33,6 +33,11 @@ use crate::{
 
 #[derive(OpenApi)]
 #[openapi(
+    info(
+        title = "Stellar Router API",
+        version = "0.1.0",
+        description = "API responses include x-rate-limit-limit, x-rate-limit-remaining, and x-rate-limit-reset headers. The reset value is the number of seconds until the current per-client window resets; throttled responses also include retry-after."
+    ),
     paths(
         crate::handlers::health,
         crate::handlers::simulate,

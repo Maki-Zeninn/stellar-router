@@ -28,7 +28,15 @@ Soroban smart contracts run inside the Stellar network as WASM and cannot open s
 | `router_execution_max_retries` | Gauge | `contract` | Configured max retries from on-chain storage |
 | `router_scrape_duration_seconds` | Histogram | `contract` | Time spent scraping each contract |
 | `router_scrape_errors_total` | Counter | `contract` | Number of failed scrape attempts |
-| `router_up` | Gauge | — | 1 if the last scrape cycle succeeded |
+| `router_contract_up` | Gauge | `contract` | 1 if the most recent scrape for that contract succeeded |
+| `router_scrape_cycle_completed` | Gauge | — | 1 after at least one scrape cycle has completed |
+| `router_rpc_up` | Gauge | — | 1 when the collector RPC client is available for scrape attempts |
+| `router_up` | Gauge | — | 1 if every configured contract succeeded in the last cycle |
+
+`GET /ready` uses `router_scrape_cycle_completed` and `router_rpc_up`, not the
+aggregate `router_up` value. A single failing contract therefore remains visible
+through `router_contract_up{contract="..."}` and `router_scrape_errors_total`
+without taking healthy metrics out of service.
 
 ## Installation
 
@@ -249,6 +257,12 @@ router_middleware_circuit_open{contract="CBGTG...", route="oracle/get_price"}
 router_up
 ```
 
+### Per-contract scrape health
+
+```promql
+router_contract_up{contract="CBGTG..."}
+```
+
 ### P95 scrape latency
 
 ```promql
@@ -335,7 +349,9 @@ The RPC endpoint may be down or rate-limiting your requests. Check:
 
 ### "router_up" is 0
 
-At least one contract scrape failed. Check logs for details:
+At least one contract scrape failed. This aggregate metric is retained for
+dashboards, but it does not make `/ready` fail by itself. Inspect the
+per-contract gauge and logs for details:
 
 ```bash
 RUST_LOG=router_metrics_exporter=debug ./router-metrics-exporter

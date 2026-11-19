@@ -70,6 +70,15 @@ pub struct RouterMetrics {
     /// Total number of failed scrape attempts per contract.
     pub scrape_errors_total: CounterVec,
 
+    /// 1 when the most recent scrape for a configured contract succeeded.
+    pub contract_up: GaugeVec,
+
+    /// 1 after the collector has completed at least one scrape cycle.
+    pub scrape_cycle_completed: Gauge,
+
+    /// 1 when the RPC client was initialized and the collector can attempt scrapes.
+    pub rpc_up: Gauge,
+
     /// 1 if the most recent full scrape cycle completed without errors.
     pub up: Gauge,
 }
@@ -176,6 +185,25 @@ impl RouterMetrics {
             registry
         )?;
 
+        let contract_up = register_gauge_vec_with_registry!(
+            "router_contract_up",
+            "1 if the most recent scrape for a configured router contract succeeded, 0 otherwise",
+            &["contract"],
+            registry
+        )?;
+
+        let scrape_cycle_completed = register_gauge_with_registry!(
+            "router_scrape_cycle_completed",
+            "1 after the collector has completed at least one scrape cycle",
+            registry
+        )?;
+
+        let rpc_up = register_gauge_with_registry!(
+            "router_rpc_up",
+            "1 when the collector RPC client is initialized and available for scrape attempts",
+            registry
+        )?;
+
         let up = register_gauge_with_registry!(
             "router_up",
             "1 if the most recent full scrape cycle completed without errors, 0 otherwise",
@@ -197,6 +225,9 @@ impl RouterMetrics {
             execution_max_retries,
             scrape_duration_seconds,
             scrape_errors_total,
+            contract_up,
+            scrape_cycle_completed,
+            rpc_up,
             up,
         })
     }

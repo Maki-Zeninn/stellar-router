@@ -91,15 +91,17 @@ sequenceDiagram
 
 ## Contracts
 
-| Contract | Description | Tests |
+| Contract | Description |
 |---|---|---|
-| `router-core` | Central dispatcher, route registration/resolution, pause controls | 8 |
-| `router-registry` | Versioned contract address registry with deprecation support | 8 |
-| `router-access` | Role-based access control, blacklisting, and role admins | 7 |
-| `router-middleware` | Rate limiting, route enable/disable, and call event logging | 6 |
-| `router-timelock` | Delayed execution queue for sensitive configuration changes | 7 |
-| `router-multicall` | Batch multiple cross-contract calls in one transaction | 6 |
-| `router-quote` | Configurable fee-based quote calculation and best-route selection | 13 |
+| `router-common` | Shared types, errors, events, and serialization helpers |
+| `router-core` | Central dispatcher, route registration/resolution, pause controls |
+| `router-registry` | Versioned contract address registry with deprecation support |
+| `router-access` | Role-based access control, blacklisting, and role admins |
+| `router-middleware` | Rate limiting, route enable/disable, and call event logging |
+| `router-timelock` | Delayed execution queue for sensitive configuration changes |
+| `router-multicall` | Batch multiple cross-contract calls in one transaction |
+| `router-quote` | Configurable fee-based quote calculation and best-route selection |
+| `router-execution` | Execution coordination, retry policy, and execution event tracking |
 
 ## Architecture
 
@@ -394,7 +396,7 @@ Each test must use a fresh `Env::default()` and register a new contract instance
 Soroban is the smart contract platform built into the Stellar network, designed for
 predictable performance and low fees. See the [official docs](https://developers.stellar.org/docs/build/smart-contracts/overview) for more.
 
-**Do I need to deploy all 6 contracts?**
+**Do I need to deploy every contract?**
 No. `router-core` is the only required contract — it handles route registration and
 resolution. The others are optional enhancements:
 - `router-registry` — only needed if you want versioned contract address management

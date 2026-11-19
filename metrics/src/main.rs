@@ -30,7 +30,10 @@
 //! | `router_execution_max_retries` | Gauge | `contract` | Configured maximum retries read from on-chain storage |
 //! | `router_scrape_duration_seconds` | Histogram | `contract` | Time spent scraping each contract |
 //! | `router_scrape_errors_total` | Counter | `contract` | Number of failed scrape attempts |
-//! | `router_up` | Gauge | — | 1 if the last scrape cycle succeeded |
+//! | `router_contract_up` | Gauge | `contract` | 1 if the most recent contract scrape succeeded |
+//! | `router_scrape_cycle_completed` | Gauge | — | 1 after at least one scrape cycle completes |
+//! | `router_rpc_up` | Gauge | — | 1 when the collector RPC client is available |
+//! | `router_up` | Gauge | — | 1 if every configured contract succeeded in the last cycle |
 
 mod auth;
 mod cli;

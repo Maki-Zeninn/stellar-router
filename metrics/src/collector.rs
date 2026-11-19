@@ -55,10 +55,12 @@ impl Collector {
                 return;
             }
         };
+        self.metrics.rpc_up.set(1.0);
 
         loop {
             let cycle_ok = self.scrape_all(&client).await;
             self.metrics.up.set(if cycle_ok { 1.0 } else { 0.0 });
+            self.metrics.scrape_cycle_completed.set(1.0);
             tokio::time::sleep(interval).await;
         }
     }
@@ -121,11 +123,19 @@ impl Collector {
         if let Err(e) = scrape.await {
             warn!(contract_id, "{label} scrape failed: {e:#}");
             self.metrics
+                .contract_up
+                .with_label_values(&[contract_id])
+                .set(0.0);
+            self.metrics
                 .scrape_errors_total
                 .with_label_values(&[contract_id])
                 .inc();
             return false;
         }
+        self.metrics
+            .contract_up
+            .with_label_values(&[contract_id])
+            .set(1.0);
         true
     }
 
