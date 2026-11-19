@@ -2,6 +2,7 @@
 
 use std::env;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Absolute path to a release WASM artifact, resolved relative to the
@@ -22,21 +23,19 @@ pub fn wasm_path(contract_name: &str) -> String {
 }
 
 /// Configuration for Stellar testnet integration tests.
+///
+/// Only the network name is configurable (via `STELLAR_NETWORK`). It is
+/// passed to stellar-cli as `--network`, which resolves the matching RPC URL
+/// and network passphrase from the CLI's own network config.
 #[derive(Debug, Clone)]
 pub struct TestnetConfig {
     pub network: String,
-    pub rpc_url: String,
-    pub network_passphrase: String,
 }
 
 impl Default for TestnetConfig {
     fn default() -> Self {
         Self {
             network: env::var("STELLAR_NETWORK").unwrap_or_else(|_| "testnet".to_string()),
-            rpc_url: env::var("STELLAR_RPC_URL")
-                .unwrap_or_else(|_| "https://soroban-testnet.stellar.org".to_string()),
-            network_passphrase: env::var("STELLAR_NETWORK_PASSPHRASE")
-                .unwrap_or_else(|_| "Test SDF Network ; September 2015".to_string()),
         }
     }
 }
@@ -53,10 +52,36 @@ static ACCOUNT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 /// public key cannot sign transactions. So `name` (not `address`) is what
 /// gets passed to `--source`; `address` is only for display/contract-call
 /// arguments that expect a public key.
+///
+/// The identity is removed from the keystore (`stellar keys rm`) when the
+/// last clone of the account is dropped, so test runs don't leave key files
+/// behind. Moving `address` out of a temporary account (e.g.
+/// `TestAccount::generate()?.address`) removes the identity immediately,
+/// which is fine when only the public key is needed.
 #[derive(Debug, Clone)]
 pub struct TestAccount {
     pub name: String,
     pub address: String,
+    _identity: Arc<IdentityGuard>,
+}
+
+/// Removes a generated stellar-cli identity when dropped.
+#[derive(Debug)]
+struct IdentityGuard {
+    name: String,
+}
+
+impl IdentityGuard {
+    fn remove(name: &str) {
+        // Best-effort cleanup: ignore failures (e.g. CLI missing or key already gone).
+        let _ = Command::new("stellar").args(["keys", "rm", name]).output();
+    }
+}
+
+impl Drop for IdentityGuard {
+    fn drop(&mut self) {
+        Self::remove(&self.name);
+    }
 }
 
 impl TestAccount {
@@ -80,6 +105,10 @@ impl TestAccount {
             ));
         }
 
+        // From here on the identity exists in the keystore; the guard removes
+        // it on early return as well as when the account is dropped.
+        let guard = Arc::new(IdentityGuard { name: name.clone() });
+
         let address_output = Command::new("stellar")
             .args(["keys", "address", &name])
             .output()
@@ -96,7 +125,11 @@ impl TestAccount {
             .trim()
             .to_string();
 
-        Ok(Self { name, address })
+        Ok(Self {
+            name,
+            address,
+            _identity: guard,
+        })
     }
 
     /// Fund this account using Friendbot.
@@ -233,6 +266,9 @@ impl DeployedContract {
     }
 }
 
+/// Default fee (basis points) the suite initializes router-quote with.
+pub const DEFAULT_QUOTE_FEE_BPS: u32 = 30;
+
 /// Shared integration-test fixture that deploys and initializes all contracts.
 pub struct TestSuite {
     pub config: TestnetConfig,
@@ -245,6 +281,8 @@ pub struct TestSuite {
     pub router_middleware: Option<DeployedContract>,
     pub router_timelock: Option<DeployedContract>,
     pub router_multicall: Option<DeployedContract>,
+    pub router_quote: Option<DeployedContract>,
+    pub router_execution: Option<DeployedContract>,
 }
 
 impl TestSuite {
@@ -256,7 +294,11 @@ impl TestSuite {
         Ok(suite)
     }
 
-    /// Optional cleanup hook for local runs.
+    /// Cleanup hook for local runs.
+    ///
+    /// The suite's generated identities (`admin`, `user1`, `user2`) are
+    /// removed from the stellar-cli keystore when their `TestAccount`s are
+    /// dropped, which happens right after this runs from `Drop`.
     pub fn teardown(&self) {
         println!("Test suite teardown complete");
     }
@@ -297,6 +339,18 @@ impl TestSuite {
             .ok_or("Multicall contract not deployed".to_string())
     }
 
+    pub fn quote(&self) -> Result<&DeployedContract, String> {
+        self.router_quote
+            .as_ref()
+            .ok_or("Quote contract not deployed".to_string())
+    }
+
+    pub fn execution(&self) -> Result<&DeployedContract, String> {
+        self.router_execution
+            .as_ref()
+            .ok_or("Execution contract not deployed".to_string())
+    }
+
     fn new() -> Result<Self, String> {
         let config = TestnetConfig::default();
 
@@ -320,6 +374,8 @@ impl TestSuite {
             router_middleware: None,
             router_timelock: None,
             router_multicall: None,
+            router_quote: None,
+            router_execution: None,
         })
     }
 
@@ -368,6 +424,20 @@ impl TestSuite {
             network,
         )?);
 
+        self.router_quote = Some(DeployedContract::deploy(
+            &wasm_path("router_quote"),
+            "router-quote",
+            &self.admin,
+            network,
+        )?);
+
+        self.router_execution = Some(DeployedContract::deploy(
+            &wasm_path("router_execution"),
+            "router-execution",
+            &self.admin,
+            network,
+        )?);
+
         Ok(())
     }
 
@@ -395,7 +465,14 @@ impl TestSuite {
         if let Some(ref timelock) = self.router_timelock {
             timelock.invoke(
                 "initialize",
-                &["--admin", &self.admin.address, "--min_delay", "60"],
+                &[
+                    "--admin",
+                    &self.admin.address,
+                    "--min_delay",
+                    "60",
+                    "--max_pending_ops",
+                    "0",
+                ],
                 &self.admin,
             )?;
         }
@@ -404,6 +481,36 @@ impl TestSuite {
             multicall.invoke(
                 "initialize",
                 &["--admin", &self.admin.address, "--max_batch_size", "10"],
+                &self.admin,
+            )?;
+        }
+
+        if let Some(ref quote) = self.router_quote {
+            quote.invoke(
+                "initialize",
+                &[
+                    "--admin",
+                    &self.admin.address,
+                    "--default_fee_bps",
+                    &DEFAULT_QUOTE_FEE_BPS.to_string(),
+                ],
+                &self.admin,
+            )?;
+        }
+
+        if let Some(ref execution) = self.router_execution {
+            execution.invoke(
+                "initialize",
+                &[
+                    "--admin",
+                    &self.admin.address,
+                    "--max_retries",
+                    "3",
+                    "--backoff_base_ms",
+                    "0",
+                    "--backoff_multiplier",
+                    "200",
+                ],
                 &self.admin,
             )?;
         }
