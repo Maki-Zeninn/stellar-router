@@ -58,6 +58,8 @@ const DEFAULT_MAX_HISTORY_SIZE: u32 = 1000;
 /// could set an arbitrarily large (e.g. `u32::MAX`) cap, defeating the
 /// bounded-history feature's own unbounded-storage-growth protection.
 const MAX_HISTORY_SIZE_CAP: u32 = 10_000;
+/// Maximum number of history records returned by one paginated call.
+const MAX_HISTORY_PAGE_LIMIT: u32 = 100;
 
 /// Maximum backoff delay in milliseconds. Used to cap exponential backoff
 /// calculations and prevent arithmetic overflow when computing
@@ -837,6 +839,15 @@ impl RouterExecution {
         env: Env,
         limit: u32,
     ) -> Result<Vec<ExecutionRecord>, ExecutionError> {
+        Self::get_execution_history_paginated(env, 0, limit.min(MAX_HISTORY_PAGE_LIMIT))
+    }
+
+    /// Return a bounded page of execution history records (newest first).
+    pub fn get_execution_history_paginated(
+        env: Env,
+        start: u32,
+        limit: u32,
+    ) -> Result<Vec<ExecutionRecord>, ExecutionError> {
         // Issue #1302: extend TTL from this frequently-invoked read call too.
         router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         if !env.storage().instance().has(&DataKey::Admin) {
@@ -848,14 +859,18 @@ impl RouterExecution {
             .get(&DataKey::ExecHistory)
             .unwrap_or(Vec::new(&env));
         let len = history.len();
-        let take = if limit > len { len } else { limit };
+        let limit = limit.min(MAX_HISTORY_PAGE_LIMIT);
+        let skip = start.min(len);
+        let take = if limit > len.saturating_sub(skip) { len.saturating_sub(skip) } else { limit };
         let mut result = Vec::new(&env);
         // Return newest-first: iterate from the end
         let mut i = len;
         let mut collected = 0u32;
+        let mut skipped = 0u32;
         while i > 0 && collected < take {
             i -= 1;
             if let Some(entry) = history.get(i) {
+                if skipped < skip { skipped += 1; continue; }
                 result.push_back(entry);
                 collected += 1;
             }
