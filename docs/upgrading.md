@@ -63,19 +63,27 @@ This returns a WASM hash. Note it — you will need it in step 4.
 
 ### Step 4 — Execute the upgrade after the delay
 
-After the timelock delay has elapsed, execute the operation. The actual
-`update_current_contract_wasm` call must be made from within the contract
-itself (or via an authorized upgrade function). Add an `upgrade` function
-to each contract:
+After the timelock delay has elapsed, execute the operation. Every contract in
+this repository now exposes the same admin-gated `upgrade` entry point. The
+caller must authenticate and match the contract's configured admin (the
+`router-access` contract uses its `SuperAdmin` value). The entry point calls
+Soroban's `update_current_contract_wasm` host function and emits the shared
+`upgraded` event with `(caller, new_wasm_hash)`:
 
 ```rust
 pub fn upgrade(env: Env, caller: Address, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), RouterError> {
     caller.require_auth();
-    Self::require_admin(&env, &caller)?;
+    router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RouterError)?;
     env.deployer().update_current_contract_wasm(new_wasm_hash);
     Ok(())
 }
 ```
+
+The same signature is available on `router-core`, `router-registry`,
+`router-access`, `router-middleware`, `router-timelock`, `router-multicall`,
+`router-quote`, and `router-execution`. The entry point is direct-admin
+capable; operators should route it through `router-timelock` when their
+deployment governance requires a delay.
 
 Then invoke it:
 
