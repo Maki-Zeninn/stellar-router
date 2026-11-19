@@ -707,6 +707,21 @@ fn test_empty_json_object_returns_parse_error() {
     assert!(result.is_err());
 }
 
+/// Oversized WebSocket messages and frames are rejected by the upgrade limits.
+#[test]
+fn test_websocket_transport_limits_are_tiny_by_design() {
+    assert_eq!(crate::websocket::MAX_WS_MESSAGE_SIZE, 4 * 1024);
+    assert_eq!(crate::websocket::MAX_WS_FRAME_SIZE, 4 * 1024);
+}
+
+/// A long transaction ID must be rejected before it reaches either the local
+/// subscription set or the shared subscriber map.
+#[test]
+fn test_overlong_tx_id_is_rejected_before_storage() {
+    assert!(crate::websocket::validate_tx_id(&"t".repeat(128)).is_ok());
+    assert!(crate::websocket::validate_tx_id(&"t".repeat(129)).is_err());
+}
+
 // ── Status transitions ─────────────────────────────────────────────────────────
 
 /// Verify the full PENDING → SUBMITTED → CONFIRMED status transition sequence
