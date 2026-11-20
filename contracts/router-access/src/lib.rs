@@ -5,10 +5,11 @@
 //! Role-based access control for the stellar-router suite.
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec,
 };
 
 const MAX_HIERARCHY_DEPTH: u32 = 16;
+const MAX_PAGE_LIMIT: u32 = 100;
 
 /// Default cap on the total number of distinct role names the system may hold.
 /// Prevents unbounded `AllRoles` growth. Configurable via `set_role_limits`.
@@ -73,6 +74,25 @@ pub struct RouterAccess;
 
 #[contractimpl]
 impl RouterAccess {
+    /// Replace this contract's WASM after authenticating the configured admin.
+    ///
+    /// The hash must refer to WASM uploaded to the network before this call.
+    /// Instance storage is preserved by Soroban's in-place upgrade operation.
+    pub fn upgrade(
+        env: Env,
+        caller: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), AccessError> {
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::SuperAdmin, AccessError)?;
+        let event_hash = new_wasm_hash.clone();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_UPGRADED),),
+            (caller, event_hash),
+        );
+        Ok(())
+    }
     /// Initialize with a super-admin.
     pub fn initialize(env: Env, super_admin: Address) -> Result<(), AccessError> {
         router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
@@ -394,11 +414,17 @@ impl RouterAccess {
     /// # Returns
     /// A [`Vec<String>`] of all role names in the system.
     pub fn list_all_roles(env: Env) -> Vec<String> {
+        Self::list_all_roles_paginated(env, 0, MAX_PAGE_LIMIT)
+    }
+
+    pub fn list_all_roles_paginated(env: Env, start: u32, limit: u32) -> Vec<String> {
         router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
-        env.storage()
-            .instance()
-            .get(&DataKey::AllRoles)
-            .unwrap_or_else(|| Vec::new(&env))
+        let roles: Vec<String> = env.storage().instance().get(&DataKey::AllRoles).unwrap_or_else(|| Vec::new(&env));
+        let mut page = Vec::new(&env);
+        let end = start.saturating_add(limit.min(MAX_PAGE_LIMIT)).min(roles.len());
+        let mut i = start;
+        while i < end { page.push_back(roles.get(i).unwrap()); i += 1; }
+        page
     }
 
     /// Blacklist an address.
@@ -517,6 +543,10 @@ impl RouterAccess {
     }
 
     pub fn get_role_members(env: Env, role: String) -> Vec<Address> {
+        Self::get_role_members_paginated(env, role, 0, MAX_PAGE_LIMIT)
+    }
+
+    pub fn get_role_members_paginated(env: Env, role: String, start: u32, limit: u32) -> Vec<Address> {
         router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         let all_members: Vec<Address> = env
             .storage()
@@ -526,8 +556,12 @@ impl RouterAccess {
 
         // Filter out expired roles
         let mut active_members = Vec::new(&env);
+        let limit = limit.min(MAX_PAGE_LIMIT);
+        let mut skipped = 0u32;
         for member in all_members.iter() {
             if Self::has_role_internal(&env, &member, &role) {
+                if skipped < start { skipped += 1; continue; }
+                if active_members.len() >= limit { break; }
                 active_members.push_back(member.clone());
             }
         }
@@ -535,11 +569,17 @@ impl RouterAccess {
     }
 
     pub fn get_roles_for_address(env: Env, addr: Address) -> Vec<String> {
+        Self::get_roles_for_address_paginated(env, addr, 0, MAX_PAGE_LIMIT)
+    }
+
+    pub fn get_roles_for_address_paginated(env: Env, addr: Address, start: u32, limit: u32) -> Vec<String> {
         router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
-        env.storage()
-            .instance()
-            .get(&DataKey::AddressRoles(addr))
-            .unwrap_or_else(|| Vec::new(&env))
+        let roles: Vec<String> = env.storage().instance().get(&DataKey::AddressRoles(addr)).unwrap_or_else(|| Vec::new(&env));
+        let mut page = Vec::new(&env);
+        let end = start.saturating_add(limit.min(MAX_PAGE_LIMIT)).min(roles.len());
+        let mut i = start;
+        while i < end { page.push_back(roles.get(i).unwrap()); i += 1; }
+        page
     }
 
     /// Transfer an existing role grant from one address to another.

@@ -127,6 +127,10 @@ These targets check formatting and run Clippy for the root workspace plus the
 cargo build --target wasm32-unknown-unknown --release
 ```
 
+## Contract test calls
+
+When a contract call is expected to fail, use the generated client `try_<fn>` method so host rollback semantics are preserved. Use `env.as_contract` only for private helper access without persistence assertions.
+
 ## Code Style
 
 - Run `make fmt-check` before committing.

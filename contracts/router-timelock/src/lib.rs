@@ -16,9 +16,11 @@
 //! - `ops_cleaned`            — Expired/finalized operations cleaned (count)
 //! - `admin_transferred`      — Admin transferred (old_admin, new_admin)
 
+const MAX_PAGE_LIMIT: u32 = 100;
+
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, xdr::ToXdr, Address, Bytes, Env, String,
-    Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, xdr::ToXdr, Address, Bytes, BytesN, Env,
+    String, Symbol, Vec,
 };
 
 /// Complete storage-key map for the router-timelock contract.
@@ -131,6 +133,26 @@ pub struct RouterTimelock;
 
 #[contractimpl]
 impl RouterTimelock {
+    /// Replace this contract's WASM after authenticating the configured admin.
+    ///
+    /// The hash must refer to WASM uploaded to the network before this call.
+    /// Instance storage is preserved by Soroban's in-place upgrade operation.
+    pub fn upgrade(
+        env: Env,
+        caller: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), TimelockError> {
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, TimelockError)?;
+        let event_hash = new_wasm_hash.clone();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_UPGRADED),),
+            (caller, event_hash),
+        );
+        Ok(())
+    }
+
     /// Maximum depth at which `check_dependency_depth` will recurse into
     /// ancestor operations.
     ///
@@ -660,6 +682,11 @@ impl RouterTimelock {
     /// # Returns
     /// A [`Vec<Op>`] of all pending operations.
     pub fn get_pending_operations(env: Env) -> Vec<Op> {
+        Self::get_pending_operations_paginated(env, 0, MAX_PAGE_LIMIT)
+    }
+
+    /// Get a bounded page of pending operations.
+    pub fn get_pending_operations_paginated(env: Env, start: u32, limit: u32) -> Vec<Op> {
         router_common::extend_instance_ttl(
             &env,
             Self::INSTANCE_TTL_THRESHOLD,
@@ -671,6 +698,8 @@ impl RouterTimelock {
             .get(&DataKey::PendingOps)
             .unwrap_or_else(|| Vec::new(&env));
         let now = env.ledger().timestamp();
+        let limit = limit.min(MAX_PAGE_LIMIT);
+        let mut skipped = 0u32;
         let mut result = Vec::new(&env);
         for op_id in pending.iter() {
             if let Some(op) = env
@@ -685,6 +714,8 @@ impl RouterTimelock {
                     .checked_add(op.grace_period_seconds)
                     .is_some_and(|expiry| now <= expiry);
                 if !op.executed && !op.cancelled && within_grace {
+                    if skipped < start { skipped += 1; continue; }
+                    if result.len() >= limit { break; }
                     result.push_back(op);
                 }
             }
@@ -783,6 +814,13 @@ impl RouterTimelock {
     /// always yield an empty list. Use [`Self::get_operation_status`] with an
     /// `op_id` to query a finalized operation.
     pub fn get_operations_by_status(env: Env, status: OperationStatus) -> Vec<(Bytes, Op)> {
+        Self::get_operations_by_status_paginated(env, status, 0, MAX_PAGE_LIMIT)
+    }
+
+    /// Get a bounded page of pending operations matching a status.
+    pub fn get_operations_by_status_paginated(
+        env: Env, status: OperationStatus, start: u32, limit: u32,
+    ) -> Vec<(Bytes, Op)> {
         router_common::extend_instance_ttl(
             &env,
             Self::INSTANCE_TTL_THRESHOLD,
@@ -795,6 +833,8 @@ impl RouterTimelock {
             .unwrap_or_else(|| Vec::new(&env));
 
         let now = env.ledger().timestamp();
+        let limit = limit.min(MAX_PAGE_LIMIT);
+        let mut skipped = 0u32;
         let mut result = Vec::new(&env);
 
         for op_id in pending.iter() {
@@ -843,6 +883,8 @@ impl RouterTimelock {
                 };
 
                 if matches {
+                    if skipped < start { skipped += 1; continue; }
+                    if result.len() >= limit { break; }
                     result.push_back((op_id.clone(), op));
                 }
             }

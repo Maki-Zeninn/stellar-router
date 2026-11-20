@@ -204,32 +204,35 @@ Queue an admin transfer with a 24-hour delay, execute after the ETA, and emergen
 ### Queue an operation
 
 ```bash
-# Initialize timelock with 24h minimum delay
+# Initialize timelock with 24h minimum delay and at most 100 pending
+# operations (max_pending_ops = 0 means unlimited)
 stellar contract invoke --id <TIMELOCK_ID> --network testnet --source admin \
-  -- initialize --admin <ADMIN> --min_delay 86400
+  -- initialize --admin <ADMIN> --min_delay 86400 --max_pending_ops 100
 
-# Queue an admin transfer with 24h delay
+# Queue an admin transfer with 24h delay and a 7-day execution window
 stellar contract invoke --id <TIMELOCK_ID> --network testnet --source admin \
   -- queue \
   --proposer <ADMIN> \
   --description "Transfer router admin to multisig" \
   --target <CORE_ID> \
   --delay 86400 \
-  --depends_on '["void"]'
+  --grace_period_seconds 604800 \
+  --deps '[]'
 ```
 
-The command outputs an `op_id`. Save it for execution.
+The command outputs the `op_id` as a hex string (32 bytes, the SHA-256 of
+description + target + eta). Save it for execution.
 
 ### Execute after delay
 
 ```bash
 # After 24h, check the operation
 stellar contract invoke --id <TIMELOCK_ID> --network testnet --source admin \
-  -- get_op --op_id 1
+  -- get_operation_status --op_id <OP_ID>
 
 # Execute the queued operation
 stellar contract invoke --id <TIMELOCK_ID> --network testnet --source admin \
-  -- execute --caller <ADMIN> --op_id 1
+  -- execute --caller <ADMIN> --op_id <OP_ID>
 
 # Verify the transfer
 stellar contract invoke --id <CORE_ID> --network testnet --source user \
@@ -239,14 +242,13 @@ stellar contract invoke --id <CORE_ID> --network testnet --source user \
 ### Emergency cancel
 
 ```bash
-# Cancel before ETA
+# Cancel before execution
 stellar contract invoke --id <TIMELOCK_ID> --network testnet --source admin \
-  -- cancel --caller <ADMIN> --op_id 1
-
-# Bulk cancel all pending operations
-stellar contract invoke --id <TIMELOCK_ID> --network testnet --source admin \
-  -- cancel_all --admin <ADMIN>
+  -- cancel --caller <ADMIN> --op_id <OP_ID>
 ```
+
+There is no bulk cancel; list pending operations with
+`get_operations_by_status --status Queued` and cancel each one.
 
 ---
 

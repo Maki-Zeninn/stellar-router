@@ -66,6 +66,8 @@ mod quick_tests {
             wasm_path("router_middleware"),
             wasm_path("router_timelock"),
             wasm_path("router_multicall"),
+            wasm_path("router_quote"),
+            wasm_path("router_execution"),
         ];
 
         for contract in contracts {

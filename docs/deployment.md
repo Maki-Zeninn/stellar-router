@@ -127,8 +127,9 @@ TIMELOCK_ID=$(stellar contract deploy \
 echo "timelock: $TIMELOCK_ID"
 
 # min_delay in seconds — use 86400 (24h) for mainnet, 3600 (1h) for testnet
+# max_pending_ops caps the number of pending operations; 0 means unlimited
 stellar contract invoke --id $TIMELOCK_ID --network <NETWORK> --source <ACCOUNT> \
-  -- initialize --admin <ADMIN_ADDRESS> --min_delay 86400
+  -- initialize --admin <ADMIN_ADDRESS> --min_delay 86400 --max_pending_ops 100
 ```
 
 ### 5. Deploy router-multicall

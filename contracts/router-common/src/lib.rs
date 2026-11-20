@@ -55,6 +55,9 @@
 /// Standard event topic for admin transfer operations
 pub const EVENT_ADMIN_TRANSFERRED: &str = "admin_transferred";
 
+/// Standard event topic for an in-place contract WASM upgrade
+pub const EVENT_UPGRADED: &str = "upgraded";
+
 /// Emitted when the super-admin changes the role-system limits.
 pub const EVENT_ROLE_LIMITS_SET: &str = "role_limits_set";
 

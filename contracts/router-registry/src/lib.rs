@@ -12,7 +12,7 @@
 //! - Admin-controlled with ownership transfer
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Val, Vec,
 };
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -90,6 +90,8 @@ pub enum RegistryError {
 /// and the buffer declaration (`[0u8; MAX_CONSTRAINT_LEN]`) must use this
 /// constant so they stay in sync — a mismatch would cause a panic on
 /// out-of-bounds indexing at runtime.
+const MAX_PAGE_LIMIT: u32 = 100;
+
 const MAX_CONSTRAINT_LEN: usize = 32;
 
 /// Minimum remaining TTL (in ledgers) before instance storage is extended.
@@ -132,6 +134,25 @@ pub struct RouterRegistry;
 
 #[contractimpl]
 impl RouterRegistry {
+    /// Replace this contract's WASM after authenticating the configured admin.
+    ///
+    /// The hash must refer to WASM uploaded to the network before this call.
+    /// Instance storage is preserved by Soroban's in-place upgrade operation.
+    pub fn upgrade(
+        env: Env,
+        caller: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), RegistryError> {
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, RegistryError)?;
+        let event_hash = new_wasm_hash.clone();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_UPGRADED),),
+            (caller, event_hash),
+        );
+        Ok(())
+    }
     /// Initialize the registry with an admin address.
     ///
     /// Must be called exactly once before any other function. Sets the admin
@@ -710,13 +731,22 @@ impl RouterRegistry {
     /// A [`Vec<u32>`] of version numbers. Returns an empty vector if `name`
     /// has no registered versions.
     pub fn versions(env: Env, name: String) -> Vec<u32> {
+        Self::versions_paginated(env, name, 0, MAX_PAGE_LIMIT)
+    }
+
+    pub fn versions_paginated(env: Env, name: String, start: u32, limit: u32) -> Vec<u32> {
         router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         // Invariant: versions for a given `name` are stored in ascending order.
         //
         // This is guaranteed by `register_entry()` enforcing that each new
         // `version` is strictly greater than all existing versions for the
         // same name and then appending to the end of the stored list.
-        Self::get_versions_list(&env, &name)
+        let versions = Self::get_versions_list(&env, &name);
+        let mut page = Vec::new(&env);
+        let end = start.saturating_add(limit.min(MAX_PAGE_LIMIT)).min(versions.len());
+        let mut i = start;
+        while i < end { page.push_back(versions.get(i).unwrap()); i += 1; }
+        page
     }
 
     /// Get all contract entries for a name.
@@ -731,8 +761,16 @@ impl RouterRegistry {
     /// # Returns
     /// A [`Vec<ContractEntry>`] of all entries for `name`.
     pub fn get_all_versions(env: Env, name: String) -> Vec<ContractEntry> {
+        Self::get_all_versions_paginated(env, name, 0, MAX_PAGE_LIMIT)
+    }
+
+    pub fn get_all_versions_paginated(
+        env: Env, name: String, start: u32, limit: u32,
+    ) -> Vec<ContractEntry> {
         router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         let versions = Self::get_versions_list(&env, &name);
+        let limit = limit.min(MAX_PAGE_LIMIT);
+        let mut skipped = 0u32;
         let mut entries = Vec::new(&env);
         for v in versions.iter() {
             if let Some(entry) = env
@@ -740,6 +778,8 @@ impl RouterRegistry {
                 .instance()
                 .get(&DataKey::Entry(name.clone(), v))
             {
+                if skipped < start { skipped += 1; continue; }
+                if entries.len() >= limit { break; }
                 entries.push_back(entry);
             }
         }
@@ -757,11 +797,17 @@ impl RouterRegistry {
     /// # Returns
     /// A [`Vec<String>`] of all registered contract names.
     pub fn get_all_names(env: Env) -> Vec<String> {
+        Self::get_all_names_paginated(env, 0, MAX_PAGE_LIMIT)
+    }
+
+    pub fn get_all_names_paginated(env: Env, start: u32, limit: u32) -> Vec<String> {
         router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
-        env.storage()
-            .instance()
-            .get(&DataKey::ContractNames)
-            .unwrap_or_else(|| Vec::new(&env))
+        let names: Vec<String> = env.storage().instance().get(&DataKey::ContractNames).unwrap_or_else(|| Vec::new(&env));
+        let mut page = Vec::new(&env);
+        let end = start.saturating_add(limit.min(MAX_PAGE_LIMIT)).min(names.len());
+        let mut i = start;
+        while i < end { page.push_back(names.get(i).unwrap()); i += 1; }
+        page
     }
 
     /// Find the registry entry for a given contract address (O(1) reverse lookup).

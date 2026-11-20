@@ -18,6 +18,17 @@ use crate::{
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const PING_INTERVAL: Duration = Duration::from_secs(30);
+pub(crate) const MAX_WS_MESSAGE_SIZE: usize = 4 * 1024;
+pub(crate) const MAX_WS_FRAME_SIZE: usize = 4 * 1024;
+pub(crate) const MAX_TX_ID_BYTES: usize = 128;
+
+pub(crate) fn validate_tx_id(tx_id: &str) -> Result<(), &'static str> {
+    if tx_id.len() > MAX_TX_ID_BYTES {
+        Err("tx_id exceeds the 128-byte maximum")
+    } else {
+        Ok(())
+    }
+}
 
 /// WebSocket endpoint for transaction status updates.
 ///
@@ -57,7 +68,9 @@ pub async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> 
             })
             .into_response();
     }
-    ws.on_upgrade(|socket| handle_socket(socket, state))
+    ws.max_message_size(MAX_WS_MESSAGE_SIZE)
+        .max_frame_size(MAX_WS_FRAME_SIZE)
+        .on_upgrade(|socket| handle_socket(socket, state))
         .into_response()
 }
 
@@ -82,7 +95,16 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         last_activity = tokio::time::Instant::now();
                         match serde_json::from_str::<SubscribeMessage>(&text) {
                             Ok(sub_msg) => {
-                                if sub_msg.action == "subscribe" {
+                                if let Err(message) = validate_tx_id(&sub_msg.tx_id) {
+                                    let response = json!({
+                                        "msg_type": "error",
+                                        "data": {"message": message},
+                                    });
+                                    if let Err(e) = sender.send(Message::Text(response.to_string())).await {
+                                        error!("Failed to send tx_id validation error: {}", e);
+                                        break;
+                                    }
+                                } else if sub_msg.action == "subscribe" {
                                     if subscriptions.len() >= MAX_SUBSCRIPTIONS_PER_CONNECTION {
                                         warn!(
                                             "Client hit subscription limit of {}",

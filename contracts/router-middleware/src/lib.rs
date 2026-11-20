@@ -35,8 +35,10 @@ pub mod call_log;
 pub mod circuit_breaker;
 pub mod rate_limit;
 
+const MAX_PAGE_LIMIT: u32 = 100;
+
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, Map, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Map, String, Symbol, Vec,
 };
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -250,6 +252,25 @@ pub struct RouterMiddleware;
 
 #[contractimpl]
 impl RouterMiddleware {
+    /// Replace this contract's WASM after authenticating the configured admin.
+    ///
+    /// The hash must refer to WASM uploaded to the network before this call.
+    /// Instance storage is preserved by Soroban's in-place upgrade operation.
+    pub fn upgrade(
+        env: Env,
+        caller: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), MiddlewareError> {
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, MiddlewareError)?;
+        let event_hash = new_wasm_hash.clone();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_UPGRADED),),
+            (caller, event_hash),
+        );
+        Ok(())
+    }
     const MAX_LOG_RETENTION: u32 = 10_000;
 
     /// Initialize middleware with an admin.
@@ -708,12 +729,20 @@ impl RouterMiddleware {
 
     /// Get the call log for a route.
     pub fn get_call_log(env: Env, route: String) -> Vec<CallLogEntry> {
-        Self::get_call_log_internal(&env, route, None)
+        Self::get_call_log_paginated(env, route, 0, MAX_PAGE_LIMIT)
+    }
+
+    pub fn get_call_log_paginated(env: Env, route: String, start: u32, limit: u32) -> Vec<CallLogEntry> {
+        Self::get_call_log_internal(&env, route, None, start, limit)
     }
 
     /// Get a filtered call log for a route.
     pub fn get_call_log_filtered(env: Env, route: String, success_only: bool) -> Vec<CallLogEntry> {
-        Self::get_call_log_internal(&env, route, Some(success_only))
+        Self::get_call_log_filtered_paginated(env, route, success_only, 0, MAX_PAGE_LIMIT)
+    }
+
+    pub fn get_call_log_filtered_paginated(env: Env, route: String, success_only: bool, start: u32, limit: u32) -> Vec<CallLogEntry> {
+        Self::get_call_log_internal(&env, route, Some(success_only), start, limit)
     }
 
     /// Private internal helper to deduplicate ring buffer traversal and filtering logic.
@@ -721,6 +750,8 @@ impl RouterMiddleware {
         env: &Env,
         route: String,
         success_filter: Option<bool>,
+        start: u32,
+        limit: u32,
     ) -> Vec<CallLogEntry> {
         let Some(log_state) = env
             .storage()
@@ -741,6 +772,8 @@ impl RouterMiddleware {
         }
 
         let mut ordered = Vec::new(env);
+        let limit = limit.min(MAX_PAGE_LIMIT);
+        let mut skipped = 0u32;
         if count < cap {
             for i in 0..count {
                 if let Some(entry) = log_state.entries.get(i) {
@@ -749,6 +782,8 @@ impl RouterMiddleware {
                         Some(status) => entry.success == status,
                     };
                     if should_include {
+                        if skipped < start { skipped += 1; continue; }
+                        if ordered.len() >= limit { break; }
                         ordered.push_back(entry);
                     }
                 }
@@ -762,6 +797,8 @@ impl RouterMiddleware {
                         Some(status) => entry.success == status,
                     };
                     if should_include {
+                        if skipped < start { skipped += 1; continue; }
+                        if ordered.len() >= limit { break; }
                         ordered.push_back(entry);
                     }
                 }
