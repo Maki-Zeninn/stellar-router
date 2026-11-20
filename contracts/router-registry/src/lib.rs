@@ -832,17 +832,23 @@ impl RouterRegistry {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /// Aggregate completion event for `bulk_register`, mirroring
-    /// `router-multicall`'s `batch_executed` event so a subscriber watching
-    /// only the event stream can see that a batch ran (and how it went) even
-    /// when every item in it failed — per-item events alone don't cover that.
+    /// Aggregate completion event for `bulk_register`, published under the
+    /// registry-specific `bulk_register_completed` topic so a subscriber
+    /// watching only the event stream can see that a batch ran (and how it
+    /// went) even when every item in it failed — per-item events alone don't
+    /// cover that.
+    ///
+    /// This deliberately does NOT reuse `router-multicall`'s `batch_executed`
+    /// topic: that topic carries a different payload shape, and sharing it
+    /// would force indexers to know which contract emitted an event in order
+    /// to decode it (issue #1644).
     fn emit_bulk_register_completed(
         env: &Env,
         caller: &Address,
         result: &router_common::BatchResult,
     ) {
         env.events().publish(
-            (Symbol::new(env, router_common::EVENT_BATCH_EXECUTED),),
+            (Symbol::new(env, router_common::EVENT_BULK_REGISTER_COMPLETED),),
             (
                 caller.clone(),
                 soroban_sdk::String::from_str(env, "bulk_register"),
@@ -852,15 +858,16 @@ impl RouterRegistry {
         );
     }
 
-    /// Aggregate completion event for `deprecate_many` — see
-    /// `emit_bulk_register_completed`.
+    /// Aggregate completion event for `deprecate_many`, published under the
+    /// registry-specific `deprecate_many_completed` topic — see
+    /// `emit_bulk_register_completed` for why this is not `batch_executed`.
     fn emit_deprecate_many_completed(
         env: &Env,
         caller: &Address,
         result: &router_common::BatchResult,
     ) {
         env.events().publish(
-            (Symbol::new(env, router_common::EVENT_BATCH_EXECUTED),),
+            (Symbol::new(env, router_common::EVENT_DEPRECATE_MANY_COMPLETED),),
             (
                 caller.clone(),
                 soroban_sdk::String::from_str(env, "deprecate_many"),
@@ -2460,9 +2467,9 @@ mod tests {
     // ── bulk_register fail_fast event + ordering fixes (#1444, #1443) ─────────
 
     #[test]
-    fn test_bulk_register_fail_fast_duplicate_emits_batch_executed_event() {
+    fn test_bulk_register_fail_fast_duplicate_emits_bulk_register_completed_event() {
         // Issue #1444: the intra-batch-duplicate early return must still
-        // emit exactly one batch_executed event, same as the
+        // emit exactly one bulk_register_completed event, same as the
         // validate_registration early-return path already did.
         let (env, admin, client) = setup();
         let name = String::from_str(&env, "oracle");
@@ -2495,7 +2502,7 @@ mod tests {
             event.1,
             vec![
                 &env,
-                Symbol::new(&env, router_common::EVENT_BATCH_EXECUTED).into_val(&env)
+                Symbol::new(&env, router_common::EVENT_BULK_REGISTER_COMPLETED).into_val(&env)
             ]
         );
         let (caller, op, successes, failures): (Address, String, u32, u32) =

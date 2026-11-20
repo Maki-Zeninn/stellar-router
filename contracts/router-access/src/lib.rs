@@ -163,7 +163,6 @@ impl RouterAccess {
         Self::grant_role_internal(&env, &account, &role, expires_in)
     }
 
-    /// Grant a role to multiple accounts in one call.
     /// Grant a role to multiple accounts in one call, returning per-account results.
     ///
     /// This function processes a batch of accounts and attempts to grant the specified role

@@ -22,7 +22,9 @@
 //! - `initialized` — Contract initialized (admin, max_batch_size)
 //! - `call_result` — Individual call result logged; payload is `(caller, target, function, success, call_index, simulate)`
 //! - `call_failed` — Emitted when a `required=true` call fails; payload is `(call_index, target, function, simulate)`
-//! - `batch_executed` — Batch execution completed (summary_data)
+//! - `batch_executed` — Batch execution completed; payload is
+//!   `(caller, batch_id: u64, succeeded: u32, failed: u32, processed: u32, simulate: bool)`.
+//!   This topic is exclusive to router-multicall; other contracts use their own topics.
 //! - `max_batch_size_updated` — Max batch size updated (old_size, new_size)
 //! - `admin_transferred` — Admin transferred (old_admin, new_admin)
 

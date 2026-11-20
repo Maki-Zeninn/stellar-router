@@ -190,13 +190,25 @@ Deletes a route and removes any aliases pointing to it.
 ### `resolve(name) → Result<Address, RouterError>`
 Resolves a route name (or alias) to its contract address. Increments `total_routed`.
 
-**When any route has a score, `resolve` returns the highest-scoring eligible route instead of `name`** — see [Scoring](#scoring).
+`resolve` always returns the address registered for `name` (after alias lookup). Route scores never change which address is returned: if `name` is unknown, paused or expired, the call fails with `RouteNotFound`, `RoutePaused` or `RouteExpired` for `name`, regardless of any scored routes. Use [`resolve_best`](#resolve_bestgroup--resultaddress-routererror) when you want score-based selection.
 
 **Errors:** `RouterPaused`, `RouteNotFound`, `RoutePaused`, `RouteExpired` (TTL ledger exceeded)
 
 ```bash
 stellar contract invoke --id <CORE_ID> --network testnet --source any \
   -- resolve --name oracle
+```
+
+---
+
+### `resolve_best(group) → Result<Address, RouterError>`
+Explicit score-based selection. Chooses the highest-composite scored route among the routes that share the tag `group` (see [Tags & metadata](#tags--metadata)) and returns its address. Paused, expired and unscored routes in the group are skipped. Increments `total_routed` on success. See [Scoring](#scoring) for the composite formula.
+
+**Errors:** `RouterPaused`, `RouteNotFound` (no route carries the tag `group`), `RoutePaused` (every scored route in the group is paused), `RouteExpired` (every scored route in the group has expired)
+
+```bash
+stellar contract invoke --id <CORE_ID> --network testnet --source any \
+  -- resolve_best --group dex
 ```
 
 ---
@@ -339,7 +351,7 @@ Removes several routes, and any aliases pointing to them, in one transaction. Ca
 ---
 
 ### `batch_resolve(names: Vec<String>) → Vec<BatchResolveResult>`
-Resolves each name (or alias) using the same logic as `resolve` and returns one `BatchResolveResult` per input, in input order: `Ok(Address)` or `Err(ResolveError)`, where `ResolveError` is one of `RouterPaused`, `RouteNotFound`, `RoutePaused`, `NotInitialized`, `RouteExpired`. Never fails as a whole. Every successful entry increments `total_routed`, and — like `resolve` — is subject to score-based selection (see [Scoring](#scoring)).
+Resolves each name (or alias) using the same logic as `resolve` and returns one `BatchResolveResult` per input, in input order: `Ok(Address)` or `Err(ResolveError)`, where `ResolveError` is one of `RouterPaused`, `RouteNotFound`, `RoutePaused`, `NotInitialized`, `RouteExpired`. Never fails as a whole. Every successful entry increments `total_routed`. Like `resolve`, each entry returns the address registered under that name regardless of scores; use `resolve_best` for score-based selection (see [Scoring](#scoring)).
 
 ---
 
@@ -380,7 +392,7 @@ composite = liquidity_weight * liquidity_score
           - fee_bps / fee_divisor
 ```
 
-> **Scoring changes what `resolve` returns.** Whenever at least one non-paused, scored route exists, the contract caches the highest-composite route (recomputed on every score, weight, pause and removal change). `resolve(name)` and `batch_resolve` return the address of that cached best route — **regardless of the `name` requested** — as long as it has not expired. Only when no eligible scored route exists does `resolve` fall back to the route registered under `name`. Do not assign scores on a router whose callers expect `resolve(name)` to return that exact route.
+> **Scoring never changes what `resolve(name)` returns.** `resolve` and `batch_resolve` always return the address registered under the requested name (or its alias). Score-based selection is opt-in through the explicit APIs: `resolve_best(group)` picks the highest-composite route among the routes sharing a tag, and `get_best_route(candidates, …)` picks among an explicit candidate list. The contract also caches the highest-composite route (recomputed on every score, weight, pause and removal change) for these selection APIs; it is never substituted for a requested name.
 
 ---
 
@@ -412,14 +424,14 @@ Returns the score assigned to `name`, or `None` if it has none.
 ### `get_best_route(candidates: Vec<String>, min_score: i64, fallback_name: Option<String>) → Result<Option<String>, RouterError>`
 Evaluates the given candidate names and returns the one with the highest composite score. Paused, expired, missing and unscored candidates are skipped. If the best composite is below `min_score` (or no candidate qualifies), `fallback_name` is returned instead. Read-only apart from emitting `best_route_selected`.
 
-Note: this function uses the fixed default formula `liquidity_score + reliability_score - fee_bps / 10`; it does **not** apply the weights configured with `set_scoring_weights` (those only affect the cached best route used by `resolve`).
+Note: this function uses the fixed default formula `liquidity_score + reliability_score - fee_bps / 10`; it does **not** apply the weights configured with `set_scoring_weights` (those only affect the cached best route used by `resolve_best`).
 
 **Errors:** `RouterPaused`
 
 ---
 
 ### `set_scoring_weights(caller, weights: ScoringWeights) → Result<(), RouterError>`
-Sets the `liquidity_weight`, `reliability_weight` and `fee_divisor` used by the composite formula for the cached best route, then re-ranks all routes. Caller must be admin. Emits `scoring_weights_updated`.
+Sets the `liquidity_weight`, `reliability_weight` and `fee_divisor` used by the composite formula for the cached best route (used by `resolve_best`), then re-ranks all routes. Caller must be admin. Emits `scoring_weights_updated`.
 
 **Errors:** `Unauthorized`, `NotInitialized`, `InvalidScoringWeights` (`fee_divisor <= 0`, a negative weight, or a weight above 1000)
 

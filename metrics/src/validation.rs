@@ -61,7 +61,11 @@ pub fn validate_contract_id(id: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-/// Validate a route name: non-empty, max `MAX_ROUTE_NAME_LEN` chars, alphanumeric + underscore/hyphen.
+/// Validate a route name: non-empty, max `MAX_ROUTE_NAME_LEN` chars, alphanumeric + slash/hyphen.
+///
+/// Must stay in sync with the on-chain rules in
+/// `contracts/router-core/src/lib.rs::validate_route_name` (allowed set
+/// `[A-Za-z0-9/-]`; underscores are not allowed).
 ///
 /// Not yet called from any handler — kept for validating route-name query
 /// params once an endpoint accepts one.
@@ -77,10 +81,10 @@ pub fn validate_route_name(name: &str) -> Result<(), ValidationError> {
     }
     if !name
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        .all(|c| c.is_ascii_alphanumeric() || c == '/' || c == '-')
     {
         return Err(ValidationError::new(
-            "route name must contain only alphanumeric characters, underscores, or hyphens",
+            "route name must contain only alphanumeric characters, slashes, or hyphens",
         ));
     }
     Ok(())
@@ -148,7 +152,17 @@ mod tests {
 
     #[test]
     fn valid_route_name() {
-        assert!(validate_route_name("oracle_feed-v2").is_ok());
+        assert!(validate_route_name("oracle/v2").is_ok());
+    }
+
+    #[test]
+    fn route_name_with_slash_accepted() {
+        assert!(validate_route_name("oracle/v2").is_ok());
+    }
+
+    #[test]
+    fn route_name_with_underscore_rejected() {
+        assert!(validate_route_name("oracle_feed").is_err());
     }
 
     #[test]
