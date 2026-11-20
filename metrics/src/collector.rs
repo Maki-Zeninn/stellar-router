@@ -22,6 +22,7 @@
 use std::time::Instant;
 
 use anyhow::Result;
+use futures::{stream, StreamExt};
 use tracing::{error, info, warn};
 
 use crate::cli::Args;
@@ -56,51 +57,45 @@ impl Collector {
             }
         };
 
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
+            ticker.tick().await;
             let cycle_ok = self.scrape_all(&client).await;
             self.metrics.up.set(if cycle_ok { 1.0 } else { 0.0 });
-            tokio::time::sleep(interval).await;
         }
     }
 
     /// Scrape all configured contracts.  Returns `true` if every scrape
     /// succeeded, `false` if any failed.
     async fn scrape_all(&self, client: &dyn RpcClient) -> bool {
-        let core_ok = self
-            .scrape_and_record(
+        let (core_ok, middleware_ok, registry_ok, quote_ok, execution_ok) = tokio::join!(
+            self.scrape_and_record(
                 &self.args.core_contract_id,
                 "core",
                 self.scrape_core(client, &self.args.core_contract_id),
-            )
-            .await;
-        let middleware_ok = self
-            .scrape_and_record(
+            ),
+            self.scrape_and_record(
                 &self.args.middleware_contract_id,
                 "middleware",
                 self.scrape_middleware(client, &self.args.middleware_contract_id),
-            )
-            .await;
-        let registry_ok = self
-            .scrape_and_record(
+            ),
+            self.scrape_and_record(
                 &self.args.registry_contract_id,
                 "registry",
                 self.scrape_registry(client, &self.args.registry_contract_id),
-            )
-            .await;
-        let quote_ok = self
-            .scrape_and_record(
+            ),
+            self.scrape_and_record(
                 &self.args.quote_contract_id,
                 "quote",
                 self.scrape_quote(client, &self.args.quote_contract_id),
-            )
-            .await;
-        let execution_ok = self
-            .scrape_and_record(
+            ),
+            self.scrape_and_record(
                 &self.args.execution_contract_id,
                 "execution",
                 self.scrape_execution(client, &self.args.execution_contract_id),
-            )
-            .await;
+            ),
+        );
 
         core_ok && middleware_ok && registry_ok && quote_ok && execution_ok
     }
@@ -172,26 +167,29 @@ impl Collector {
         let routes = client
             .call_string_vec(contract_id, "get_all_routes")
             .await?;
-        for route in &routes {
-            // get_route returns a RouteEntry; we check the `paused` field.
-            // The JSON representation of a Soroban struct is a map of field names.
-            let route_result = client
-                .simulate_invoke(contract_id, "get_route", vec![encode_string_arg(route)])
-                .await;
-
-            match route_result {
-                Ok(val) => {
-                    let paused = extract_route_paused(&val).unwrap_or(false);
-                    self.metrics
-                        .core_route_paused
-                        .with_label_values(&[contract_id, route])
-                        .set(if paused { 1.0 } else { 0.0 });
+        stream::iter(routes.iter().cloned())
+            .map(|route| async move {
+                let route_result = client
+                    .simulate_invoke(contract_id, "get_route", vec![encode_string_arg(&route)])
+                    .await;
+                (route, route_result)
+            })
+            .buffer_unordered(self.args.scrape_concurrency.max(1))
+            .for_each(|(route, route_result)| async {
+                match route_result {
+                    Ok(val) => {
+                        let paused = extract_route_paused(&val).unwrap_or(false);
+                        self.metrics
+                            .core_route_paused
+                            .with_label_values(&[contract_id, &route])
+                            .set(if paused { 1.0 } else { 0.0 });
+                    }
+                    Err(e) => {
+                        warn!(contract_id, route, "failed to get route state: {e:#}");
+                    }
                 }
-                Err(e) => {
-                    warn!(contract_id, route, "failed to get route state: {e:#}");
-                }
-            }
-        }
+            })
+            .await;
 
         let elapsed = start.elapsed().as_secs_f64();
         self.metrics
@@ -227,36 +225,41 @@ impl Collector {
             .call_string_vec(contract_id, "get_configured_routes")
             .await?;
 
-        for route in &routes {
-            let cb_result = client
-                .simulate_invoke(
-                    contract_id,
-                    "circuit_breaker_state",
-                    vec![encode_string_arg(route)],
-                )
-                .await;
-
-            match cb_result {
-                Ok(val) => {
-                    let (is_open, failure_count) =
-                        extract_circuit_breaker_state(&val).unwrap_or((false, 0));
-                    self.metrics
-                        .middleware_circuit_open
-                        .with_label_values(&[contract_id, route])
-                        .set(if is_open { 1.0 } else { 0.0 });
-                    self.metrics
-                        .middleware_failure_count
-                        .with_label_values(&[contract_id, route])
-                        .set(failure_count as f64);
-                }
-                Err(e) => {
-                    warn!(
+        stream::iter(routes.iter().cloned())
+            .map(|route| async move {
+                let cb_result = client
+                    .simulate_invoke(
                         contract_id,
-                        route, "failed to get circuit breaker state: {e:#}"
-                    );
+                        "circuit_breaker_state",
+                        vec![encode_string_arg(&route)],
+                    )
+                    .await;
+                (route, cb_result)
+            })
+            .buffer_unordered(self.args.scrape_concurrency.max(1))
+            .for_each(|(route, cb_result)| async {
+                match cb_result {
+                    Ok(val) => {
+                        let (is_open, failure_count) =
+                            extract_circuit_breaker_state(&val).unwrap_or((false, 0));
+                        self.metrics
+                            .middleware_circuit_open
+                            .with_label_values(&[contract_id, &route])
+                            .set(if is_open { 1.0 } else { 0.0 });
+                        self.metrics
+                            .middleware_failure_count
+                            .with_label_values(&[contract_id, &route])
+                            .set(failure_count as f64);
+                    }
+                    Err(e) => {
+                        warn!(
+                            contract_id,
+                            route, "failed to get circuit breaker state: {e:#}"
+                        );
+                    }
                 }
-            }
-        }
+            })
+            .await;
 
         let elapsed = start.elapsed().as_secs_f64();
         self.metrics
@@ -532,6 +535,7 @@ mod tests {
             scrape_interval_secs: 15,
             listen: "0.0.0.0:9090".to_string(),
             rpc_timeout_secs: 10,
+            scrape_concurrency: 8,
         };
         let collector = Collector::new(args, metrics.clone());
         (collector, metrics)

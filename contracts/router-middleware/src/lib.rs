@@ -35,6 +35,8 @@ pub mod call_log;
 pub mod circuit_breaker;
 pub mod rate_limit;
 
+const MAX_PAGE_LIMIT: u32 = 100;
+
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Map, String, Symbol, Vec,
 };
@@ -727,12 +729,20 @@ impl RouterMiddleware {
 
     /// Get the call log for a route.
     pub fn get_call_log(env: Env, route: String) -> Vec<CallLogEntry> {
-        Self::get_call_log_internal(&env, route, None)
+        Self::get_call_log_paginated(env, route, 0, MAX_PAGE_LIMIT)
+    }
+
+    pub fn get_call_log_paginated(env: Env, route: String, start: u32, limit: u32) -> Vec<CallLogEntry> {
+        Self::get_call_log_internal(&env, route, None, start, limit)
     }
 
     /// Get a filtered call log for a route.
     pub fn get_call_log_filtered(env: Env, route: String, success_only: bool) -> Vec<CallLogEntry> {
-        Self::get_call_log_internal(&env, route, Some(success_only))
+        Self::get_call_log_filtered_paginated(env, route, success_only, 0, MAX_PAGE_LIMIT)
+    }
+
+    pub fn get_call_log_filtered_paginated(env: Env, route: String, success_only: bool, start: u32, limit: u32) -> Vec<CallLogEntry> {
+        Self::get_call_log_internal(&env, route, Some(success_only), start, limit)
     }
 
     /// Private internal helper to deduplicate ring buffer traversal and filtering logic.
@@ -740,6 +750,8 @@ impl RouterMiddleware {
         env: &Env,
         route: String,
         success_filter: Option<bool>,
+        start: u32,
+        limit: u32,
     ) -> Vec<CallLogEntry> {
         let Some(log_state) = env
             .storage()
@@ -760,6 +772,8 @@ impl RouterMiddleware {
         }
 
         let mut ordered = Vec::new(env);
+        let limit = limit.min(MAX_PAGE_LIMIT);
+        let mut skipped = 0u32;
         if count < cap {
             for i in 0..count {
                 if let Some(entry) = log_state.entries.get(i) {
@@ -768,6 +782,8 @@ impl RouterMiddleware {
                         Some(status) => entry.success == status,
                     };
                     if should_include {
+                        if skipped < start { skipped += 1; continue; }
+                        if ordered.len() >= limit { break; }
                         ordered.push_back(entry);
                     }
                 }
@@ -781,6 +797,8 @@ impl RouterMiddleware {
                         Some(status) => entry.success == status,
                     };
                     if should_include {
+                        if skipped < start { skipped += 1; continue; }
+                        if ordered.len() >= limit { break; }
                         ordered.push_back(entry);
                     }
                 }

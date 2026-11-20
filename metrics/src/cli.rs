@@ -66,6 +66,10 @@ pub struct Args {
     #[arg(long, env = "ROUTER_SCRAPE_INTERVAL_SECS", default_value_t = 15)]
     pub scrape_interval_secs: u64,
 
+    /// Maximum number of per-route RPC lookups to run concurrently.
+    #[arg(long, env = "ROUTER_SCRAPE_CONCURRENCY", default_value_t = 8)]
+    pub scrape_concurrency: usize,
+
     /// Address and port to listen on for the `/metrics` HTTP endpoint.
     #[arg(long, env = "ROUTER_LISTEN", default_value = "0.0.0.0:9090")]
     pub listen: String,
