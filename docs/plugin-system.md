@@ -1,15 +1,23 @@
 # Plugin System for Liquidity Sources
 
-A modular interface for registering and querying liquidity providers via router-registry.
+A proposed convention for third-party liquidity-provider contracts.
+
+> **Current status:** The router contracts in this repository do not currently
+> call `get_quote` or `execute_swap` on registered plugins. `router-registry`
+> stores addresses and versions, while `router-core` resolves routes; neither
+> contract dispatches the interface below. Integrators must perform any plugin
+> invocation explicitly in their own application or contract.
 
 ## Concept
-Each liquidity provider is a separate Soroban contract that implements the
-LiquidityPlugin interface. Plugins are registered in router-registry under a
-well-known name (e.g. "liquidity/uniswap-v3") and resolved via router-core.
+An ecosystem liquidity provider may choose to implement the following
+`LiquidityPlugin` interface. A provider can be registered in `router-registry`
+under a well-known name (for example, `liquidity/my-dex`) and resolved through
+the registry/core address records, but registration does not make the router
+invoke the provider automatically.
 
 ## Plugin Interface
 
-Every plugin contract must expose:
+An implementing plugin should expose:
 
 ```rust
 fn get_quote(env: Env, token_in: Address, token_out: Address, amount_in: i128) -> i128
@@ -30,7 +38,7 @@ stellar contract invoke --id <REGISTRY_ID> \
   --version 1
 ```
 
-## Routing to a Plugin
+## Resolving a Plugin Address
 
 ```bash
 stellar contract invoke --id <CORE_ID> \
@@ -40,7 +48,7 @@ stellar contract invoke --id <CORE_ID> \
   --address <PLUGIN_CONTRACT_ID>
 ```
 
-## Example Plugin (Rust skeleton)
+## Example Third-Party Contract (Rust skeleton)
 
 ```rust
 #[contract]

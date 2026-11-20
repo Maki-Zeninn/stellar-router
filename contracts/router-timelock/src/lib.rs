@@ -17,8 +17,8 @@
 //! - `admin_transferred`      — Admin transferred (old_admin, new_admin)
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, xdr::ToXdr, Address, Bytes, Env, String,
-    Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, xdr::ToXdr, Address, Bytes, BytesN, Env,
+    String, Symbol, Vec,
 };
 
 /// Complete storage-key map for the router-timelock contract.
@@ -131,6 +131,26 @@ pub struct RouterTimelock;
 
 #[contractimpl]
 impl RouterTimelock {
+    /// Replace this contract's WASM after authenticating the configured admin.
+    ///
+    /// The hash must refer to WASM uploaded to the network before this call.
+    /// Instance storage is preserved by Soroban's in-place upgrade operation.
+    pub fn upgrade(
+        env: Env,
+        caller: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), TimelockError> {
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, TimelockError)?;
+        let event_hash = new_wasm_hash.clone();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_UPGRADED),),
+            (caller, event_hash),
+        );
+        Ok(())
+    }
+
     /// Maximum depth at which `check_dependency_depth` will recurse into
     /// ancestor operations.
     ///

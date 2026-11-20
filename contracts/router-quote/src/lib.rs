@@ -15,7 +15,7 @@
 extern crate alloc;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec,
 };
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -156,6 +156,25 @@ fn find_insertion_index(len: u32, mut should_insert_before: impl FnMut(u32) -> b
 
 #[contractimpl]
 impl RouterQuote {
+    /// Replace this contract's WASM after authenticating the configured admin.
+    ///
+    /// The hash must refer to WASM uploaded to the network before this call.
+    /// Instance storage is preserved by Soroban's in-place upgrade operation.
+    pub fn upgrade(
+        env: Env,
+        caller: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), QuoteError> {
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, QuoteError)?;
+        let event_hash = new_wasm_hash.clone();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_UPGRADED),),
+            (caller, event_hash),
+        );
+        Ok(())
+    }
     /// Initialize the quote contract with an admin address and default fee.
     ///
     /// Sets up the admin and default fee in basis points (bps).

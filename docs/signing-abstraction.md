@@ -1,9 +1,10 @@
-# Transaction Signing Abstraction
+# Transaction Signing Abstraction Proposal
 
-A flexible signing interface that supports local keypairs, hardware wallets,
-and external signers (e.g. Freighter, WalletConnect).
+This document describes a possible client-side abstraction for a future SDK.
+The repository currently contains no JavaScript/TypeScript signer
+implementation and does not publish `stellar-router-sdk`.
 
-## Signer Interface (TypeScript)
+## Proposed signer interface (TypeScript)
 
 ```typescript
 interface Signer {
@@ -12,47 +13,17 @@ interface Signer {
 }
 ```
 
-## Built-in Implementations
+## Planned implementations
 
-### LocalSigner — signs with a Stellar keypair in memory
+An eventual client library may provide adapters for local key material,
+hardware wallets, and browser wallets such as Freighter or WalletConnect. No
+such adapters are included in this repository today. Applications should use
+the official Stellar SDK and their wallet provider's documented signing API
+until a versioned SDK is implemented.
 
-```typescript
-class LocalSigner implements Signer {
-  constructor(private keypair: Keypair) {}
-  publicKey() { return this.keypair.publicKey(); }
-  async sign(tx: Transaction) {
-    tx.sign(this.keypair);
-    return tx;
-  }
-}
-```
+## Future custom signers
 
-### FreighterSigner — delegates to the Freighter browser extension
-
-```typescript
-class FreighterSigner implements Signer {
-  async publicKey() { return await getPublicKey(); }
-  async sign(tx: Transaction) {
-    const network = process.env.STELLAR_NETWORK || "TESTNET";
-    const signed = await signTransaction(tx.toXDR(), { network });
-    return TransactionBuilder.fromXDR(signed, network === "PUBLIC" ? Networks.PUBLIC : Networks.TESTNET);
-  }
-}
-```
-
-## Usage with RouterClient
-
-```typescript
-import { RouterClient, LocalSigner } from "stellar-router-sdk";
-
-const signer = new LocalSigner(Keypair.fromSecret("S..."));
-const network = process.env.STELLAR_NETWORK?.toLowerCase() || "testnet";
-const client = new RouterClient({ network, coreContractId: "C...", signer });
-
-await client.registerRoute("oracle", "C...");
-```
-
-## Adding a Custom Signer
-
-Implement the Signer interface and pass it to RouterClient.
-Any signing method is supported as long as it returns a signed Transaction.
+The intended extension point is to implement the proposed `Signer` interface
+and pass it to a future router client. The transaction type, network handling,
+error model, and package boundary must be specified before this becomes a
+supported API.

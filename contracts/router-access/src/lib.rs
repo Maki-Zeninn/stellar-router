@@ -5,7 +5,7 @@
 //! Role-based access control for the stellar-router suite.
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec,
 };
 
 const MAX_HIERARCHY_DEPTH: u32 = 16;
@@ -73,6 +73,25 @@ pub struct RouterAccess;
 
 #[contractimpl]
 impl RouterAccess {
+    /// Replace this contract's WASM after authenticating the configured admin.
+    ///
+    /// The hash must refer to WASM uploaded to the network before this call.
+    /// Instance storage is preserved by Soroban's in-place upgrade operation.
+    pub fn upgrade(
+        env: Env,
+        caller: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), AccessError> {
+        caller.require_auth();
+        router_common::require_admin_simple!(&env, &caller, &DataKey::SuperAdmin, AccessError)?;
+        let event_hash = new_wasm_hash.clone();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.events().publish(
+            (Symbol::new(&env, router_common::EVENT_UPGRADED),),
+            (caller, event_hash),
+        );
+        Ok(())
+    }
     /// Initialize with a super-admin.
     pub fn initialize(env: Env, super_admin: Address) -> Result<(), AccessError> {
         router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
