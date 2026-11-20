@@ -3,7 +3,8 @@
 //! Uses `axum` to serve:
 //! - `GET /metrics` — Prometheus text format metrics
 //! - `GET /health`  — simple liveness probe (returns `200 OK`)
-//! - `GET /ready`   — readiness probe (returns `200 OK` if router_up == 1, `503` otherwise)
+//! - `GET /ready`   — readiness probe (returns `200 OK` after one completed
+//!   scrape cycle while the RPC client is available)
 //! - `GET /swagger-ui/` — Swagger UI for API documentation
 //! - `GET /api-docs/openapi.json` — OpenAPI specification
 //!
@@ -175,17 +176,23 @@ async fn health_handler() -> impl IntoResponse {
 #[utoipa::path(get, path = "/ready", tag = "health",
     responses((status = 200, description = "Ready"), (status = 503, description = "Not ready")))]
 async fn ready_handler(State(state): State<AppState>) -> impl IntoResponse {
-    // Check if router_up metric is 1
+    // Readiness is intentionally independent of router_up. A single failing
+    // contract must not remove the exporter from service for healthy contracts.
     let metric_families = state.registry.gather();
 
-    let router_up = metric_families
-        .iter()
-        .find(|mf| mf.get_name() == "router_up" && mf.get_field_type() == MetricType::GAUGE)
-        .and_then(|mf| mf.get_metric().first())
-        .map(|m| m.get_gauge().get_value())
-        .unwrap_or(0.0);
+    let metric_value = |name: &str| {
+        metric_families
+            .iter()
+            .find(|mf| mf.get_name() == name && mf.get_field_type() == MetricType::GAUGE)
+            .and_then(|mf| mf.get_metric().first())
+            .map(|m| m.get_gauge().get_value())
+            .unwrap_or(0.0)
+    };
 
-    if router_up >= 1.0 {
+    let scrape_cycle_completed = metric_value("router_scrape_cycle_completed");
+    let rpc_up = metric_value("router_rpc_up");
+
+    if scrape_cycle_completed >= 1.0 && rpc_up >= 1.0 {
         (StatusCode::OK, "ready")
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "not ready")
@@ -282,10 +289,16 @@ mod tests {
     #[tokio::test]
     async fn test_ready_returns_503_when_router_up_is_zero() {
         let registry = Registry::new();
-        // Register router_up gauge and set it to 0
+        // Aggregate router_up may be zero because one contract failed, but
+        // this test remains not-ready because no successful cycle is present.
         let gauge = prometheus::Gauge::new("router_up", "exporter health").unwrap();
         registry.register(Box::new(gauge.clone())).unwrap();
         gauge.set(0.0);
+        let cycle = prometheus::Gauge::new("router_scrape_cycle_completed", "cycle").unwrap();
+        registry.register(Box::new(cycle)).unwrap();
+        let rpc = prometheus::Gauge::new("router_rpc_up", "rpc").unwrap();
+        registry.register(Box::new(rpc.clone())).unwrap();
+        rpc.set(1.0);
 
         let state = AppState { registry };
         let app = Router::new()
@@ -338,10 +351,17 @@ mod tests {
     #[tokio::test]
     async fn test_ready_returns_200_when_router_up_is_one() {
         let registry = Registry::new();
-        // Register router_up gauge and set it to 1
+        // Aggregate router_up is not part of the readiness decision, but is
+        // retained here to ensure dashboards remain compatible.
         let gauge = prometheus::Gauge::new("router_up", "exporter health").unwrap();
         registry.register(Box::new(gauge.clone())).unwrap();
         gauge.set(1.0);
+        let cycle = prometheus::Gauge::new("router_scrape_cycle_completed", "cycle").unwrap();
+        registry.register(Box::new(cycle.clone())).unwrap();
+        cycle.set(1.0);
+        let rpc = prometheus::Gauge::new("router_rpc_up", "rpc").unwrap();
+        registry.register(Box::new(rpc.clone())).unwrap();
+        rpc.set(1.0);
 
         let state = AppState { registry };
         let app = Router::new()

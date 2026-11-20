@@ -205,12 +205,17 @@ async fn test_simulate_rate_limit_headers_and_rejects_after_limit() {
         let resp = app.clone().oneshot(request()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(resp.headers()["x-rate-limit-limit"], "100");
+        assert!(resp.headers().get("x-rate-limit-remaining").is_some());
+        assert!(resp.headers().get("x-rate-limit-reset").is_some());
     }
 
     let resp = app.clone().oneshot(request()).await.unwrap();
 
     assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     assert!(resp.headers().get("retry-after").is_some());
+    assert_eq!(resp.headers()["x-rate-limit-limit"], "100");
+    assert_eq!(resp.headers()["x-rate-limit-remaining"], "0");
+    assert!(resp.headers().get("x-rate-limit-reset").is_some());
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -422,6 +427,48 @@ async fn test_get_route_error_response_is_json() {
     assert!(json.get("error").is_some());
     assert!(json["error"]["code"].is_string());
     assert!(json["error"]["message"].is_string());
+}
+
+#[tokio::test]
+async fn test_get_route_rejects_invalid_character_without_rpc_call() {
+    let app = test_app();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/routes/invalid%3Fname")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["error"]["code"], "VALIDATION_ERROR");
+    assert_eq!(json["error"]["field"], "name");
+}
+
+#[tokio::test]
+async fn test_get_route_rejects_name_longer_than_64_without_rpc_call() {
+    let app = test_app();
+    let name = "a".repeat(65);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/routes/{name}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["error"]["field"], "name");
 }
 
 #[tokio::test]

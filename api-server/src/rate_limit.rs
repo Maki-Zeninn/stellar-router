@@ -163,6 +163,10 @@ pub async fn rate_limit_middleware(
             "x-rate-limit-remaining",
             HeaderValue::from_str(&remaining.to_string()).unwrap(),
         );
+        let _ = headers.insert(
+            "x-rate-limit-reset",
+            HeaderValue::from_str(&limiter.retry_after_secs(&key).to_string()).unwrap(),
+        );
         response
     } else {
         let retry_after = limiter.retry_after_secs(&key);
@@ -170,10 +174,21 @@ pub async fn rate_limit_middleware(
 
         (
             StatusCode::TOO_MANY_REQUESTS,
-            [(
-                "retry-after",
-                HeaderValue::from_str(&retry_after.to_string()).unwrap(),
-            )],
+            [
+                (
+                    "retry-after",
+                    HeaderValue::from_str(&retry_after.to_string()).unwrap(),
+                ),
+                (
+                    "x-rate-limit-limit",
+                    HeaderValue::from_str(&limiter.max_requests().to_string()).unwrap(),
+                ),
+                ("x-rate-limit-remaining", HeaderValue::from_static("0")),
+                (
+                    "x-rate-limit-reset",
+                    HeaderValue::from_str(&retry_after.to_string()).unwrap(),
+                ),
+            ],
             Json(RateLimitError {
                 error: "rate_limit_exceeded",
                 message: format!("Too many requests. Retry after {retry_after} second(s)."),

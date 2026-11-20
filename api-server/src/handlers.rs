@@ -177,6 +177,7 @@ fn status_event(tx_id: &str, status: TransactionStatus, message: &str) -> Transa
     params(("name" = String, Path, description = "Route name")),
     responses(
         (status = 200, description = "Route entry returned", body = RouteEntryResponse),
+        (status = 400, description = "Route name validation failed", body = ErrorResponse),
         (status = 404, description = "Route not found", body = ErrorResponse),
         (status = 503, description = "Router core contract not configured", body = ErrorResponse),
         (status = 500, description = "RPC or contract simulation error", body = ErrorResponse),
@@ -191,6 +192,16 @@ pub async fn get_route(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    if let Err(message) = validate_route_name(&name) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_field(
+                ErrorCode::ValidationError,
+                message,
+                "name",
+            )),
+        ));
+    }
     info!(route = %name, "fetching route");
 
     // Same guard as `list_routes`: fail fast with a clear 503 instead of
@@ -219,6 +230,52 @@ pub async fn get_route(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::new(ErrorCode::RpcError, e.to_string())),
         )),
+    }
+}
+
+/// Keep API route lookup validation aligned with router-core's route-name
+/// policy. The contract accepts 1–64 ASCII alphanumeric, '-' or '/' bytes.
+/// A slash must be percent-encoded by HTTP clients when it appears inside the
+/// path parameter so the router still receives it as one name segment.
+fn validate_route_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("route name must not be empty".to_string());
+    }
+    if name.len() > 64 {
+        return Err("route name must be at most 64 characters".to_string());
+    }
+    if name
+        .bytes()
+        .all(|byte| matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'/'))
+    {
+        Ok(())
+    } else {
+        Err("route name may contain only letters, numbers, '-' and '/'".to_string())
+    }
+}
+
+#[cfg(test)]
+mod route_name_tests {
+    use super::validate_route_name;
+
+    #[test]
+    fn rejects_empty_route_name() {
+        assert!(validate_route_name("").is_err());
+    }
+
+    #[test]
+    fn rejects_route_name_longer_than_64_bytes() {
+        assert!(validate_route_name(&"a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn rejects_route_name_with_bad_characters() {
+        assert!(validate_route_name("oracle?admin").is_err());
+    }
+
+    #[test]
+    fn accepts_router_core_route_name_characters() {
+        assert!(validate_route_name("dex/v1-quote").is_ok());
     }
 }
 
