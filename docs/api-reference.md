@@ -1355,50 +1355,115 @@ throughput limiting (long).
 **Contract:** `RouterTimelock`  
 **Purpose:** Delayed execution queue — all sensitive changes must wait a configurable delay.
 
-### `initialize(admin, min_delay: u64) → Result<(), TimelockError>`
-`min_delay` must be > 0 (seconds).
+Operations are identified by `op_id: Bytes`, the 32-byte SHA-256 of
+`description` + `target` + `eta` (XDR-encoded description and target, then
+`eta` as big-endian `u64`). The CLI prints and accepts it as a hex string.
+An operation becomes executable at `eta = ledger_timestamp + delay` and
+expires after `eta + grace_period_seconds`.
 
-**Errors:** `AlreadyInitialized`, `InvalidDelay`
+### `initialize(admin, min_delay: u64, max_pending_ops: u32) → Result<(), TimelockError>`
+`min_delay` (seconds) must be > 0. `max_pending_ops` caps the number of
+pending operations; `0` means unlimited.
+
+**Errors:** `AlreadyInitialized`, `DelayTooShort`
 
 ---
 
-### `queue(proposer, description, target, delay: u64, depends_on: Vec<u64>) → Result<u64, TimelockError>`
-Queues a new operation. Returns the operation ID. `delay` must be >= `min_delay`. `depends_on` lists operation IDs that must execute first.
+### `queue(proposer, description: String, target, delay: u64, grace_period_seconds: u64, deps: Vec<Bytes>) → Result<Bytes, TimelockError>`
+Queues a new operation and returns its `op_id`. Admin only (`proposer` must be
+the admin and sign). `delay` must be >= `min_delay`; `grace_period_seconds`
+must be <= 30 days (2 592 000). `deps` lists operation IDs that must be
+executed before this one; each must exist, must not be this operation, and
+the dependency chain may be at most 9 operations long.
 
-**Errors:** `Unauthorized`, `InvalidDelay`, `NotInitialized`
+Emits `op_queued` with `(op_id, target, eta, grace_period_seconds)`.
+
+**Errors:** `NotInitialized`, `Unauthorized`, `DelayTooShort`,
+`GracePeriodTooLong`, `QueueFull`, `DelayTooLong`, `AlreadyQueued`,
+`CircularDependency`, `NotFound` (unknown dependency), `DependencyTooDeep`
 
 ```bash
 stellar contract invoke --id <TIMELOCK_ID> --network testnet --source admin \
   -- queue \
   --proposer <ADMIN> --description "upgrade oracle to v2" \
-  --target <CONTRACT_ID> --delay 86400 --depends_on "[]"
+  --target <CONTRACT_ID> --delay 86400 --grace_period_seconds 604800 \
+  --deps '[]'
 ```
 
 ---
 
-### `execute(caller, op_id: u64) → Result<(), TimelockError>`
-Executes a queued operation after its ETA. All dependencies must be executed first.
+### `execute(caller, op_id: Bytes) → Result<(), TimelockError>`
+Executes a queued operation once `eta` has passed and before
+`eta + grace_period_seconds`. Admin only. All dependencies must already be
+executed. Emits `op_executed` with `(op_id, target)`.
 
-**Errors:** `Unauthorized`, `NotFound`, `AlreadyExecuted`, `AlreadyCancelled`, `TooEarly`, `DependencyNotMet`
-
----
-
-### `cancel(caller, op_id: u64) → Result<(), TimelockError>`
-Cancels a queued operation. Clears its dependency list.
-
-**Errors:** `Unauthorized`, `NotFound`, `AlreadyExecuted`, `AlreadyCancelled`
+**Errors:** `NotInitialized`, `Unauthorized`, `NotFound`, `Cancelled`,
+`AlreadyExecuted`, `NotReady`, `ExpiryOverflow`, `Expired`,
+`DependencyNotExecuted`
 
 ---
 
-### `cancel_all(admin) → Result<u32, TimelockError>`
-Cancels all pending (not executed, not cancelled) operations. Returns the count cancelled.
+### `cancel(caller, op_id: Bytes) → Result<(), TimelockError>`
+Cancels a pending operation. Admin only. Emits `op_cancelled` with `op_id`.
 
-**Errors:** `Unauthorized`, `NotInitialized`
+**Errors:** `NotInitialized`, `Unauthorized`, `NotFound`, `Cancelled`,
+`AlreadyExecuted`
 
 ---
 
-### `get_op(op_id: u64) → Option<TimelockOp>`
-Returns the operation, or `None` if not found.
+### `update_description(caller, op_id: Bytes, new_description: String) → Result<(), TimelockError>`
+Replaces the description of a pending operation. Admin only. The `op_id` is
+not recomputed. Emits `op_description_updated` with `(op_id, new_description)`.
+
+**Errors:** `NotInitialized`, `Unauthorized`, `NotFound`, `AlreadyExecuted`,
+`Cancelled`
+
+---
+
+### `cleanup_expired(caller, limit: u32) → Result<u32, TimelockError>`
+Permissionless (`caller` must sign but need not be the admin). Removes up to
+`limit` operations that can never execute again — expired ones from the
+pending index, and the stored data of expired, executed and cancelled ones.
+An operation that is still a dependency of a live pending operation is
+skipped. Returns the number removed and emits `ops_cleaned` with that count.
+
+---
+
+### `get_op(op_id: Bytes) → Option<Op>`
+Returns the stored operation, or `None` if not found (or already cleaned up).
+
+---
+
+### `get_dependencies(op_id: Bytes) → Vec<Bytes>`
+Returns the dependency IDs recorded for `op_id`, or an empty list.
+
+---
+
+### `get_operation_status(op_id: Bytes) → Option<OperationStatus>`
+Returns `Cancelled`, `Executed`, `Expired`, `Blocked` (a dependency can
+never execute), `Ready` or `Queued`, or `None` if the operation doesn't exist.
+
+---
+
+### `get_pending_operations() → Vec<Op>`
+Returns operations that are not executed, not cancelled, and not expired.
+
+---
+
+### `get_operation_count_by_status(status: OperationStatus) → u32`
+Counts pending-index operations with the given status. Always `0` for
+`Executed` and `Cancelled`, since those leave the pending index.
+
+---
+
+### `get_operations_by_status(status: OperationStatus) → Vec<(Bytes, Op)>`
+Returns `(op_id, Op)` pairs from the pending index with the given status.
+Always empty for `Executed` and `Cancelled`.
+
+---
+
+### `get_max_pending_ops() → u32`
+Returns the pending-operations cap (`0` = unlimited).
 
 ---
 
@@ -1407,10 +1472,11 @@ Returns the operation, or `None` if not found.
 
 ---
 
-### `set_min_delay(caller, new_delay: u64) → Result<(), TimelockError>`
-Updates the minimum delay. Does not affect already-queued operations.
+### `set_min_delay(caller, new_min_delay: u64) → Result<(), TimelockError>`
+Updates the minimum delay. Admin only. Does not affect already-queued
+operations. Emits `min_delay_updated` with `(old_min_delay, new_min_delay)`.
 
-**Errors:** `Unauthorized`, `InvalidDelay`, `NotInitialized`
+**Errors:** `NotInitialized`, `Unauthorized`, `DelayTooShort`
 
 ---
 
@@ -1420,7 +1486,21 @@ Updates the minimum delay. Does not affect already-queued operations.
 ---
 
 ### `transfer_admin(current, new_admin) → Result<(), TimelockError>`
-**Errors:** `Unauthorized`, `NotInitialized`
+**Errors:** `NotInitialized`, `Unauthorized`
+
+---
+
+### `Op`
+
+| Field | Type | Description |
+|---|---|---|
+| `proposer` | `Address` | Address that queued the operation |
+| `description` | `String` | Human-readable description |
+| `target` | `Address` | Address the operation applies to |
+| `eta` | `u64` | Ledger timestamp after which it can execute |
+| `grace_period_seconds` | `u64` | Execution window after `eta` |
+| `executed` | `bool` | Whether `execute` succeeded |
+| `cancelled` | `bool` | Whether `cancel` was called |
 
 ---
 

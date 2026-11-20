@@ -8,8 +8,10 @@
 //! - Middleware rate limiting
 //! - Timelock operations
 //! - Multicall batching
+//! - Quote calculation
+//! - Execution against a deployed target
 
-use integration_tests::{TestAccount, TestSuite};
+use integration_tests::{TestAccount, TestSuite, DEFAULT_QUOTE_FEE_BPS};
 
 #[test]
 #[ignore] // Run with: cargo test --test integration -- --ignored
@@ -574,4 +576,93 @@ fn test_admin_transfer() {
     println!("✓ New admin verified: {}", current_admin);
 
     println!("\n=== Admin Transfer Test PASSED ===\n");
+}
+
+#[test]
+#[ignore]
+fn test_router_quote_get_quote() {
+    println!("\n=== Testing Router Quote ===\n");
+
+    let fixture = TestSuite::setup().expect("Failed to set up test suite");
+    let quote = fixture.quote().expect("Quote contract not deployed");
+    let admin = &fixture.admin;
+
+    let amount_in: i128 = 1_000_000;
+    let request = format!(
+        r#"{{"route":"oracle","token_in":"{}","token_out":"{}","amount_in":"{}"}}"#,
+        fixture.user1.address, fixture.user2.address, amount_in
+    );
+
+    let response = quote
+        .invoke("get_quote", &["--request", &request], admin)
+        .expect("get_quote failed");
+    println!("get_quote response: {}", response);
+
+    // No per-route fee is configured, so the default fee applies.
+    let fee_amount = amount_in * DEFAULT_QUOTE_FEE_BPS as i128 / 10_000;
+    let amount_out = amount_in - fee_amount;
+    for expected in [
+        format!("\"amount_out\":\"{}\"", amount_out),
+        format!("\"fee_amount\":\"{}\"", fee_amount),
+        format!("\"fee_bps\":{}", DEFAULT_QUOTE_FEE_BPS),
+    ] {
+        assert!(
+            response.replace(' ', "").contains(&expected),
+            "expected {} in quote response: {}",
+            expected,
+            response
+        );
+    }
+    println!("✓ Quote: amount_out={} fee_amount={}", amount_out, fee_amount);
+
+    println!("\n=== Router Quote Test PASSED ===\n");
+}
+
+#[test]
+#[ignore]
+fn test_router_execution_execute_against_deployed_target() {
+    println!("\n=== Testing Router Execution ===\n");
+
+    let fixture = TestSuite::setup().expect("Failed to set up test suite");
+    let execution = fixture.execution().expect("Execution contract not deployed");
+    let core = fixture.core().expect("Core contract not deployed");
+    let admin = &fixture.admin;
+
+    // Target: router-core's `total_routed`, a no-argument read on a real
+    // deployed contract.
+    let request = format!(
+        r#"{{"target":"{}","function":"total_routed","simulate_first":false,"max_retries":1,"args":[],"amount":"1000"}}"#,
+        core.contract_id
+    );
+
+    let result = execution
+        .invoke(
+            "execute",
+            &["--caller", &admin.address, "--request", &request],
+            admin,
+        )
+        .expect("execute failed");
+    println!("execute result: {}", result);
+
+    let compact = result.replace(' ', "");
+    assert!(
+        compact.contains("\"success\":true"),
+        "execution should succeed: {}",
+        result
+    );
+    assert!(
+        compact.contains(&core.contract_id),
+        "result should name the target contract: {}",
+        result
+    );
+
+    let stats = execution.invoke("stats", &[], admin).expect("stats failed");
+    println!("✓ Execution stats (total, errors): {}", stats);
+    assert!(
+        stats.replace(' ', "").starts_with("[1,0]"),
+        "expected one execution and no errors, got: {}",
+        stats
+    );
+
+    println!("\n=== Router Execution Test PASSED ===\n");
 }
