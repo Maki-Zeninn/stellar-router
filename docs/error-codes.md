@@ -5,11 +5,9 @@ Use this document to avoid collisions when adding new error variants.
 
 ## Known Collisions
 
-| Code | Contracts / Variants |
-|------|---------------------|
-| 10   | `RouterError::CircularDependency` and `RouterError::InvalidScore` (router-core) |
+None. Every contract's error enum currently uses unique discriminant values.
 
-> These collisions exist in the current codebase and are tracked here for visibility.
+> If a collision is ever introduced, record it here until it is resolved.
 > See the per-contract tables below for authoritative values. New variants **must not**
 > reuse any code listed in this file.
 
@@ -28,12 +26,16 @@ Use this document to avoid collisions when adding new error variants.
 | 7    | `RouteAlreadyExists` |
 | 8    | `InvalidRouteName` |
 | 9    | `InvalidMetadata` |
-| 10   | `CircularDependency` ⚠️ collision with `InvalidScore` |
-| 10   | `InvalidScore` ⚠️ collision with `CircularDependency` |
+| 10   | `CircularDependency` |
 | 11   | `RouteInUse` |
 | 12   | `InvalidAddress` |
 | 13   | `RouteExpired` |
-| **14** | ← next available |
+| 14   | `InvalidScore` |
+| 15   | `InvalidTtlExtension` |
+| 16   | `RecursionLimitExceeded` |
+| 17   | `TooManyRoutes` |
+| 18   | `InvalidScoringWeights` |
+| **19** | ← next available |
 
 ---
 
@@ -198,7 +200,7 @@ Uses range-based codes to distinguish error categories.
 4. **Do not add a new variant with the same code as an existing variant.** Rust allows
    duplicate discriminant values, but on-chain they produce ambiguous error codes.
 
-5. **Resolve the known collisions** listed at the top of this document before the next
+5. **Resolve any known collision** listed at the top of this document before the next
    mainnet deployment by reassigning one of the duplicate variants to the "next
    available" code and publishing a migration note.
 

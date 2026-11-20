@@ -493,10 +493,40 @@ stellar contract invoke --id <REGISTRY_ID> --network testnet --source admin \
 
 ---
 
+### `register_with_check(caller, name, address, version: u32, health_fn: Option<Symbol>) → Result<(), RegistryError>`
+Same as `register`, but can first probe the target contract with a zero-argument health call. Version and duplicate checks run **before** the health call, so a registration that would be rejected never invokes the target.
+
+- `health_fn` must be `None`, `health` or `ping`. Any other symbol is rejected with `InvalidHealthFn` before any cross-contract call is made. This allow-list is a guardrail on names only: the target's `health`/`ping` must itself be side-effect-free.
+- If the allow-listed function is missing on the target or the call fails, registration is rejected with `ContractUnreachable`.
+- With `health_fn = None` it behaves exactly like `register`.
+
+**Errors:** `Unauthorized`, `NotInitialized`, `InvalidVersion`, `AlreadyRegistered`, `InvalidHealthFn`, `ContractUnreachable`
+
+---
+
+### `bulk_register(caller, entries: Vec<BulkRegistrationInput>, fail_fast: bool) → Result<BatchResult, RegistryError>`
+Registers several `{ name, address, version }` entries in one admin-authorized call. Returns a `BatchResult` with the indices that succeeded and a per-index error for each failure.
+
+- **Limit:** at most `MAX_BULK_BATCH_SIZE` (**50**) entries per call. Larger batches are rejected with `BatchTooLarge` before anything is written.
+- `fail_fast = true`: every entry is validated first (against storage *and* earlier entries in the same batch, including duplicate `(name, version)` pairs and non-ascending versions for the same name). If any entry fails, nothing is written and the result holds that single failure.
+- `fail_fast = false`: entries are processed one by one; valid entries are written and invalid ones are recorded as failures.
+- A `batch_executed` event is emitted when the call finishes, even if every entry failed.
+
+**Errors (whole call):** `Unauthorized`, `NotInitialized`, `BatchTooLarge`. Per-entry failures (`InvalidVersion`, `AlreadyRegistered`, ...) are reported inside the `BatchResult`.
+
+---
+
 ### `get(name, version: u32) → Result<ContractEntry, RegistryError>`
 Returns the entry for `(name, version)`.
 
 **Errors:** `NotFound`
+
+---
+
+### `is_deprecated(name, version: u32) → Result<bool, RegistryError>`
+Returns whether `(name, version)` is deprecated.
+
+**Errors:** `NotFound` (no entry for `(name, version)`)
 
 ---
 
@@ -521,6 +551,13 @@ Marks a version as deprecated. Deprecated versions are skipped by `get_latest`.
 
 ---
 
+### `deprecate_all_versions(caller, name, reason: Option<String>) → Result<(), RegistryError>`
+Deprecates every registered version of `name` and records `reason` on each one. Versions that are already deprecated are skipped (their existing reason is kept), so the call does not fail on them.
+
+**Errors:** `Unauthorized`, `NotInitialized`, `NotFound` (`name` has never been registered)
+
+---
+
 ### `deprecate_many(caller, entries: Vec<(String, u32)>) → Vec<Result<(), RegistryError>>`
 Batch deprecation. Returns one result per entry; partial failures are allowed.
 
@@ -528,6 +565,21 @@ Batch deprecation. Returns one result per entry; partial failures are allowed.
 
 ### `versions(name) → Vec<u32>`
 Returns all registered version numbers for `name` in ascending order.
+
+---
+
+### `get_all_versions(name) → Vec<ContractEntry>`
+Returns every `ContractEntry` for `name`, including deprecated ones, in ascending version order. Empty if `name` is not registered.
+
+---
+
+### `get_all_names() → Vec<String>`
+Returns every registered contract name, in the order each name was first registered.
+
+---
+
+### `get_entry_by_address(address) → Option<ContractEntry>`
+Reverse lookup: returns the entry registered for `address`, or `None` if that address is not registered. Constant-time, using the address index written at registration.
 
 ---
 
@@ -551,10 +603,35 @@ Returns all registered version numbers for `name` in ascending order.
 
 ---
 
+### `set_role_limits(caller, max_roles: Option<u32>, max_grants_per_role: Option<u32>) → Result<(), AccessError>`
+Sets the caps on how many distinct role names may exist (`max_roles`, default **100**) and how many addresses may hold a single role at once (`max_grants_per_role`, default **1000**). Passing `None` for either value restores its default; `Some(n)`, including `Some(0)`, stores exactly `n`. Only the super-admin can call this. Emits `role_limits_set`.
+
+Hitting a cap makes later calls fail with `MaxRolesExceeded` (a new role name) or `MaxGrantsPerRoleExceeded` (a new member of a full role).
+
+**Errors:** `Unauthorized`, `NotInitialized`, `Blacklisted`
+
+---
+
+### `get_role_limits() → (u32, u32)`
+Returns the active `(max_roles, max_grants_per_role)`. Returns the defaults `(100, 1000)` if `set_role_limits` has never been called.
+
+---
+
 ### `grant_role(caller, role, target, expires_at: Option<u64>) → Result<(), AccessError>`
 Grants `role` to `target`. `expires_at` is an optional ledger sequence number after which the role expires. Caller must be super-admin or role admin.
 
 **Errors:** `Unauthorized`, `AlreadyHasRole`, `Blacklisted`
+
+---
+
+### `grant_role_batch(admin, accounts: Vec<Address>, role, expires_in: Option<u64>, fail_fast: bool) → Result<BatchResult, AccessError>`
+Grants `role` to each address in `accounts`. `admin` is authorized once, up front (super-admin or the role's admin). `expires_in` is in seconds from the current ledger timestamp; `None` means the grant never expires.
+
+- Returns `Ok(BatchResult)` whenever authorization succeeds, even if every grant fails. `successes` lists the indices that were granted; `failures` lists each failed index with its error (for example `AlreadyExists` for `AlreadyHasRole`, or `Custom("Blacklisted")`, `Custom("MaxGrantsPerRoleExceeded")`).
+- `fail_fast = true` stops at the first failure; `fail_fast = false` processes every account.
+- The batch is **not atomic**: grants made before a failure stay in place.
+
+**Errors (whole call):** `Unauthorized`, `NotInitialized`, `Blacklisted` (the caller is blacklisted)
 
 ---
 
@@ -568,12 +645,53 @@ Revokes `role` from `target`. Removes the storage key (not just sets to false).
 ### `has_role(role, target) → bool`
 Returns `true` if `target` holds `role` and it has not expired. Returns `false` for blacklisted addresses.
 
+See [Role hierarchy](#role-hierarchy): holding an ancestor role also satisfies `has_role` for its descendants.
+
+---
+
+### `is_role_expired(role, target) → bool`
+Returns `true` only if `target` has a stored expiry for `role`, the current ledger timestamp is **strictly greater** than that expiry, and `target` does not hold `role` through the hierarchy. `expires_at` is the last valid timestamp. Returns `false` when there is no grant or no expiry, so it never disagrees with `has_role`.
+
+---
+
+### `get_role_expiry(role, target) → Option<u64>`
+Returns the stored expiry timestamp for `target`'s direct grant of `role`, or `None` if there is no grant. Grants made without an expiry are stored with `u64::MAX`.
+
+---
+
+### `get_role_member_count(role) → u32`
+Returns the number of addresses whose grant of `role` was active when last written. This is the counter checked against `max_grants_per_role`. Grants that expire on their own are not subtracted until they are revoked or re-granted. Returns `0` for unknown roles.
+
 ---
 
 ### `set_role_admin(caller, role, admin) → Result<(), AccessError>`
 Designates `admin` as the address that can grant/revoke `role`. Only super-admin can call this.
 
 **Errors:** `Unauthorized`, `NotInitialized`
+
+---
+
+### `get_role_admin(role) → Option<Address>`
+Returns the address set as `role`'s admin with `set_role_admin`, or `None` if there is none.
+
+---
+
+### `set_role_parent(caller, role, parent_role) → Result<(), AccessError>`
+Makes `parent_role` the parent of `role`, so anyone holding `parent_role` (or any of its ancestors) also satisfies `has_role(role)`. Calling it again for the same `role` replaces its parent. Only the super-admin can call this. Both role names are added to `list_all_roles`. Emits `role_parent_set`.
+
+The edge is rejected if it would create a cycle (`HierarchyCycle`) or make the ancestor chain from `role` reach `MAX_HIERARCHY_DEPTH` (16) levels (`HierarchyTooDeep`).
+
+**Errors:** `Unauthorized`, `NotInitialized`, `Blacklisted`, `HierarchyCycle`, `HierarchyTooDeep`, `MaxRolesExceeded`
+
+---
+
+### `get_role_parent(role) → Option<String>`
+Returns `role`'s parent role, or `None` if it has none.
+
+---
+
+### `list_all_roles() → Vec<String>`
+Returns every role name ever recorded through `grant_role`, `grant_role_batch`, `set_role_admin`, `set_role_parent` or `transfer_role_membership`. Roles are never removed from this list, even after all members are revoked. Its length is what `max_roles` limits.
 
 ---
 
@@ -605,6 +723,13 @@ Returns all roles held by `addr`.
 
 ---
 
+### `transfer_role_membership(caller, role, from, to) → Result<(), AccessError>`
+Moves `from`'s grant of `role` to `to`, keeping the same expiry timestamp. `caller` must be the super-admin or `role`'s admin. `from` must hold the role actively (not expired). Transferring to the same address only checks that and changes nothing. Emits `role_granted` for `to` and `role_revoked` for `from`.
+
+**Errors:** `Unauthorized`, `NotInitialized`, `Blacklisted` (caller or `to`), `RoleNotFound` (`from` has no active grant), `DestinationAlreadyHasRole`
+
+---
+
 ### `expire_role(caller, role, target) → Result<(), AccessError>`
 Removes the expiry entry for a role grant (cleanup function). Only super-admin.
 
@@ -619,6 +744,19 @@ Removes the expiry entry for a role grant (cleanup function). Only super-admin.
 
 ### `transfer_super_admin(current, new_admin) → Result<(), AccessError>`
 **Errors:** `Unauthorized`, `NotInitialized`
+
+---
+
+### Role hierarchy
+
+Roles can be arranged in a parent/child tree with `set_role_parent(caller, child, parent)`.
+
+- `has_role(child, account)` returns `true` if `account` directly holds `child` **or any ancestor** of `child` (its parent, the parent's parent, and so on). So holding a parent role satisfies `has_role` for all of its children.
+- It does not work the other way: holding a child role does not grant the parent.
+- The walk is limited to `MAX_HIERARCHY_DEPTH` (**16**) levels. `set_role_parent` refuses edges that would form a cycle or a longer chain, so any accepted hierarchy is checked in full.
+- Each step of the walk still checks expiry: an expired ancestor grant does not count.
+- Blacklisted addresses always fail `has_role`, whatever roles they hold.
+- Inherited roles are not listed by `get_role_members` or `get_roles_for_address`, which report direct grants only.
 
 ---
 
@@ -1322,6 +1460,18 @@ Cumulative count of non-simulated `execute_batch` calls.
 
 ### `admin() → Result<Address, MulticallError>`
 **Errors:** `NotInitialized`
+
+---
+
+### `get_batch_result(batch_id: u64, call_index: u32) → Result<Option<CallResult>, MulticallError>`
+Returns the stored result of one call in a batch, or `None` if nothing is stored at that position. Results are only stored when `execute_batch` ran with `store_results = true`. Never returns an error today.
+
+**Retention:** only the most recent `MAX_STORED_BATCHES` (**50**) non-simulated batches keep their results. Each new batch removes the results of the batch 51 positions back, so older lookups return `None`.
+
+---
+
+### `get_batch_results(batch_id: u64) → Result<Vec<CallResult>, MulticallError>`
+Returns all stored results for `batch_id` in call order, starting at index 0 and stopping at the first missing index. Returns an empty list if the batch did not store results or has been pruned. The same 50-batch retention applies. Never returns an error today.
 
 ---
 
