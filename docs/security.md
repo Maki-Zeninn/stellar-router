@@ -28,9 +28,13 @@ read-only or fire-and-forget and do not hold signing keys in production.
   transactions.
 - Rotate the admin key regularly using `transfer_admin` / `transfer_super_admin`.
   These functions emit `admin_transferred` events that off-chain monitors can alert on.
-- Queue all sensitive admin operations through router-timelock with a minimum
-  delay of at least 24 hours. This gives time to detect and cancel a compromised
-  admin's actions before they execute.
+- Make router-timelock the admin of the sensitive contracts (router-core,
+  router-access, router-middleware, …) and set `min_delay` to at least 24 hours.
+  Only then does the timelock actually enforce a delay: admin calls must go
+  through `queue` → `execute`, giving time to detect and cancel a compromised
+  admin's actions before they execute. If the timelock is not the admin of a
+  contract, that contract's admin functions take effect as soon as the admin
+  signs, and the timelock is only an off-chain coordination log.
 - Monitor the `admin_transferred` event on-chain. An unexpected transfer is a
   strong signal of compromise.
 
@@ -128,8 +132,10 @@ read-only or fire-and-forget and do not hold signing keys in production.
 - All route mutations (`register_route`, `update_route`, `remove_route`) emit
   events. Monitor `route_registered`, `route_updated`, and `route_overwritten`
   events for unexpected changes.
-- Queue route updates through router-timelock. This gives a delay window during
-  which the update can be cancelled if it is unauthorized.
+- Make router-timelock the admin of router-core so route updates must be queued
+  through it. This gives a delay window during which the update can be cancelled
+  if it is unauthorized. Without that, queuing route updates in the timelock is
+  only an off-chain coordination log and does not delay the update.
 - Use router-registry to maintain a versioned record of legitimate contract
   addresses. Cross-reference resolved addresses against the registry before
   executing high-value operations.
@@ -162,6 +168,8 @@ Before deploying to mainnet:
 
 - [ ] Admin keypair is a hardware wallet or multi-sig account
 - [ ] `min_delay` in router-timelock is set to at least 24 hours
+- [ ] router-timelock is set as the admin of router-core and the other sensitive
+      contracts, so admin changes must go through `queue`/`execute`
 - [ ] Emergency council is configured with M > N/2
 - [ ] Fast-track is disabled by default (`set_fast_track_enabled(false)`)
 - [ ] Replay protection is enabled in the api-server
