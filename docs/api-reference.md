@@ -1,6 +1,6 @@
 # API Reference
 
-Complete reference for all public functions across the six stellar-router contracts.
+Complete reference for all public functions across the stellar-router contracts: core, registry, access, quote, middleware, timelock, multicall and execution.
 
 ---
 
@@ -23,7 +23,15 @@ different things depending on which contract returned it.
 | `RouteAlreadyExists` | 7 | Registering a route or alias with a name that is already in use. | Choose a unique name or update/remove the existing route first. |
 | `InvalidRouteName` | 8 | A route name is empty or only whitespace. | Send a non-empty, trimmed route name. |
 | `InvalidMetadata` | 9 | Route metadata exceeds limits: description over 256 characters or more than 5 tags. | Shorten the description or reduce the tag list before submitting. |
-| `RouteExpired` | 10 | `resolve` targets a route whose TTL ledger has been exceeded, or `extend_route_ttl` targets a route that has already expired. | Re-register the route, or call `extend_route_ttl` before expiry next time. |
+| `CircularDependency` | 10 | `set_route_dependency` would create a self-dependency or cycle, or `resolve_with_dependencies` finds a cycle. | Remove or restructure the dependency edge. |
+| `RouteInUse` | 11 | `remove_route` (or a `remove_routes_batch` item) targets a route that other routes depend on. | Remove the dependent routes or their dependency edges first. |
+| `InvalidAddress` | 12 | A route is registered or updated with the zero address. | Pass a real contract address. |
+| `RouteExpired` | 13 | `resolve` targets a route whose TTL ledger has been exceeded, or `extend_route_ttl` targets a route that has already expired. | Re-register the route, or call `extend_route_ttl` before expiry next time. |
+| `InvalidScore` | 14 | A `RouteScore` field is above 100 in `set_route_score` / `set_route_scores_batch`. | Keep every score field in `0..=100`. |
+| `InvalidTtlExtension` | 15 | `register_route_with_ttl` gets `ttl_ledgers = Some(0)` or `extend_route_ttl` gets `additional_ledgers = 0`. | Pass a positive ledger count, or `None` for a permanent route. |
+| `RecursionLimitExceeded` | 16 | The dependency graph is deeper than 10 levels while validating or resolving dependencies. | Flatten the dependency graph. |
+| `TooManyRoutes` | 17 | Registering a route would exceed `get_max_routes()`. | Remove routes or raise the cap with `set_max_routes`. |
+| `InvalidScoringWeights` | 18 | `set_scoring_weights` gets `fee_divisor <= 0`, a negative weight, or a weight above 1000. | Use weights in `0..=1000` and a positive `fee_divisor`. |
 
 ### router-registry `RegistryError`
 
@@ -116,11 +124,11 @@ different things depending on which contract returned it.
 **Contract:** `RouterCore`  
 **Purpose:** Central dispatcher — registers routes by name and resolves them to contract addresses.
 
-### `initialize(admin: Address) → Result<(), RouterError>`
-Sets up the admin, marks the router as unpaused, and resets the total-routed counter.  
+### `initialize(admin: Address, max_routes: Option<u32>) → Result<(), RouterError>`
+Sets up the admin, marks the router as unpaused, resets the total-routed counter, and sets the route cap (`max_routes`, default `1000`). `admin` must authorize.  
 Must be called exactly once before any other function.
 
-**Errors:** `AlreadyInitialized`
+**Errors:** `AlreadyInitialized`, `InvalidRouteName` (`max_routes` is `Some(0)`)
 
 ```bash
 stellar contract invoke --id <CORE_ID> --network testnet --source admin \
@@ -129,10 +137,10 @@ stellar contract invoke --id <CORE_ID> --network testnet --source admin \
 
 ---
 
-### `register_route(caller, name, address) → Result<(), RouterError>`
-Registers a new route. `name` must be unique and non-empty. Caller must be admin.
+### `register_route(caller, name, address, metadata: Option<RouteMetadata>) → Result<(), RouterError>`
+Registers a new route, optionally with metadata (see [Tags & metadata](#tags--metadata)). `name` must be unique, non-empty and at most 64 characters. Caller must be admin.
 
-**Errors:** `Unauthorized`, `RouteAlreadyExists`, `NotInitialized`, `InvalidRouteName` (empty/whitespace)
+**Errors:** `Unauthorized`, `RouteAlreadyExists`, `NotInitialized`, `InvalidRouteName`, `InvalidAddress` (zero address), `InvalidMetadata`, `TooManyRoutes`
 
 ```bash
 stellar contract invoke --id <CORE_ID> --network testnet --source admin \
@@ -181,6 +189,8 @@ Deletes a route and removes any aliases pointing to it.
 
 ### `resolve(name) → Result<Address, RouterError>`
 Resolves a route name (or alias) to its contract address. Increments `total_routed`.
+
+**When any route has a score, `resolve` returns the highest-scoring eligible route instead of `name`** — see [Scoring](#scoring).
 
 **Errors:** `RouterPaused`, `RouteNotFound`, `RoutePaused`, `RouteExpired` (TTL ledger exceeded)
 
@@ -245,6 +255,219 @@ Returns the current admin address.
 Transfers admin to a new address. Emits `admin_transferred`.
 
 **Errors:** `Unauthorized`, `NotInitialized`
+
+---
+
+### Tags & metadata
+
+Route metadata is a `RouteMetadata` value (`description`, `tags`, `owner`) stored separately from the `RouteEntry`. Metadata is validated on every write: the description may be at most 256 characters, a route may carry at most 5 tags, and each tag must be non-empty, not made up only of spaces, and at most 256 bytes. Violations return `InvalidMetadata`.
+
+---
+
+### `get_metadata(name) → Option<RouteMetadata>`
+Returns the metadata stored for `name`, or `None` if the route has no metadata or does not exist.
+
+---
+
+### `update_metadata(caller, name, metadata: Option<RouteMetadata>) → Result<(), RouterError>`
+Replaces a route's metadata independently of its address. Passing `None` deletes the stored metadata. Caller must be admin. Emits `metadata_updated` with `(name, has_metadata)`.
+
+**Errors:** `Unauthorized`, `NotInitialized`, `RouteNotFound`, `InvalidMetadata`
+
+```bash
+stellar contract invoke --id <CORE_ID> --network testnet --source admin \
+  -- update_metadata --caller <ADMIN> --name oracle \
+  --metadata '{"description":"Price oracle","tags":["oracle","price"],"owner":"<OWNER_ADDRESS>"}'
+```
+
+---
+
+### `add_route_tag(caller, name, tag) → Result<(), RouterError>`
+Adds `tag` to a route's metadata. Idempotent: adding a tag that is already present is a no-op. If the route has no metadata yet, metadata is created with an empty description and `caller` as owner. Caller must be admin. Emits `route_tag_added` when a tag is actually added.
+
+**Errors:** `Unauthorized`, `NotInitialized`, `RouteNotFound`, `InvalidMetadata` (would exceed 5 tags, or the tag is empty, all spaces, or longer than 256 bytes)
+
+---
+
+### `remove_route_tag(caller, name, tag) → Result<(), RouterError>`
+Removes `tag` from a route's metadata. Removing a tag that is not present (or from a route with no metadata) is a no-op as long as the route exists. Caller must be admin. Emits `route_tag_removed` when a tag is actually removed.
+
+**Errors:** `Unauthorized`, `NotInitialized`, `RouteNotFound`
+
+---
+
+### `get_routes_by_tag(tag) → Vec<String>`
+Returns the names of all non-expired routes whose metadata contains `tag`. Routes without metadata are skipped. O(n) over registered routes.
+
+---
+
+### `get_all_tags() → Vec<String>`
+Returns every distinct tag used by the metadata of non-expired routes, in first-seen order. Tags that exist only on expired routes are not reported.
+
+---
+
+### Batches
+
+---
+
+### `register_routes_batch(caller, routes: Vec<RouteRegisterInput>, fail_fast: bool) → Result<BatchResult, RouterError>`
+Registers several routes (each a `{ name, address }` pair) in one transaction. All routes start unpaused, permanent and without metadata. Caller must be admin.
+
+- `fail_fast = true`: every item is validated first. At the first invalid item (duplicate name inside the batch, invalid name, zero address, name already registered, or `max_routes` cap reached) the call returns a `BatchResult` containing only that failure and **nothing is registered**.
+- `fail_fast = false`: each item is processed independently. Valid items are registered and listed in `successes`; invalid items are skipped and listed in `failures` with their index and a `BatchItemError`. The batch is **not** all-or-nothing, so always inspect `failures`.
+
+Per-item problems are reported inside the `BatchResult` (as `AlreadyExists`, `InvalidName`, or `Custom("InvalidAddress" | "TooManyRoutes" | …)`), not as a contract error.
+
+**Errors:** `Unauthorized`, `NotInitialized`
+
+```bash
+stellar contract invoke --id <CORE_ID> --network testnet --source admin \
+  -- register_routes_batch --caller <ADMIN> --fail_fast true \
+  --routes '[{"name":"oracle","address":"<ORACLE_ID>"},{"name":"vault","address":"<VAULT_ID>"}]'
+```
+
+---
+
+### `remove_routes_batch(caller, names: Vec<String>, fail_fast: bool) → Result<BatchResult, RouterError>`
+Removes several routes, and any aliases pointing to them, in one transaction. Caller must be admin.
+
+- `fail_fast = true`: every name is checked first — it must be registered, must not appear earlier in the same batch, and must have no dependents (judged against the pre-batch dependency state). At the first failing name the call returns a `BatchResult` with only that failure and **nothing is removed**.
+- `fail_fast = false`: each name is processed independently; removed routes go to `successes`, and missing routes or routes still depended on (`Custom("RouteInUse")`) go to `failures`.
+
+**Errors:** `Unauthorized`, `NotInitialized`
+
+---
+
+### `batch_resolve(names: Vec<String>) → Vec<BatchResolveResult>`
+Resolves each name (or alias) using the same logic as `resolve` and returns one `BatchResolveResult` per input, in input order: `Ok(Address)` or `Err(ResolveError)`, where `ResolveError` is one of `RouterPaused`, `RouteNotFound`, `RoutePaused`, `NotInitialized`, `RouteExpired`. Never fails as a whole. Every successful entry increments `total_routed`, and — like `resolve` — is subject to score-based selection (see [Scoring](#scoring)).
+
+---
+
+### Dependencies
+
+Routes can declare other routes as prerequisites. The dependency graph is kept acyclic and is walked with a maximum recursion depth of 10. A route that other routes depend on cannot be removed (`RouteInUse`).
+
+---
+
+### `set_route_dependency(caller, route, depends_on) → Result<(), RouterError>`
+Records `depends_on` as a direct prerequisite of `route`. Both routes must exist and the new edge must not create a cycle. Caller must be admin.
+
+**Errors:** `Unauthorized`, `NotInitialized`, `RouteNotFound` (`route` or `depends_on`), `CircularDependency` (self-dependency or cycle), `RecursionLimitExceeded` (existing graph too deep to validate)
+
+---
+
+### `get_route_dependencies(route) → Result<Vec<String>, RouterError>`
+Returns the direct dependencies of `route`, in the order they were added. Empty if it has none.
+
+**Errors:** `RouteNotFound`
+
+---
+
+### `resolve_with_dependencies(name) → Result<Vec<(String, Address)>, RouterError>`
+Resolves `name` together with its full dependency tree, returning `(route_name, address)` pairs in dependency-first order with `name` itself last. Every route in the tree must be resolvable.
+
+**Errors:** `RouterPaused`, `RouteNotFound`, `RoutePaused`, `RouteExpired` (for `name` or any dependency), `CircularDependency`, `RecursionLimitExceeded`
+
+---
+
+### Scoring
+
+Each route can carry a `RouteScore` (`liquidity_score`, `fee_bps`, `reliability_score`, each `0`–`100`). Scores are combined into a composite value:
+
+```text
+composite = liquidity_weight * liquidity_score
+          + reliability_weight * reliability_score
+          - fee_bps / fee_divisor
+```
+
+> **Scoring changes what `resolve` returns.** Whenever at least one non-paused, scored route exists, the contract caches the highest-composite route (recomputed on every score, weight, pause and removal change). `resolve(name)` and `batch_resolve` return the address of that cached best route — **regardless of the `name` requested** — as long as it has not expired. Only when no eligible scored route exists does `resolve` fall back to the route registered under `name`. Do not assign scores on a router whose callers expect `resolve(name)` to return that exact route.
+
+---
+
+### `set_route_score(caller, name, score: RouteScore) → Result<(), RouterError>`
+Sets or replaces the score of an existing route and recomputes the cached best route. Caller must be admin. Emits `route_scored`.
+
+**Errors:** `Unauthorized`, `NotInitialized`, `RouteNotFound`, `InvalidScore` (any field above 100)
+
+```bash
+stellar contract invoke --id <CORE_ID> --network testnet --source admin \
+  -- set_route_score --caller <ADMIN> --name dex-a \
+  --score '{"liquidity_score":90,"fee_bps":30,"reliability_score":95}'
+```
+
+---
+
+### `set_route_scores_batch(caller, scores: Vec<RouteScoreInput>) → Result<(), RouterError>`
+Sets scores for several routes (each a `{ name, score }` pair). All entries are validated before anything is written, so the call is all-or-nothing; the cached best route is recomputed once at the end. Caller must be admin.
+
+**Errors:** `Unauthorized`, `NotInitialized`, `RouteNotFound`, `InvalidScore`
+
+---
+
+### `get_route_score(name) → Option<RouteScore>`
+Returns the score assigned to `name`, or `None` if it has none.
+
+---
+
+### `get_best_route(candidates: Vec<String>, min_score: i64, fallback_name: Option<String>) → Result<Option<String>, RouterError>`
+Evaluates the given candidate names and returns the one with the highest composite score. Paused, expired, missing and unscored candidates are skipped. If the best composite is below `min_score` (or no candidate qualifies), `fallback_name` is returned instead. Read-only apart from emitting `best_route_selected`.
+
+Note: this function uses the fixed default formula `liquidity_score + reliability_score - fee_bps / 10`; it does **not** apply the weights configured with `set_scoring_weights` (those only affect the cached best route used by `resolve`).
+
+**Errors:** `RouterPaused`
+
+---
+
+### `set_scoring_weights(caller, weights: ScoringWeights) → Result<(), RouterError>`
+Sets the `liquidity_weight`, `reliability_weight` and `fee_divisor` used by the composite formula for the cached best route, then re-ranks all routes. Caller must be admin. Emits `scoring_weights_updated`.
+
+**Errors:** `Unauthorized`, `NotInitialized`, `InvalidScoringWeights` (`fee_divisor <= 0`, a negative weight, or a weight above 1000)
+
+---
+
+### `get_scoring_weights() → ScoringWeights`
+Returns the configured weights, or the defaults `{ liquidity_weight: 1, reliability_weight: 1, fee_divisor: 10 }` if none were set.
+
+---
+
+### Pagination, limits & stats
+
+---
+
+### `get_alias_target(alias_name) → Option<String>`
+Returns the canonical route name that `alias_name` points to, or `None` if it is not an alias. Read-only: it does not increment `total_routed` and does not fail when the router or route is paused.
+
+---
+
+### `get_routes_paginated(start: u32, limit: u32) → Vec<String>`
+Returns up to `limit` non-expired route names starting at zero-based index `start`, in the same order as `get_all_routes`. An out-of-range `start` or `limit = 0` returns an empty vector.
+
+```bash
+stellar contract invoke --id <CORE_ID> --network testnet --source any \
+  -- get_routes_paginated --start 0 --limit 50
+```
+
+---
+
+### `get_stats() → RouterStats`
+Returns a snapshot computed in one pass over the route set: `total_routes`, `active_routes`, `paused_routes`, `expired_routes`, `alias_count`, `scored_routes`. No auth required.
+
+---
+
+### `route_count() → u32`
+Returns the number of registered routes (aliases excluded, expired routes included). O(1).
+
+---
+
+### `get_max_routes() → u32`
+Returns the cap on simultaneously registered routes, as set by `initialize` or `set_max_routes`. Defaults to `1000`.
+
+---
+
+### `set_max_routes(caller, max_routes: u32) → Result<(), RouterError>`
+Changes the route cap. Lowering it below the current `route_count` removes nothing; it only blocks new registrations (`TooManyRoutes`) until the count drops below the new cap. Caller must be admin.
+
+**Errors:** `Unauthorized`, `NotInitialized`, `InvalidRouteName` (`max_routes` is `0`)
 
 ---
 
@@ -401,136 +624,507 @@ Removes the expiry entry for a role grant (cleanup function). Only super-admin.
 
 ## router-quote
 
-**Contract:** `RouterQuote`
-**Purpose:** Read-only quote previews for single-hop and multi-hop routes, including expected output, fees, slippage bounds, and a fixed-point exchange rate.
+**Contract:** `RouterQuote`  
+**Purpose:** Fee-based quote calculation and route comparison. Each route has a fee in basis points (a flat per-route fee, an amount-based tier schedule, or the contract-wide default), and quotes report the output left after that fee is deducted. Quotes are read-only previews; nothing is transferred.
 
-### `get_quote(router_core, route_name, token_in, token_out, amount_in, fee_bps, slippage_bps, precision) → Result<QuoteResponse, QuoteError>`
-Returns a quote for one liquidity plugin route. The call previews the swap result only; it does not execute a transfer.
+**Fee resolution order** for a route and `amount_in`:
 
-**Errors:** `InvalidAmount`, `InvalidPrecision`, `InvalidSlippage`, `InvalidRoute`, `RouteNotFound`, `QuoteFailed`
+1. If the route has a tier schedule, the tier with the highest `min_amount` that is `<= amount_in` applies.
+2. Otherwise (or if no tier matches), the route's flat fee set with `set_route_fee` applies.
+3. Otherwise, the default fee applies.
+
+All fees are in basis points: `1 bps = 0.01%`, max `10000` (100%).
+
+### `initialize(admin, default_fee_bps: u32) → Result<(), QuoteError>`
+Stores the admin and the default fee. Must be called once before anything else.
+
+**Errors:** `AlreadyInitialized`, `InvalidFeeBps` (`default_fee_bps > 10000`)
+
+```bash
+stellar contract invoke --id <QUOTE_ID> --network testnet --source admin \
+  -- initialize --admin <ADMIN_ADDRESS> --default_fee_bps 30
+```
 
 ---
 
-### `get_multihop_quote(hops, amount_in, slippage_bps, precision) → Result<QuoteResponse, QuoteError>`
-Returns an end-to-end quote for an ordered route of liquidity plugin hops. The `amount_out` from each hop becomes the `amount_in` for the next hop.
+### `set_route_fee(caller, route, fee_bps: u32) → Result<(), QuoteError>`
+Sets a flat fee for `route`. Caller must be admin. Emits `route_fee_set`.
 
-**Errors:** `EmptyRoute`, `RouteTooLong`, `InvalidAmount`, `InvalidPrecision`, `InvalidSlippage`, `QuoteFailed`
+**Errors:** `Unauthorized`, `NotInitialized`, `InvalidFeeBps`, `TooManyRoutes` (the configured-routes index already holds 500 routes)
 
 ---
 
-### Quote Precision And Rounding
+### `unset_route_fee(caller, route) → Result<(), QuoteError>`
+Removes both the flat fee **and** the tier schedule for `route`, so it falls back to the default fee. A no-op for routes with no custom fee. Caller must be admin. Emits `route_fee_unset`.
 
-`exchange_rate` is returned as a fixed-point integer instead of a floating-point decimal:
+**Errors:** `Unauthorized`, `NotInitialized`
 
-```text
-exchange_rate = floor(amount_out * 10^precision / amount_in)
+---
+
+### `set_route_fee_tiers(caller, route, tiers: Vec<FeeTier>) → Result<(), QuoteError>`
+Replaces the tier schedule for `route`. Tiers are stored sorted by `min_amount` ascending. Passing an empty vector clears the schedule. Caller must be admin. Emits `route_fee_tiers_set`.
+
+**Errors:** `Unauthorized`, `NotInitialized`, `TooManyTiers` (more than 100 tiers), `InvalidFeeTier` (negative `min_amount`), `InvalidFeeBps` (a tier's `fee_bps > 10000`), `TooManyRoutes`
+
+```bash
+stellar contract invoke --id <QUOTE_ID> --network testnet --source admin \
+  -- set_route_fee_tiers --caller <ADMIN> --route xlm-usdc \
+  --tiers '[{"min_amount":"0","fee_bps":30},{"min_amount":"1000000000","fee_bps":20}]'
 ```
 
-`precision` is the number of decimal places encoded in `exchange_rate`. The contract accepts precision values from `1` through `18`; `6` is the typical default for UI and API clients.
+---
 
-For tokens with the same decimal count, convert the returned value to a human-readable rate like this:
+### `get_route_fee(route) → Result<u32, QuoteError>`
+Returns the route's flat fee, or the default fee if none is set. Does **not** consider tiers; use `get_quote` for the fee that actually applies to a given amount.
 
-```text
-display_rate = exchange_rate / 10^precision
-```
+**Errors:** `NotInitialized`
 
-For tokens with different decimal counts, adjust for token base units:
+---
 
-```text
-display_rate = (exchange_rate / 10^precision) * 10^(token_in_decimals - token_out_decimals)
-```
+### `get_route_fee_tiers(route) → Result<Vec<FeeTier>, QuoteError>`
+Returns the route's tier schedule sorted by `min_amount` ascending, or an empty vector if it has none.
 
-Example with equal token decimals:
+**Errors:** `NotInitialized`
 
-| `amount_in` | `amount_out` | `precision` | `exchange_rate` | Display rate |
-|---:|---:|---:|---:|---:|
-| `1_000000` | `2_000000` | `6` | `2_000000` | `2.000000` |
-| `3_000000` | `1_000000` | `6` | `333333` | `0.333333` |
+---
 
-Rounding is deterministic and always truncates toward zero because Soroban integer division is used. The contract does not round up fractional remainders, so clients should treat the value as a floor estimate of the exact rate. Fee amounts and `min_amount_out` use the same integer-division behavior:
+### `get_all_configured_routes() → Vec<(String, u32)>`
+Returns `(route, fee_bps)` for every route that has ever had a flat fee or tier schedule set. For tiered routes the reported fee is the lowest tier's fee (the tier with the smallest `min_amount`); otherwise it is the flat fee, falling back to the default fee. Routes stay in the index after `unset_route_fee` and are then reported with the default fee.
+
+---
+
+### `get_quote(request: QuoteRequest) → Result<QuoteResponse, QuoteError>`
+Quotes one route. The fee is resolved as described above, then:
 
 ```text
 fee_amount = floor(amount_in * fee_bps / 10_000)
-min_amount_out = floor(amount_out * (10_000 - slippage_bps) / 10_000)
+amount_out = amount_in - fee_amount
 ```
 
-For UI display, keep the integer values for transaction decisions and apply formatting only at the presentation layer. For comparisons, compare fixed-point integers at the same `precision` rather than converting through floating-point numbers.
+Emits `quote_calculated`.
+
+**Errors:** `NotInitialized`, `InvalidAmount` (`amount_in <= 0`), `ArithmeticOverflow`
+
+```bash
+stellar contract invoke --id <QUOTE_ID> --network testnet --source any \
+  -- get_quote \
+  --request '{"route":"xlm-usdc","token_in":"<TOKEN_IN>","token_out":"<TOKEN_OUT>","amount_in":"10000000"}'
+```
+
+---
+
+### `get_quotes(requests: Vec<QuoteRequest>) → Result<Vec<QuoteResponse>, QuoteError>`
+Quotes every request, in order. Fails as a whole if any single request fails.
+
+**Errors:** `NoQuotesProvided` (empty vector), `NotInitialized`, `InvalidAmount`, `ArithmeticOverflow`
+
+---
+
+### `get_best_quote(requests: Vec<QuoteRequest>) → Result<QuoteResponse, QuoteError>`
+Quotes every request and returns the one with the highest `amount_out` (the first one wins ties). Fails as a whole if any request fails. Emits `best_quote_selected`.
+
+**Errors:** `NoQuotesProvided`, `NotInitialized`, `InvalidAmount`, `ArithmeticOverflow`
+
+---
+
+### `get_quotes_sorted(requests: Vec<QuoteRequest>) → Result<Vec<QuoteResponse>, QuoteError>`
+Quotes every request, **silently drops** the ones that fail (e.g. `amount_in <= 0`, overflow), and returns the rest sorted by `amount_out` descending. Returns an empty vector if every request fails.
+
+**Errors:** `NoQuotesProvided`, `NotInitialized`
+
+---
+
+### `set_default_fee(caller, fee_bps: u32) → Result<(), QuoteError>`
+Changes the default fee used by routes without a flat fee or matching tier. Caller must be admin. Emits `default_fee_updated`.
+
+**Errors:** `Unauthorized`, `NotInitialized`, `InvalidFeeBps`
+
+---
+
+### `get_default_fee() → Result<u32, QuoteError>`
+Returns the default fee in basis points.
+
+**Errors:** `NotInitialized`
+
+---
+
+### `admin() → Result<Address, QuoteError>`
+**Errors:** `NotInitialized`
+
+---
+
+### `transfer_admin(current, new_admin) → Result<(), QuoteError>`
+Transfers admin to `new_admin`. Emits `admin_transferred`.
+
+**Errors:** `Unauthorized`, `NotInitialized`
+
+---
+
+### Types
+
+#### `QuoteRequest`
+| Field | Type | Description |
+|---|---|---|
+| `route` | `String` | Route name whose fee configuration is used |
+| `token_in` | `Address` | Input token (echoed back; does not affect the fee) |
+| `token_out` | `Address` | Output token (echoed back; does not affect the fee) |
+| `amount_in` | `i128` | Input amount in base units; must be `> 0` |
+
+#### `QuoteResponse`
+| Field | Type | Description |
+|---|---|---|
+| `route` | `String` | Route name |
+| `token_in` | `Address` | Input token |
+| `token_out` | `Address` | Output token |
+| `amount_in` | `i128` | Input amount |
+| `amount_out` | `i128` | `amount_in - fee_amount` |
+| `fee_amount` | `i128` | Fee deducted, in input-token units |
+| `fee_bps` | `u32` | Fee rate that was applied |
+
+#### `FeeTier`
+| Field | Type | Description |
+|---|---|---|
+| `min_amount` | `i128` | Smallest `amount_in` this tier applies to; must be `>= 0` |
+| `fee_bps` | `u32` | Fee for this tier; `<= 10000` |
+
+---
+
+### `QuoteError`
+
+| Error | Value | When it occurs | How to handle it |
+| --- | ---: | --- | --- |
+| `AlreadyInitialized` | 1 | `initialize` is called a second time. | Treat as already configured. |
+| `NotInitialized` | 2 | Any fee lookup or quote runs before `initialize`. | Initialize the contract first. |
+| `Unauthorized` | 3 | An admin-only function is called by a non-admin. | Sign with the admin account. |
+| `InvalidAmount` | 4 | `amount_in <= 0`. | Send a positive amount. |
+| `InvalidFeeBps` | 5 | A fee (default, route or tier) is above `10000`. | Use a value in `0..=10000`. |
+| `NoQuotesProvided` | 6 | `get_quotes`, `get_best_quote` or `get_quotes_sorted` receives an empty vector. | Pass at least one request. |
+| _(retired)_ | 7 | Formerly `RouteNotFound`. Never returned; the value is reserved so it is not confused with errors from old deployments. | — |
+| `ArithmeticOverflow` | 8 | `amount_in * fee_bps` overflows `i128`. | Use a smaller amount. |
+| `TooManyRoutes` | 9 | Setting a fee or tiers for a new route when 500 routes are already tracked. | Reuse existing route names. |
+| `InvalidFeeTier` | 10 | A tier has a negative `min_amount`. | Use `min_amount >= 0`. |
+| `TooManyTiers` | 11 | More than 100 tiers are passed to `set_route_fee_tiers`. | Use at most 100 tiers. |
+
+---
+
+### Rounding
+
+All quote arithmetic uses integer division, which truncates toward zero. The result is deterministic and never rounds up:
+
+```text
+fee_amount = floor(amount_in * fee_bps / 10_000)
+amount_out = amount_in - fee_amount
+```
+
+Because the fee is rounded down, `amount_out` is rounded in the user's favour, and very small amounts can have a zero fee (for example `amount_in = 33`, `fee_bps = 30` gives `fee_amount = 0`). Amounts are in token base units; the contract knows nothing about token decimals. Keep the integer values for transaction decisions and apply decimal formatting only when displaying them. To compare quotes, compare `amount_out` integers directly instead of converting to floating point.
+
+| `amount_in` | `fee_bps` | `fee_amount` | `amount_out` |
+|---:|---:|---:|---:|
+| `1_000_000` | `30` | `3_000` | `997_000` |
+| `333` | `30` | `0` | `333` |
+| `3_334` | `30` | `10` | `3_324` |
 
 ---
 
 ## router-middleware
 
 **Contract:** `RouterMiddleware`  
-**Purpose:** Pre/post call hooks with rate limiting and circuit breaker.
+**Purpose:** Pre/post call hooks with per-caller rate limiting, a per-route circuit breaker, and a per-route call log.
+
+View functions use the `get_` prefix (issue #1328). The old names `admin()`, `total_calls()`, `route_config()` and `rate_limit_state()` are not part of the contract interface; use `get_admin`, `get_total_calls`, `get_route_config` and `get_rate_limit_state`.
+
+### Setup & admin
+
+---
 
 ### `initialize(admin) → Result<(), MiddlewareError>`
+Stores the admin, enables middleware globally and sets the call counter to zero.
+
 **Errors:** `AlreadyInitialized`
 
 ---
 
-### `configure_route(caller, route, max_calls_per_window, window_seconds, enabled, failure_threshold, recovery_window_seconds) → Result<(), MiddlewareError>`
-Configures rate limiting and circuit breaker for a route. Set `max_calls_per_window = 0` to disable rate limiting. Set `failure_threshold = 0` to disable the circuit breaker.
+### `get_admin() → Result<Address, MiddlewareError>`
+Returns the current admin.
 
-**Errors:** `Unauthorized`, `InvalidConfig` (window_seconds=0 with max_calls>0), `NotInitialized`
+**Errors:** `NotInitialized`
+
+---
+
+### `transfer_admin(current, new_admin) → Result<(), MiddlewareError>`
+Transfers admin to `new_admin`. Emits `admin_transferred`.
+
+**Errors:** `Unauthorized`, `NotInitialized`
+
+---
+
+### `set_global_enabled(caller, enabled: bool) → Result<(), MiddlewareError>`
+Globally enables or disables middleware. While disabled, every `pre_call` returns `MiddlewareDisabled`. Caller must be admin. Emits `middleware_enabled`.
+
+**Errors:** `Unauthorized`, `NotInitialized`
+
+---
+
+### `get_global_enabled() → bool`
+Returns whether middleware is globally enabled (`true` if never set).
+
+---
+
+### Route configuration
+
+---
+
+### `configure_route(caller, route, max_calls_per_window: u32, window_seconds: u64, enabled: bool, failure_threshold: u32, recovery_window_seconds: u64, log_retention: u32, burst_allowance: u32) → Result<(), MiddlewareError>`
+Creates or replaces the middleware config for `route` and adds it to the configured-routes list. Caller must be admin. Emits `route_configured`.
+
+- `max_calls_per_window = 0` disables route-level rate limiting.
+- `burst_allowance` extra calls are allowed per window on top of `max_calls_per_window`.
+- `failure_threshold = 0` disables the circuit breaker.
+- `log_retention` is the call-log ring-buffer capacity (`0` disables logging, max `10000`). Changing it clears the existing log and its summary; leaving it unchanged keeps them.
+
+**Errors:** `Unauthorized`, `NotInitialized`, `InvalidConfig` (`window_seconds = 0` with `max_calls_per_window > 0`, or `log_retention > 10000`)
 
 ```bash
 stellar contract invoke --id <MIDDLEWARE_ID> --network testnet --source admin \
   -- configure_route \
   --caller <ADMIN> --route oracle/get_price \
   --max_calls_per_window 100 --window_seconds 3600 \
-  --enabled true --failure_threshold 5 --recovery_window_seconds 300
+  --enabled true --failure_threshold 5 --recovery_window_seconds 300 \
+  --log_retention 100 --burst_allowance 10
 ```
 
 ---
 
-### `pre_call(caller, route) → Result<(), MiddlewareError>`
-Must be called before routing. Validates global enable, route enable, circuit breaker, and rate limit. Increments `total_calls` on success.
+### `get_route_config(route) → Option<RouteConfig>`
+Returns the config for `route`, or `None` if it was never configured.
 
-**Errors:** `MiddlewareDisabled`, `RouteDisabled`, `CircuitOpen`, `RateLimitExceeded`, `Reentrancy`
+---
+
+### `get_configured_routes() → Vec<String>`
+Returns every route name that has been passed to `configure_route`.
+
+---
+
+### Hooks
+
+---
+
+### `pre_call(caller, route) → Result<(), MiddlewareError>`
+Must be called (and authorized by `caller`) before routing. Checks, in order: the reentrancy guard, global enable, route enable, the circuit breaker, then the rate limit. Routes that were never configured only get the global-enable check. On success increments the total-call counter and emits `pre_call`.
+
+**Errors:** `Reentrancy`, `MiddlewareDisabled`, `RouteDisabled`, `CircuitOpen`, `RateLimitExceeded` (only under the `Reject` strategy)
 
 ---
 
 ### `post_call(caller, route, success: bool)`
-Must be called after routing. Emits `post_call` event. Increments circuit breaker failure count on failure.
+Must be called (and authorized by `caller`) after routing. Emits `post_call`, appends to the route's call log (if enabled), and feeds the circuit breaker: a failure increments the failure count and may open the circuit, a success closes a half-open circuit (or clears the failure count of a closed one). Does nothing beyond the event for unconfigured routes.
 
 ---
 
-### `set_global_enabled(caller, enabled: bool) → Result<(), MiddlewareError>`
-Globally enables or disables all middleware.
+### `reset_guard(caller, route) → Result<(), MiddlewareError>`
+Emergency escape hatch that clears a stuck reentrancy guard for `route`, which would otherwise make every `pre_call` on it return `Reentrancy`. Not needed in normal operation. Caller must be admin. Emits `guard_reset`.
 
 **Errors:** `Unauthorized`, `NotInitialized`
 
 ---
 
-### `reset_circuit_breaker(caller, route) → Result<(), MiddlewareError>`
-Manually resets the circuit breaker for a route.
-
-**Errors:** `Unauthorized`, `NotInitialized`
-
----
-
-### `total_calls() → u64`
+### `get_total_calls() → u64`
 Cumulative count of successful `pre_call` invocations.
 
 ---
 
-### `rate_limit_state(route, caller) → Option<RateLimitState>`
-Returns the current rate limit state for `(route, caller)`.
+### Rate limiting
+
+See [Rate Limiting Algorithm](#rate-limiting-algorithm) below for how windows are counted.
 
 ---
 
-### `route_config(route) → Option<RouteConfig>`
-Returns the middleware config for `route`.
+### `get_rate_limit_state(route, caller) → Option<RateLimitState>`
+Returns `caller`'s rate-limit state on `route`, or `None` if the caller has no state yet. If the caller's effective window (per-caller override window when set, otherwise the route's `window_seconds`) has elapsed, the returned view shows `calls_in_window = 0` and `window_start = now` — what the next `pre_call` would see. The recomputed view is not persisted.
 
 ---
 
-### `admin() → Result<Address, MiddlewareError>`
-**Errors:** `NotInitialized`
+### `get_rate_limit_state_for_caller(route, caller) → Option<RateLimitState>`
+Alias of `get_rate_limit_state` (issue #1328).
 
 ---
 
-### `transfer_admin(current, new_admin) → Result<(), MiddlewareError>`
+### `get_rate_limit_stats(route, caller) → Option<RateLimitState>`
+Alias of `get_rate_limit_state`; returns the same value.
+
+---
+
+### `get_route_rate_limit_stats(route) → Option<RouteRateLimitStats>`
+Aggregates rate-limit state across all callers of `route`: the sum of `calls_in_window` (using each caller's effective window), the earliest `window_start`, and the sum of `total_violations`. Returns `None` if no caller has state on the route.
+
+---
+
+### `reset_rate_limit(caller, route, target_caller) → Result<(), MiddlewareError>`
+Clears `target_caller`'s rate-limit state on `route` (window counter and `total_violations`). Caller must be admin. Emits `rate_limit_reset`.
+
 **Errors:** `Unauthorized`, `NotInitialized`
+
+---
+
+### `set_rate_limit_strategy(caller, route, strategy: RateLimitStrategy) → Result<(), MiddlewareError>`
+Sets what happens when a caller goes over the limit on `route`:
+
+| Strategy | `pre_call` result | Side effects |
+|---|---|---|
+| `Reject` (default) | `Err(RateLimitExceeded)` | none (the failed call's writes roll back) |
+| `Throttle` | `Ok` | emits `rate_limit_throttled`, increments `total_violations` |
+| `LogOnly` | `Ok` | emits `rate_limit_exceeded`, increments `total_violations` |
+
+Caller must be admin. Emits `rate_limit_strategy_set`.
+
+**Errors:** `Unauthorized`, `NotInitialized`
+
+---
+
+### `get_rate_limit_strategy(route) → RateLimitStrategy`
+Returns the strategy for `route` (`Reject` if never set).
+
+---
+
+### `configure_caller_rate_limit(caller, route, target_caller, max_calls: u32, window_secs: u64) → Result<(), MiddlewareError>`
+Sets a per-caller override for `target_caller` on `route`. While present, `pre_call` uses `max_calls` / `window_secs` for that caller instead of the route's `max_calls_per_window + burst_allowance` / `window_seconds`. Overrides apply even on routes whose route-level limit is `0` (unlimited). An override of `max_calls = 0` makes that caller **unlimited**, exempting them from the route-level limit too. Caller must be admin. Emits `caller_rate_limit_set`.
+
+**Errors:** `Unauthorized`, `NotInitialized`, `InvalidConfig` (`window_secs = 0` with `max_calls > 0`)
+
+```bash
+stellar contract invoke --id <MIDDLEWARE_ID> --network testnet --source admin \
+  -- configure_caller_rate_limit \
+  --caller <ADMIN> --route oracle/get_price --target_caller <PARTNER_ADDRESS> \
+  --max_calls 1000 --window_secs 3600
+```
+
+---
+
+### `get_caller_rate_limit(route, target_caller) → Option<CallerRateLimitConfig>`
+Returns the override for `target_caller` on `route`, or `None` if the route-level limit applies.
+
+---
+
+### `remove_caller_rate_limit(caller, route, target_caller) → Result<(), MiddlewareError>`
+Deletes the override so `target_caller` falls back to the route-level limit. Caller must be admin. Emits `caller_rate_limit_removed`.
+
+**Errors:** `Unauthorized`, `NotInitialized`
+
+---
+
+### `check_caller_rate_limit(route, caller) → Result<bool, MiddlewareError>`
+Read-only check against `caller`'s per-caller override: `Ok(true)` if the next call is within the override's limit, `Ok(false)` if it is exhausted. Returns `Ok(true)` when there is no override or the override is unlimited (`max_calls = 0`). It does not evaluate the route-level limit.
+
+---
+
+### Circuit breaker
+
+---
+
+### `get_circuit_breaker_state(route) → Option<CircuitBreakerState>`
+Returns the circuit-breaker state for `route`, or `None` if it has none yet. If the circuit is open and its recovery window has elapsed, the view reports `is_open = false`, `is_half_open = true` (the transition the next `pre_call` will make) without persisting it.
+
+---
+
+### `reset_circuit_breaker(caller, route) → Result<(), MiddlewareError>`
+Closes the circuit for `route` and clears its failure count. Caller must be admin. Emits `circuit_reset`.
+
+**Errors:** `Unauthorized`, `NotInitialized`
+
+---
+
+### Call log
+
+Each configured route with `log_retention > 0` keeps a ring buffer of its most recent `post_call` results plus an incrementally maintained summary.
+
+---
+
+### `get_call_log(route) → Vec<CallLogEntry>`
+Returns the retained entries for `route`, oldest first. Empty if logging is disabled or nothing was logged.
+
+---
+
+### `get_call_log_filtered(route, success_only: bool) → Vec<CallLogEntry>`
+Like `get_call_log`, but returns only successful entries when `success_only = true`, or only failed entries when `false`.
+
+---
+
+### `get_call_log_length(route) → u32`
+Returns the number of entries currently retained (at most `log_retention`).
+
+---
+
+### `get_call_log_summary(route) → Option<CallLogSummary>`
+Returns `total_calls`, `success_count`, `failure_count` and `last_call_timestamp` for `route`, or `None` if nothing was logged since the last reset.
+
+---
+
+### `reset_route_call_log(caller, route) → Result<(), MiddlewareError>`
+Clears both the call log and its summary for `route`. Caller must be admin. Emits `call_log_cleared`.
+
+**Errors:** `Unauthorized`, `NotInitialized`
+
+---
+
+### Types
+
+#### `RouteConfig`
+| Field | Type | Description |
+|---|---|---|
+| `max_calls_per_window` | `u32` | Route-level limit per caller per window (`0` = unlimited) |
+| `window_seconds` | `u64` | Window length |
+| `enabled` | `bool` | `false` makes `pre_call` return `RouteDisabled` |
+| `failure_threshold` | `u32` | Failures before the circuit opens (`0` = breaker disabled) |
+| `recovery_window_seconds` | `u64` | Time an open circuit waits before going half-open |
+| `log_retention` | `u32` | Call-log capacity (`0` = disabled, max `10000`) |
+| `burst_allowance` | `u32` | Extra calls allowed above `max_calls_per_window` |
+
+#### `RateLimitState`
+| Field | Type | Description |
+|---|---|---|
+| `calls_in_window` | `u32` | Calls counted in the current window |
+| `window_start` | `u64` | Ledger timestamp the window started |
+| `total_violations` | `u32` | Over-limit calls let through under `Throttle` / `LogOnly` |
+
+#### `RouteRateLimitStats`
+| Field | Type | Description |
+|---|---|---|
+| `total_calls_in_window` | `u32` | Sum of current-window calls across callers |
+| `window_start` | `u64` | Earliest window start across callers |
+| `total_violations` | `u32` | Sum of violations across callers |
+
+#### `CallerRateLimitConfig`
+| Field | Type | Description |
+|---|---|---|
+| `max_calls` | `u32` | Per-caller limit (`0` = unlimited) |
+| `window_secs` | `u64` | Per-caller window length |
+
+#### `CircuitBreakerState`
+| Field | Type | Description |
+|---|---|---|
+| `failure_count` | `u32` | Consecutive failures |
+| `opened_at` | `u64` | Timestamp the circuit opened |
+| `is_open` | `bool` | Calls are blocked |
+| `is_half_open` | `bool` | Probe mode after the recovery window |
+
+#### `CallLogEntry`
+| Field | Type | Description |
+|---|---|---|
+| `caller` | `Address` | Caller passed to `post_call` |
+| `timestamp` | `u64` | Ledger timestamp |
+| `success` | `bool` | Outcome passed to `post_call` |
+| `route` | `String` | Route name |
+
+#### `CallLogSummary`
+| Field | Type | Description |
+|---|---|---|
+| `total_calls` | `u32` | Calls logged since last reset |
+| `success_count` | `u32` | Successful calls |
+| `failure_count` | `u32` | Failed calls |
+| `last_call_timestamp` | `u64` | Timestamp of the latest logged call |
+
+#### `RateLimitStrategy`
+`Reject` · `Throttle` · `LogOnly` — see `set_rate_limit_strategy`.
 
 ---
 
@@ -736,104 +1330,221 @@ Cumulative count of non-simulated `execute_batch` calls.
 
 ---
 
-## router-quote
+## router-execution
 
-**Contract:** `RouterQuote`  
-**Purpose:** Price quoting for token swaps — calculates expected output amounts, fees, and exchange rates without executing transactions.
+**Contract:** `RouterExecution`  
+**Purpose:** Execution pipeline that invokes a target contract function with optional pre-flight "simulation", retry with exponential backoff hints, fee estimation, structured error events, and a bounded execution history. Its counters back the metrics exporter's `router_execution_*` metrics.
 
-### `get_quote(plugin, route_name, token_in, token_out, amount_in, fee_bps, slippage_bps, precision) → Result<QuoteResponse, QuoteError>`
+> **`simulate()` and `simulate_first` really invoke the target.** Soroban has no contract-level preview, so the "simulation" is a genuine `try_invoke_contract` call. When it succeeds, every state change made by the target **persists**. Only simulate read-only target functions. In `execute`, a successful simulation counts as the first attempt and is not invoked a second time.
 
-Gets a single-hop quote from a liquidity plugin. Returns expected output, fees, exchange rate, and price impact.
+### `initialize(admin, max_retries: u32, backoff_base_ms: u64, backoff_multiplier: u32) → Result<(), ExecutionError>`
+Stores the admin, retry cap and backoff configuration, and zeroes the counters.
 
-**Parameters:**
-- `plugin` - Address of the liquidity plugin contract
-- `route_name` - Route identifier
-- `token_in` - Input token address
-- `token_out` - Output token address
-- `amount_in` - Amount to swap (must be > 0)
-- `fee_bps` - Protocol fee in basis points
-- `slippage_bps` - Slippage tolerance in basis points (0–10000)
-- `precision` - Decimal places for exchange rate (1–18, typically 6)
+- `max_retries`: global cap on retries per request, `1`–`5`.
+- `backoff_base_ms`: delay hint before the first retry (`0` = no delay).
+- `backoff_multiplier`: growth per retry in fixed point ×100 (`100` = 1.0×, `200` = 2.0×), `100`–`10000`.
 
-**Errors:** `InvalidAmount`, `InvalidPrecision`, `InvalidSlippage`, `QuoteFailed`, `RouteNotFound`
+**Errors:** `AlreadyInitialized`, `InvalidConfig`
+
+```bash
+stellar contract invoke --id <EXECUTION_ID> --network testnet --source admin \
+  -- initialize --admin <ADMIN_ADDRESS> --max_retries 3 \
+  --backoff_base_ms 500 --backoff_multiplier 200
+```
 
 ---
 
-### `get_multihop_quote(hops, amount_in, slippage_bps, precision) → Result<QuoteResponse, QuoteError>`
+### `execute(caller, request: ExecutionRequest) → Result<ExecutionResult, ExecutionError>`
+Invokes `request.function` on `request.target` with `request.args`. `caller` must authorize.
 
-Gets a multi-hop quote chaining multiple liquidity plugins. Returns end-to-end exchange rate and per-hop breakdown.
+1. If `request.simulate_first` is `true`, the target is invoked once as a simulation. If that fails, the call stops with `SimulationFailed`. If it succeeds, that invocation **is** attempt 1 and the call returns success without invoking again.
+2. Otherwise the target is invoked; any failure is retried up to `min(request.max_retries, max_retries())` more times. Before each retry an `execution_retry` event carries `delay_ms = backoff_base_ms * (backoff_multiplier / 100)^(attempt - 1)`, capped at 1 hour. The contract does not wait itself; off-chain orchestrators use this value.
+3. On success: increments `total_executions`, appends an `ExecutionRecord` whose `fee_paid` is `base_fee + resource_fee` (see `estimate_fee`, without surge), and emits `execution_result`.
+4. If every attempt fails: emits `execution_error` and returns `ContractRejected`.
 
-**Parameters:**
-- `hops` - Ordered list of `HopDescriptor` (1–5 hops)
-- `amount_in` - Initial input amount (must be > 0)
-- `slippage_bps` - Slippage tolerance applied to final output (0–10000)
-- `precision` - Decimal places for end-to-end exchange rate (1–18)
+Because a failed contract call rolls back its storage writes, the error counter and history entries written on the failure paths do not persist on-chain; only the emitted events are observable.
 
-**Errors:** `EmptyRoute`, `RouteTooLong`, `InvalidAmount`, `InvalidPrecision`, `InvalidSlippage`, `QuoteFailed`
+**Errors:** `NotInitialized`, `InvalidAmount` (`request.amount <= 0`), `ArgsTooLarge` (more than 20 args), `SimulationFailed`, `ContractRejected`
+
+```bash
+stellar contract invoke --id <EXECUTION_ID> --network testnet --source caller \
+  -- execute --caller <CALLER_ADDRESS> \
+  --request '{"target":"<TARGET_ID>","function":"ping","simulate_first":false,"max_retries":2,"args":[],"amount":"1000000"}'
+```
 
 ---
 
-### Exchange Rate Precision and Rounding
+### `estimate_fee(target, function, amount: i128, caller_asserted_load_bps: u32) → Result<FeeEstimate, ExecutionError>`
+Returns a fee estimate in stroops. Depends only on `amount` and `caller_asserted_load_bps`; `target` and `function` are accepted for symmetry with `execute` and are ignored.
 
-The `exchange_rate` field uses **fixed-point arithmetic** to represent decimal values as integers, avoiding floating-point precision issues on-chain.
-
-#### Formula
-
-```
-exchange_rate = (amount_out * 10^precision) / amount_in
-```
-
-#### Precision Values
-
-- **Range:** 1–18 decimal places
-- **Typical value:** 6 (supports micro-precision)
-- **Configured per-quote:** Caller specifies precision when requesting a quote
-
-#### Converting to Decimal
-
-To convert the fixed-point `exchange_rate` to a decimal value:
-
-```
-decimal_rate = exchange_rate / 10^precision
+```text
+base_fee         = 100
+resource_fee     = max(amount / 1000, 100)
+surge_multiplier = 200 if caller_asserted_load_bps >= 8000 else 100
+total_fee        = (base_fee + resource_fee) * surge_multiplier / 100
 ```
 
-**Examples:**
-- `exchange_rate = 2_000_000`, `precision = 6` → `2.000000`
-- `exchange_rate = 1_050_000`, `precision = 6` → `1.050000`
-- `exchange_rate = 200`, `precision = 2` → `2.00`
+`caller_asserted_load_bps` is whatever the caller passes in; it is **not** a measured network load, so `high_load` and the `fee_estimated` event only reflect the caller's own assertion. No auth required.
 
-#### Rounding Behavior
+**Errors:** `NotInitialized`, `InvalidAmount` (`amount <= 0`)
 
-The calculation uses **integer division**, which **truncates (rounds down)** toward zero. This is deterministic and avoids banker's rounding or floating-point ambiguity.
-
-**Example with truncation:**
-```
-amount_in = 3
-amount_out = 10
-precision = 6
-
-exchange_rate = (10 * 1_000_000) / 3 = 3_333_333
-decimal_rate = 3.333333 (truncated from 3.333333...)
+```bash
+stellar contract invoke --id <EXECUTION_ID> --network testnet --source any \
+  -- estimate_fee --target <TARGET_ID> --function swap \
+  --amount 10000000 --caller_asserted_load_bps 5000
 ```
 
-#### Token Decimal Considerations
+---
 
-When working with tokens that have different decimal places:
+### `simulate(caller, target, function, args: Vec<Val>) → Result<SimulationResult, ExecutionError>`
+Invokes `function` on `target` **for real** and reports whether it succeeded (`success`, `would_fail = !success`, and a human-readable `message`). State changes made by a successful call persist — see the warning above. The target's failure is reported in the result, not as an error. `caller` must authorize. Emits `simulation_result`.
 
-1. **Token amounts** are in the token's native units (e.g., 1 USDC = 1_000_000 units for 6 decimals)
-2. **Exchange rate precision** is independent of token decimals — it controls the rate's decimal representation
-3. **Conversion example:**
-   - Token A has 6 decimals, Token B has 18 decimals
-   - Swap 1_000_000 Token A (1.0 Token A) for 5_000_000_000_000_000_000 Token B (5.0 Token B)
-   - With `precision = 6`: `exchange_rate = (5_000_000_000_000_000_000 * 10^6) / 1_000_000 = 5_000_000_000_000_000`
-   - Decimal rate: `5.0` (5 Token B per 1 Token A)
+**Errors:** `NotInitialized`, `ArgsTooLarge` (more than 20 args)
 
-#### Best Practices
+---
 
-- Use `precision = 6` for most use cases (micro-precision)
-- Use higher precision (12–18) for high-value or low-decimal tokens
-- Always check the `precision` field when interpreting `exchange_rate`
-- Account for truncation when calculating expected outputs client-side
+### `set_backoff_config(caller, backoff_base_ms: u64, backoff_multiplier: u32) → Result<(), ExecutionError>`
+Updates the retry backoff hint. Caller must be admin. Emits `backoff_config_updated` with old and new values.
+
+**Errors:** `Unauthorized`, `NotInitialized`, `InvalidConfig` (`backoff_multiplier` outside `100`–`10000`)
+
+---
+
+### `backoff_config() → Result<(u64, u32), ExecutionError>`
+Returns `(backoff_base_ms, backoff_multiplier)`.
+
+**Errors:** `NotInitialized`
+
+---
+
+### `set_max_retries(caller, new_max: u32) → Result<(), ExecutionError>`
+Updates the global retry cap. Caller must be admin. Emits `max_retries_updated`.
+
+**Errors:** `Unauthorized`, `NotInitialized`, `InvalidConfig` (`new_max` is `0` or above `5`)
+
+---
+
+### `max_retries() → Result<u32, ExecutionError>`
+Returns the global retry cap.
+
+**Errors:** `NotInitialized`
+
+---
+
+### `set_max_history_size(caller, new_max: u32) → Result<(), ExecutionError>`
+Sets how many `ExecutionRecord`s are kept (default `1000`). If the history is already longer, the oldest records are evicted immediately. Caller must be admin. Emits `max_history_size_updated`.
+
+**Errors:** `Unauthorized`, `NotInitialized`, `InvalidConfig` (`new_max` is `0` or above `10000`)
+
+---
+
+### `max_history_size() → Result<u32, ExecutionError>`
+Returns the history cap.
+
+**Errors:** `NotInitialized`
+
+---
+
+### `get_execution_history(limit: u32) → Result<Vec<ExecutionRecord>, ExecutionError>`
+Returns up to `limit` of the most recent records, newest first.
+
+**Errors:** `NotInitialized`
+
+---
+
+### `execution_history_len() → Result<u32, ExecutionError>`
+Returns the number of records currently stored.
+
+**Errors:** `NotInitialized`
+
+---
+
+### `stats() → (u64, u64)`
+Returns `(total_executions, total_errors)`. Returns `(0, 0)` before initialization.
+
+---
+
+### `admin() → Result<Address, ExecutionError>`
+**Errors:** `NotInitialized`
+
+---
+
+### `transfer_admin(current, new_admin) → Result<(), ExecutionError>`
+Transfers admin to `new_admin`. Emits `admin_transferred`.
+
+**Errors:** `Unauthorized`, `NotInitialized`
+
+---
+
+### Types
+
+#### `ExecutionRequest`
+| Field | Type | Description |
+|---|---|---|
+| `target` | `Address` | Contract to invoke |
+| `function` | `Symbol` | Function name |
+| `simulate_first` | `bool` | Run a (real) simulation invocation first |
+| `max_retries` | `u32` | Requested retries; capped at `max_retries()` |
+| `args` | `Vec<Val>` | Positional arguments, already typed for the target ABI (max 20) |
+| `amount` | `i128` | Transaction amount in stroops (`> 0`), used to compute `fee_paid` |
+
+#### `ExecutionResult`
+| Field | Type | Description |
+|---|---|---|
+| `target` | `Address` | Invoked contract |
+| `function` | `Symbol` | Invoked function |
+| `success` | `bool` | Always `true` (failures are returned as errors) |
+| `attempts` | `u32` | Attempts used, `1` = first try |
+| `simulated` | `bool` | Whether `simulate_first` was set |
+
+#### `ExecutionRecord`
+| Field | Type | Description |
+|---|---|---|
+| `timestamp` | `u64` | Ledger timestamp |
+| `target` | `Address` | Invoked contract |
+| `function` | `Symbol` | Invoked function |
+| `success` | `bool` | Outcome |
+| `fee_paid` | `i128` | `base_fee + resource_fee` for the request amount |
+
+#### `SimulationResult`
+| Field | Type | Description |
+|---|---|---|
+| `target` | `Address` | Invoked contract |
+| `function` | `Symbol` | Invoked function |
+| `success` | `bool` | The invocation succeeded |
+| `would_fail` | `bool` | `!success` |
+| `message` | `String` | `"simulation succeeded"` or `"simulation failed: transaction would be rejected"` |
+
+#### `FeeEstimate`
+| Field | Type | Description |
+|---|---|---|
+| `base_fee` | `i128` | Fixed `100` stroops |
+| `resource_fee` | `i128` | `max(amount / 1000, 100)` stroops |
+| `total_fee` | `i128` | `(base_fee + resource_fee) * surge_multiplier / 100` |
+| `surge_multiplier` | `u32` | `100` (1×) or `200` (2×) |
+| `high_load` | `bool` | Caller asserted load `>= 8000` bps (unverified) |
+
+---
+
+### `ExecutionError`
+
+Codes are grouped by category: 1xx network (retryable), 2xx simulation (blocks execution), 3xx contract, 4xx configuration/auth.
+
+| Error | Value | When it occurs | How to handle it |
+| --- | ---: | --- | --- |
+| `NetworkTimeout` | 101 | Reserved; not currently returned. | — |
+| `NetworkUnavailable` | 102 | Reserved; not currently returned. | — |
+| `SimulationFailed` | 201 | `execute` with `simulate_first = true` and the simulation invocation failed. | Inspect the target call and arguments; nothing further was attempted. |
+| `SimulationInsufficientResources` | 202 | Reserved; not currently returned. | — |
+| `ContractRejected` | 301 | Every attempt in `execute` failed. | Check the target, function and args; retry later if the failure is transient. |
+| `ContractNotFound` | 302 | Reserved; not currently returned. | — |
+| `ContractFunctionNotFound` | 303 | Reserved; not currently returned. | — |
+| `AlreadyInitialized` | 401 | `initialize` is called a second time. | Treat as already configured. |
+| `NotInitialized` | 402 | Any entry point other than `stats` runs before `initialize`. | Initialize the contract first. |
+| `Unauthorized` | 403 | An admin-only function is called by a non-admin. | Sign with the admin account. |
+| `InvalidConfig` | 404 | `max_retries` not in `1..=5`, `backoff_multiplier` not in `100..=10000`, or history size not in `1..=10000`. | Use a value inside the allowed range. |
+| `InvalidAmount` | 405 | `amount <= 0` in `execute` or `estimate_fee`. | Pass a positive amount. |
+| `ArgsTooLarge` | 406 | More than 20 `args` passed to `execute` or `simulate`. | Reduce the argument count. |
 
 ---
 
@@ -854,7 +1565,15 @@ Each contract defines its own `#[contracterror]` enum. Use the tables below as t
 | `RouteAlreadyExists` | `7` | Registering route or alias that conflicts with existing route/alias | Use a unique name, or update/remove existing entry first |
 | `InvalidRouteName` | `8` | Route name is empty or whitespace-only | Validate/sanitize names client-side before submit |
 | `InvalidMetadata` | `9` | Route metadata exceeds constraints (description/tags limits) | Trim metadata to allowed bounds, then retry |
-| `RouteExpired` | `10` | `resolve` is called for a route whose TTL ledger has been exceeded, or `extend_route_ttl` is called on an already-expired route | Re-register the route, or extend its TTL before it lapses |
+| `CircularDependency` | `10` | Dependency edge would create a self-dependency or cycle | Restructure the dependency graph |
+| `RouteInUse` | `11` | Removing a route that other routes depend on | Remove dependents or their dependency edges first |
+| `InvalidAddress` | `12` | Registering/updating a route with the zero address | Pass a real contract address |
+| `RouteExpired` | `13` | `resolve` is called for a route whose TTL ledger has been exceeded, or `extend_route_ttl` is called on an already-expired route | Re-register the route, or extend its TTL before it lapses |
+| `InvalidScore` | `14` | A `RouteScore` field exceeds 100 | Keep score fields in `0..=100` |
+| `InvalidTtlExtension` | `15` | TTL or TTL extension of zero ledgers | Pass a positive ledger count |
+| `RecursionLimitExceeded` | `16` | Dependency graph deeper than 10 levels | Flatten the dependency graph |
+| `TooManyRoutes` | `17` | Registration would exceed the `max_routes` cap | Remove routes or call `set_max_routes` |
+| `InvalidScoringWeights` | `18` | Invalid `ScoringWeights` passed to `set_scoring_weights` | Use weights in `0..=1000` and `fee_divisor > 0` |
 
 ### router-registry (`RegistryError`)
 
@@ -904,6 +1623,7 @@ Each contract defines its own `#[contracterror]` enum. Use the tables below as t
 | `MiddlewareDisabled` | `6` | Global middleware toggle is disabled | Re-enable global middleware before routed calls |
 | `InvalidConfig` | `7` | Invalid route config (e.g. non-zero max calls with zero window) | Validate config invariants client-side before write |
 | `CircuitOpen` | `8` | Circuit breaker open for route and recovery window not elapsed | Wait for recovery window or reset circuit via admin |
+| `Reentrancy` | `9` | `pre_call` re-entered for the same route, or the route's guard was left set | Admin calls `reset_guard(route)` |
 
 ### router-timelock (`TimelockError`)
 
