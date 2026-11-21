@@ -719,18 +719,24 @@ impl RouterAccess {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// Fully deactivates a role grant: removes `HasRole`, decrements
-    /// `RoleMemberCount` if the grant was currently active, and removes the
-    /// grant from `RoleMembers(role)`, `AddressRoles(target)`, and
+    /// `RoleMemberCount` if the grant was counted, and removes the grant from
+    /// `RoleMembers(role)`, `AddressRoles(target)`, and
     /// `RoleExpiry(role, target)`. Shared by `revoke_role` and `expire_role`
     /// so both leave identical, consistent bookkeeping behind.
+    ///
+    /// Issue #1647: whether to decrement is decided from the raw `HasRole`
+    /// entry, not from `has_role_internal` — the latter returns `false` for a
+    /// grant that has naturally expired, even though that grant is still
+    /// counted in `RoleMemberCount`. Blacklisted addresses are skipped because
+    /// `blacklist` already decremented their counts.
     fn deactivate_role_grant(env: &Env, role: &String, target: &Address) {
-        let was_active = Self::has_role_internal(env, target, role);
+        let key = DataKey::HasRole(role.clone(), target.clone());
+        let was_counted =
+            env.storage().instance().has(&key) && !Self::is_blacklisted_internal(env, target);
 
-        env.storage()
-            .instance()
-            .remove(&DataKey::HasRole(role.clone(), target.clone()));
+        env.storage().instance().remove(&key);
 
-        if was_active {
+        if was_counted {
             let current: u32 = env
                 .storage()
                 .instance()
@@ -1720,6 +1726,49 @@ mod tests {
         assert!(!has_expiry_key);
         assert!(!client.get_roles_for_address(&user).contains(&role));
         assert!(!client.get_role_members(&role).contains(&user));
+    }
+
+    // ── Issue #1647: RoleMemberCount must drop for naturally expired grants ──
+
+    #[test]
+    fn test_revoke_role_decrements_member_count_for_expired_grant() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let user = Address::generate(&env);
+
+        client.grant_role(&admin, &user, &role, &Some(10));
+        assert_eq!(client.get_role_member_count(&role), 1);
+
+        // Let the grant expire naturally — nothing touches the counter.
+        env.ledger().set_timestamp(env.ledger().timestamp() + 20);
+        assert!(!client.has_role(&user, &role));
+
+        // Revoking the expired grant must still decrement the counter.
+        client.revoke_role(&admin, &role, &user);
+        assert_eq!(client.get_role_member_count(&role), 0);
+    }
+
+    #[test]
+    fn test_expired_grant_frees_max_grants_per_role_slot() {
+        let (env, admin, client) = setup();
+        client.set_role_limits(&admin, &None, &Some(1));
+        let role = String::from_str(&env, "operator");
+        let user_a = Address::generate(&env);
+        let user_b = Address::generate(&env);
+
+        client.grant_role(&admin, &user_a, &role, &Some(10));
+        assert_eq!(client.get_role_member_count(&role), 1);
+
+        // Expire A's grant, then revoke it to clean up storage.
+        env.ledger().set_timestamp(env.ledger().timestamp() + 20);
+        assert!(!client.has_role(&user_a, &role));
+        client.revoke_role(&admin, &role, &user_a);
+        assert_eq!(client.get_role_member_count(&role), 0);
+
+        // The freed slot must allow a new grant.
+        assert_eq!(client.try_grant_role(&admin, &user_b, &role, &None), Ok(Ok(())));
+        assert!(client.has_role(&user_b, &role));
+        assert_eq!(client.get_role_member_count(&role), 1);
     }
 
     #[test]
