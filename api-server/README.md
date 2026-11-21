@@ -119,7 +119,8 @@ docker run -p 8080:8080 \
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Health check |
+| `/health` | GET | Liveness check — always 200 once the process is up; does not depend on the upstream RPC. This is what the Docker/Compose `HEALTHCHECK` probes. |
+| `/ready` | GET | Readiness check — 200 if the upstream Soroban RPC is reachable, 503 otherwise. Use this for traffic-admission decisions. |
 | `/simulate` | POST | Simulate transaction |
 | `/ws` | GET | WebSocket connection for status tracking |
 

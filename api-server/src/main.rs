@@ -40,6 +40,7 @@ use crate::{
     ),
     paths(
         crate::handlers::health,
+        crate::handlers::ready,
         crate::handlers::simulate,
         crate::handlers::list_routes,
         crate::handlers::get_route,
@@ -153,6 +154,7 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/health", get(handlers::health))
+        .route("/ready", get(handlers::ready))
         .route("/simulate", post(handlers::simulate))
         .route("/routes", get(handlers::list_routes))
         .route("/routes/:name", get(handlers::get_route))

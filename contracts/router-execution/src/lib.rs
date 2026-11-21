@@ -10,11 +10,19 @@
 //! - Pre-execution simulation that blocks execution on failure (note: the
 //!   simulation is a real invocation of the target, so a successful call's
 //!   state changes persist)
-//! - Retry logic for transient (network) failures
+//! - Single-attempt execution: `execute()` invokes the target at most once.
+//!   `max_retries`/`backoff_base_ms`/`backoff_multiplier` remain configurable,
+//!   but only as advice for off-chain callers — see `execute()`'s doc comment
+//!   for why on-chain retries of a deterministic call can't help with
+//!   transient network failures.
 //! - Centralized error event logging
 //! - Fee estimation endpoint with edge-case handling
 //! - Bounded execution history: capped at `max_history_size` records (default
-//!   1000), oldest entries evicted first, to prevent unbounded storage growth
+//!   1000), oldest entries evicted first, to prevent unbounded storage growth.
+//!   Records are stored one-per-entry in persistent storage (a fixed-size
+//!   ring buffer keyed by sequence number), not as a single large instance
+//!   value, so `execute()`'s cost doesn't grow with history length and the
+//!   per-entry 64 KiB ledger-entry limit can't be hit regardless of cap size.
 //!
 //! ## Events (following naming convention: past tense verbs in snake_case)
 //! - `execution_result` — Execution result logged (target, function, success, attempts)
@@ -22,7 +30,6 @@
 //!   `surge_pricing`/`high_load` here reflect only the caller's own asserted load
 //!   hint (see `estimate_fee`), not a verified on-chain network-congestion signal.
 //! - `simulation_result` — Pre-execution simulation result (target, function, success)
-//! - `execution_retry` — Retry attempt following a transient network error (target, function, attempts, delay_ms)
 //! - `execution_error` — Execution error logged (target, function, error_code, attempts)
 //! - `admin_transferred` — Admin transferred to a new address (previous_admin, new_admin)
 
@@ -86,10 +93,20 @@ pub enum DataKey {
     BackoffBaseMs,
     /// Multiplier applied each retry (stored as fixed-point *100, e.g. 200 = 2x).
     BackoffMultiplier,
-    /// `Vec<ExecutionRecord>`, capped at `MaxHistorySize` (oldest evicted first).
-    ExecHistory,
-    /// `u32` — cap on `ExecHistory` length.
+    /// `u64` — total number of `ExecutionRecord`s ever appended. Never reset;
+    /// used both as the logical "newest record" pointer and, modulo
+    /// `MAX_HISTORY_SIZE_CAP`, as the physical ring-buffer write position (see
+    /// `ExecRecord`).
+    ExecHistorySeq,
+    /// `u32` — cap on the number of history records reported by
+    /// `get_execution_history`/`execution_history_len`.
     MaxHistorySize,
+    /// `ExecutionRecord` — one physical ring-buffer slot, keyed by
+    /// `seq % MAX_HISTORY_SIZE_CAP`. Stored in **persistent** storage (one
+    /// entry per slot) rather than a single `Vec` in instance storage, so
+    /// appending a record is O(1) regardless of history length and no
+    /// single ledger entry ever approaches the 64 KiB size limit.
+    ExecRecord(u32),
 }
 
 // ── Error Types ───────────────────────────────────────────────────────────────
@@ -279,6 +296,15 @@ const INSTANCE_TTL_THRESHOLD: u32 = 17280 * 30;
 /// Ledger count instance storage TTL is bumped to when extended. ~60 days.
 const INSTANCE_TTL_EXTEND_TO: u32 = 17280 * 60;
 
+/// Threshold (in ledgers) below which an `ExecRecord` persistent-storage
+/// slot's TTL is extended whenever it's (re)written. Same ~30-day basis as
+/// `INSTANCE_TTL_THRESHOLD`.
+const PERSISTENT_TTL_THRESHOLD: u32 = 17280 * 30;
+
+/// Ledger count an `ExecRecord` slot's TTL is bumped to when extended.
+/// Same ~60-day basis as `INSTANCE_TTL_EXTEND_TO`.
+const PERSISTENT_TTL_EXTEND_TO: u32 = 17280 * 60;
+
 // ── Contract ──────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -430,24 +456,45 @@ impl RouterExecution {
         Ok((base, mult))
     }
 
-    /// Execute a transaction with structured error handling and optional retry.
+    /// Execute a transaction with structured error handling.
     ///
     /// If `request.simulate_first` is `true`, a dry-run simulation is performed
     /// via `try_invoke_contract` before the real call. A failed simulation blocks
-    /// execution and returns [`ExecutionError::SimulationFailed`].
+    /// execution.
     ///
-    /// The contract call does not inspect error codes: any failed invocation
-    /// (including a contract-level rejection) is retried up to
-    /// `min(request.max_retries, global_max_retries)` times, emitting an
-    /// `execution_retry` event before each retry. If every attempt fails,
-    /// [`ExecutionError::ContractRejected`] is returned.
+    /// # Single attempt only (Issue #1625)
+    /// `execute()` invokes the target **at most once**. Earlier versions
+    /// retried a failed `try_invoke_contract` in a loop inside this same
+    /// function, but within a single Soroban transaction there is no passage
+    /// of time and no network: the ledger timestamp and every other input
+    /// are fixed, and a failed attempt's state changes are rolled back
+    /// before the "retry" runs. A deterministic call that failed once will
+    /// fail identically on every subsequent attempt in the same
+    /// transaction, so those retries only burned CPU/memory budget (up to
+    /// `max_retries`× the cost of the call) without ever being able to
+    /// change the outcome. `max_retries`, `backoff_base_ms` and
+    /// `backoff_multiplier` remain configurable, but purely as advice for
+    /// an *off-chain* caller that wants to retry `execute()` itself (as a
+    /// new transaction, where a transient RPC/network failure can actually
+    /// have cleared) with the given backoff schedule — see
+    /// `compute_backoff_ms`.
     ///
-    /// Every outcome (success or failure) is logged via an `execution_result`
-    /// event so off-chain observers can monitor the pipeline.
+    /// # Failures don't roll back (Issue #1624)
+    /// On failure (simulation or the single real attempt),
+    /// [`ExecutionResult::success`] is `false` rather than returning an
+    /// `Err`. A `#[contracterror]` `Err` return discards the whole
+    /// invocation's storage writes and events at the host boundary, which
+    /// previously meant a failed call never actually incremented
+    /// `TotalErrors`, never appended to history, and never published
+    /// `execution_error` on-chain — only the test suite's direct,
+    /// boundary-skipping calls made it look otherwise. Returning `Ok` lets
+    /// that bookkeeping persist.
+    ///
+    /// Every successful outcome is logged via an `execution_result` event;
+    /// every failure (simulation or execution) is logged via
+    /// `execution_error`, both via [`Self::log_error`]/the result above.
     ///
     /// # Errors
-    /// * [`ExecutionError::SimulationFailed`] — simulation detected a would-fail tx.
-    /// * [`ExecutionError::ContractRejected`] — contract call failed after all retries.
     /// * [`ExecutionError::NotInitialized`] — contract not initialized.
     /// * [`ExecutionError::InvalidAmount`] — `request.amount` is zero or negative.
     /// * [`ExecutionError::ArgsTooLarge`] — `request.args` exceeds `MAX_ARGS_PER_CALL`.
@@ -478,27 +525,15 @@ impl RouterExecution {
             return Err(ExecutionError::ArgsTooLarge);
         }
 
-        let max_retries: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MaxRetries)
-            .ok_or(ExecutionError::NotInitialized)?;
-
-        let effective_retries = if request.max_retries < max_retries {
-            request.max_retries
-        } else {
-            max_retries
-        };
-
         let fee_paid = Self::compute_actual_fee(request.amount);
 
         // ── Simulation phase ──────────────────────────────────────────────
         // Issue #1194: `dry_run_invoke` wraps `try_invoke_contract`, which is a
         // genuine cross-contract call with real side effects — there's no
         // contract-level "preview" mechanism. So this "simulation" result
-        // *is* attempt #1's real invocation, and must be reused by the retry
-        // loop below rather than invoked again, or the target function would
-        // be executed twice for a single successful `execute()` call.
+        // *is* the real (and, per #1625, only) invocation, and must be reused
+        // below rather than invoked again, or the target function would be
+        // executed twice for a single `execute()` call.
         let mut carried_first_result: Option<bool> = None;
         if request.simulate_first {
             let sim_ok = Self::dry_run_invoke(
@@ -516,76 +551,61 @@ impl RouterExecution {
                     0,
                 );
                 Self::append_history(&env, &request.target, &request.function, false, 0);
-                return Err(ExecutionError::SimulationFailed);
+                return Ok(ExecutionResult {
+                    target: request.target.clone(),
+                    function: request.function.clone(),
+                    success: false,
+                    attempts: 0,
+                    simulated: true,
+                });
             }
             carried_first_result = Some(sim_ok);
         }
 
-        // ── Execution phase with retry ────────────────────────────────────
-        let backoff_base_ms: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::BackoffBaseMs)
-            .unwrap_or(0);
-        let backoff_multiplier: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::BackoffMultiplier)
-            .unwrap_or(100);
+        // ── Single execution attempt (Issue #1625: no in-contract retry) ──
+        let attempts = 1u32;
+        let invoke_ok = if let Some(result) = carried_first_result.take() {
+            result
+        } else {
+            Self::dry_run_invoke(
+                &env,
+                &request.target,
+                &request.function,
+                request.args.clone(),
+            )
+        };
 
-        let mut attempts = 0u32;
-        loop {
-            attempts += 1;
-            let invoke_ok = if let Some(result) = carried_first_result.take() {
-                result
-            } else {
-                Self::dry_run_invoke(
-                    &env,
-                    &request.target,
-                    &request.function,
-                    request.args.clone(),
-                )
+        if invoke_ok {
+            Self::increment_counter(&env, &DataKey::TotalExecutions);
+            Self::append_history(&env, &request.target, &request.function, true, fee_paid);
+            let exec_result = ExecutionResult {
+                target: request.target.clone(),
+                function: request.function.clone(),
+                success: true,
+                attempts,
+                simulated: request.simulate_first,
             };
-
-            if invoke_ok {
-                Self::increment_counter(&env, &DataKey::TotalExecutions);
-                Self::append_history(&env, &request.target, &request.function, true, fee_paid);
-                let exec_result = ExecutionResult {
-                    target: request.target.clone(),
-                    function: request.function.clone(),
-                    success: true,
-                    attempts,
-                    simulated: request.simulate_first,
-                };
-                env.events().publish(
-                    (Symbol::new(&env, router_common::EVENT_EXECUTION_RESULT),),
-                    (&request.target, &request.function, true, attempts),
-                );
-                return Ok(exec_result);
-            } else {
-                if attempts <= effective_retries {
-                    // Compute the delay the caller should wait before the next
-                    // retry: base_ms * multiplier^(attempt-1) / 100^(attempt-1).
-                    // Emitting this lets off-chain orchestrators honour the backoff.
-                    let delay_ms =
-                        Self::compute_backoff_ms(backoff_base_ms, backoff_multiplier, attempts - 1);
-                    env.events().publish(
-                        (Symbol::new(&env, router_common::EVENT_EXECUTION_RETRY),),
-                        (&request.target, &request.function, attempts, delay_ms),
-                    );
-                    // Retry
-                    continue;
-                }
-                Self::log_error(
-                    &env,
-                    &request.target,
-                    &request.function,
-                    ExecutionError::ContractRejected,
-                    attempts,
-                );
-                Self::append_history(&env, &request.target, &request.function, false, fee_paid);
-                return Err(ExecutionError::ContractRejected);
-            }
+            env.events().publish(
+                (Symbol::new(&env, router_common::EVENT_EXECUTION_RESULT),),
+                (&request.target, &request.function, true, attempts),
+            );
+            Ok(exec_result)
+        } else {
+            Self::log_error(
+                &env,
+                &request.target,
+                &request.function,
+                ExecutionError::ContractRejected,
+                attempts,
+            );
+            Self::append_history(&env, &request.target, &request.function, false, fee_paid);
+            Ok(ExecutionResult {
+                target: request.target.clone(),
+                function: request.function.clone(),
+                success: false,
+                attempts,
+                simulated: request.simulate_first,
+            })
         }
     }
 
@@ -792,8 +812,13 @@ impl RouterExecution {
     }
 
     /// Update the cap on the number of execution history records retained
-    /// (admin only). If the history currently holds more than `new_max`
-    /// records, the oldest excess records are evicted immediately.
+    /// (admin only). Lowering the cap immediately shrinks how many of the
+    /// most-recent records `get_execution_history`/`execution_history_len`
+    /// report; raising it exposes more of the already-stored recent records
+    /// (up to `MAX_HISTORY_SIZE_CAP`, the ring buffer's fixed physical
+    /// capacity — see `append_history`). Either way this is an O(1) update:
+    /// there is no bulk data move, because the physical ring buffer's
+    /// layout doesn't depend on this cap.
     ///
     /// # Errors
     /// * [`ExecutionError::Unauthorized`] — if `caller` is not the admin.
@@ -818,16 +843,6 @@ impl RouterExecution {
         env.storage()
             .instance()
             .set(&DataKey::MaxHistorySize, &new_max);
-
-        let mut history: Vec<ExecutionRecord> = env
-            .storage()
-            .instance()
-            .get(&DataKey::ExecHistory)
-            .unwrap_or(Vec::new(&env));
-        Self::evict_oldest(&mut history, new_max);
-        env.storage()
-            .instance()
-            .set(&DataKey::ExecHistory, &history);
 
         env.events().publish(
             (Symbol::new(
@@ -882,6 +897,11 @@ impl RouterExecution {
     }
 
     /// Return a bounded page of execution history records (newest first).
+    ///
+    /// Issue #1626: records live one-per-slot in persistent storage (see
+    /// `append_history`), so this only reads the `take` slots the caller
+    /// actually asked for — its cost is bounded by `limit`, not by how many
+    /// records have ever been appended.
     pub fn get_execution_history_paginated(
         env: Env,
         start: u32,
@@ -892,26 +912,27 @@ impl RouterExecution {
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(ExecutionError::NotInitialized);
         }
-        let history: Vec<ExecutionRecord> = env
-            .storage()
-            .instance()
-            .get(&DataKey::ExecHistory)
-            .unwrap_or(Vec::new(&env));
-        let len = history.len();
+        let len = Self::history_len(&env);
         let limit = limit.min(MAX_HISTORY_PAGE_LIMIT);
         let skip = start.min(len);
-        let take = if limit > len.saturating_sub(skip) { len.saturating_sub(skip) } else { limit };
+        let take = limit.min(len - skip);
+
+        let seq: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExecHistorySeq)
+            .unwrap_or(0);
         let mut result = Vec::new(&env);
-        // Return newest-first: iterate from the end
-        let mut i = len;
-        let mut collected = 0u32;
-        let mut skipped = 0u32;
-        while i > 0 && collected < take {
-            i -= 1;
-            if let Some(entry) = history.get(i) {
-                if skipped < skip { skipped += 1; continue; }
-                result.push_back(entry);
-                collected += 1;
+        // Newest-first: the newest record's sequence index is `seq - 1`;
+        // walking further back subtracts one more per step.
+        for i in 0..take {
+            let records_back = (skip + i) as u64;
+            let abs_index = seq - 1 - records_back;
+            let slot = (abs_index % MAX_HISTORY_SIZE_CAP as u64) as u32;
+            let record: Option<ExecutionRecord> =
+                env.storage().persistent().get(&DataKey::ExecRecord(slot));
+            if let Some(record) = record {
+                result.push_back(record);
             }
         }
         Ok(result)
@@ -919,8 +940,9 @@ impl RouterExecution {
 
     /// Get the current count of stored execution history records.
     ///
-    /// Returns the number of records currently in the execution history without
-    /// materializing the entire vector across the host boundary.
+    /// Issue #1626: this is a pure O(1) arithmetic read (`min` of the total
+    /// append count and the configured cap) — it never materializes any
+    /// history records.
     ///
     /// # Errors
     /// * [`ExecutionError::NotInitialized`] — if the contract is not initialized.
@@ -930,12 +952,7 @@ impl RouterExecution {
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(ExecutionError::NotInitialized);
         }
-        let history: Vec<ExecutionRecord> = env
-            .storage()
-            .instance()
-            .get(&DataKey::ExecHistory)
-            .unwrap_or(Vec::new(&env));
-        Ok(history.len())
+        Ok(Self::history_len(&env))
     }
 
     /// Get the current admin address.
@@ -981,18 +998,24 @@ impl RouterExecution {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /// Trims `history` down to at most `cap` entries, evicting the oldest first.
-    ///
-    /// Issue #1303: `Vec::remove(0)` shifts every remaining element down by
-    /// one slot, so evicting `k` entries from an `n`-length vector in a loop
-    /// costs O(k * n) element moves — reachable from `set_max_history_size`
-    /// sharply lowering the cap on a near-full history. Taking a single tail
-    /// slice instead is O(cap) regardless of how many entries are dropped.
-    fn evict_oldest(history: &mut Vec<ExecutionRecord>, cap: u32) {
-        let len = history.len();
-        if len > cap {
-            *history = history.slice(len - cap..len);
-        }
+    /// Logical number of history records currently reported to callers:
+    /// `min(total ever appended, configured cap)`. The physical ring buffer
+    /// (see `append_history`) always has capacity `MAX_HISTORY_SIZE_CAP`
+    /// regardless of the configured cap, so lowering/raising
+    /// `MaxHistorySize` only changes how many of the newest physical
+    /// entries are exposed — never a bulk data move.
+    fn history_len(env: &Env) -> u32 {
+        let seq: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExecHistorySeq)
+            .unwrap_or(0);
+        let max_history: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxHistorySize)
+            .unwrap_or(DEFAULT_MAX_HISTORY_SIZE);
+        seq.min(max_history as u64) as u32
     }
 
     /// Computes `(base_fee, resource_fee)` for a transaction amount: a fixed
@@ -1098,6 +1121,27 @@ impl RouterExecution {
         env.storage().instance().set(key, &val.saturating_add(1));
     }
 
+    /// Appends one `ExecutionRecord` to the execution history.
+    ///
+    /// Issue #1626: previously this read the *entire* `Vec<ExecutionRecord>`
+    /// out of instance storage, pushed one entry, and wrote the whole `Vec`
+    /// back — an O(history length) operation on every single `execute()`
+    /// call, and all of instance storage's keys (including `ExecHistory`)
+    /// share one ledger entry capped at 64 KiB, so a few hundred records
+    /// could already exhaust it even though `DEFAULT_MAX_HISTORY_SIZE` is
+    /// 1000.
+    ///
+    /// Now each record is written to its own **persistent** storage entry —
+    /// `DataKey::ExecRecord(slot)` — as a fixed-size ring buffer with
+    /// `MAX_HISTORY_SIZE_CAP` physical slots: `slot = seq % MAX_HISTORY_SIZE_CAP`,
+    /// where `seq` is the total number of records ever appended (never
+    /// reset). This is O(1) regardless of history length: exactly one
+    /// persistent write plus one instance-storage counter bump, and no
+    /// single record can ever approach the 64 KiB per-entry limit.
+    /// `MaxHistorySize` (the admin-configurable, user-visible cap) only
+    /// limits how many of the newest physical slots are *reported* by
+    /// `get_execution_history`/`execution_history_len` (see `history_len`);
+    /// it doesn't change how slots are written.
     fn append_history(
         env: &Env,
         target: &Address,
@@ -1105,31 +1149,31 @@ impl RouterExecution {
         success: bool,
         fee_paid: i128,
     ) {
-        let mut history: Vec<ExecutionRecord> = env
+        let seq: u64 = env
             .storage()
             .instance()
-            .get(&DataKey::ExecHistory)
-            .unwrap_or(Vec::new(env));
-        history.push_back(ExecutionRecord {
+            .get(&DataKey::ExecHistorySeq)
+            .unwrap_or(0);
+        let slot = (seq % MAX_HISTORY_SIZE_CAP as u64) as u32;
+
+        let record = ExecutionRecord {
             timestamp: env.ledger().timestamp(),
             target: target.clone(),
             function: function.clone(),
             success,
             fee_paid,
-        });
+        };
+        let key = DataKey::ExecRecord(slot);
+        env.storage().persistent().set(&key, &record);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_TTL_EXTEND_TO,
+        );
 
-        // Cap storage growth: evict the oldest record(s) once over the limit.
-        let max_history: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MaxHistorySize)
-            .unwrap_or(DEFAULT_MAX_HISTORY_SIZE);
-        Self::evict_oldest(&mut history, max_history);
-
-        // Perform a single write after all mutations (append + eviction).
         env.storage()
             .instance()
-            .set(&DataKey::ExecHistory, &history);
+            .set(&DataKey::ExecHistorySeq, &(seq + 1));
     }
 
     fn dry_run_invoke(env: &Env, target: &Address, function: &Symbol, args: Vec<Val>) -> bool {
@@ -1793,13 +1837,20 @@ mod tests {
         }
     }
 
-    // ── Backoff retry exhaustion behavior (max retries) ────────────────────────
+    // ── Failure bookkeeping persists through the client (#1624) ────────────────
 
     #[test]
-    fn test_execute_reaches_max_retries_exhaustion() {
-        // This contract's execute() retries on any Err(_) from try_invoke_contract.
-        // In the test environment, calling an unregistered contract/function should
-        // cause try_invoke_contract to Err consistently, so execute() should exhaust.
+    fn test_execute_failure_persists_through_client() {
+        // Issue #1624: execute()'s failure bookkeeping (TotalErrors,
+        // ExecHistory, the execution_error event) used to be written and
+        // then rolled back by the host, because the function returned
+        // `Err(ContractRejected)` — any contract-level failure discards the
+        // whole invocation's storage writes and events. That rollback was
+        // invisible to the old version of this test because it called
+        // `RouterExecution::execute(...)` directly inside `env.as_contract`,
+        // which bypasses the host's invocation boundary entirely. Calling
+        // through the generated client's normal `execute` here exercises
+        // the real boundary and proves the bookkeeping now survives it.
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, RouterExecution);
@@ -1812,31 +1863,25 @@ mod tests {
         let target = Address::generate(&env);
         let function = Symbol::new(&env, "transfer");
 
-        env.as_contract(&client.address, || {
-            // Build a request with max_retries=1, but global max_retries=2.
-            // effective_retries = min(1, 2) = 1.
-            // That means: attempts 1 (initial) and attempt 2 (retry) are allowed,
-            // and failure after attempt 2 returns ContractRejected.
+        // `target` is never registered, so the call fails. Issue #1625:
+        // execute() makes a single attempt now (no in-contract retry loop),
+        // so it fails immediately regardless of max_retries/global max_retries.
+        let request = ExecutionRequest {
+            target: target.clone(),
+            function: function.clone(),
+            simulate_first: false,
+            max_retries: 1,
+            args: Vec::new(&env),
+            amount: 1_000_000,
+        };
 
-            // execute() is called as a contract call to bypass caller.require_auth
-            // signature complexity in tests; env.mock_all_auths() makes auth pass.
-            let request = ExecutionRequest {
-                target: target.clone(),
-                function: function.clone(),
-                simulate_first: false,
-                max_retries: 1,
-                args: Vec::new(&env),
-                amount: 1_000_000,
-            };
-
-            let result = RouterExecution::execute(env.clone(), caller.clone(), request);
-            assert_eq!(result, Err(ExecutionError::ContractRejected));
-        });
+        let result = client.execute(&caller, &request);
+        assert!(!result.success);
+        assert_eq!(result.attempts, 1);
 
         // TotalExecutions counts successful outcomes only (see
-        // test_execute_success_path / test_execute_retry_then_succeeds);
-        // this request never succeeds, so it stays 0 while TotalErrors
-        // records the one exhausted-retries failure.
+        // test_execute_success_path); this request never succeeds, so it
+        // stays 0 while TotalErrors records the one failure.
         let (total_execs, total_errors) = client.stats();
         assert_eq!(total_execs, 0);
         assert_eq!(total_errors, 1);
@@ -1861,7 +1906,7 @@ mod tests {
         assert_eq!(evt_target, target);
         assert_eq!(evt_function, function);
         assert_eq!(evt_error_code, ExecutionError::ContractRejected as u32);
-        assert_eq!(evt_attempts, 2);
+        assert_eq!(evt_attempts, 1);
     }
 
     // ── Issue #633: backoff_multiplier upper bound validation ────────────────
@@ -2192,12 +2237,22 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_retry_then_succeeds() {
+    fn test_execute_single_attempt_does_not_retry_on_failure() {
+        // Issue #1625: execute() previously retried a failed target call in
+        // a loop inside the same transaction. Since nothing about a
+        // deterministic call's outcome can change between attempts within
+        // one transaction, those retries never changed the result — they
+        // only spent extra CPU/memory budget. FlakyTarget fails on its
+        // first-ever call and succeeds after that, so if execute() still
+        // retried, this request (max_retries=2) would succeed on the second
+        // attempt exactly like the old `test_execute_retry_then_succeeds`
+        // asserted. It must not: the target is invoked exactly once and the
+        // call fails.
+        //
         // FLAKY_CALL_COUNT is process-global (see its declaration comment for
         // why), so it must be reset here rather than relying on FlakyTarget's
         // own (rolled-back) storage to start at zero.
         FLAKY_CALL_COUNT.store(0, core::sync::atomic::Ordering::SeqCst);
-        // setup() initializes with backoff_base_ms=500, backoff_multiplier=200 (2x).
         let (env, _admin, client) = setup();
         let mock_id = env.register_contract(None, FlakyTarget);
         let caller = Address::generate(&env);
@@ -2212,49 +2267,38 @@ mod tests {
             amount: 1_000_000,
         };
 
+        // Issue #1624: a failed execute() no longer returns Err — it returns
+        // Ok(ExecutionResult { success: false, .. }) so the bookkeeping below
+        // persists through the client boundary.
         let result = client.execute(&caller, &request);
-        assert!(result.success);
-        // First attempt fails, second attempt (the retry) succeeds.
-        assert_eq!(result.attempts, 2);
+        assert!(!result.success);
+        assert_eq!(result.attempts, 1);
 
-        let (total_execs, _) = client.stats();
-        assert_eq!(total_execs, 1);
+        assert_eq!(
+            FLAKY_CALL_COUNT.load(core::sync::atomic::Ordering::SeqCst),
+            1,
+            "target must be invoked exactly once — no in-contract retry"
+        );
+
+        let (total_execs, total_errors) = client.stats();
+        assert_eq!(total_execs, 0);
+        assert_eq!(total_errors, 1);
 
         let history = client.get_execution_history(&1);
         assert_eq!(history.len(), 1);
-        assert!(history.get(0).unwrap().success);
+        assert!(!history.get(0).unwrap().success);
 
+        // No execution_retry event should be emitted — execute() no longer
+        // retries on-chain.
         let all_events = env.events().all();
-
-        // The failed first attempt should have emitted an `execution_retry` event
-        // carrying the computed backoff delay.
-        let retry_event = all_events
-            .iter()
-            .find(|e| {
-                let topic: Symbol = e.1.get(0).unwrap().into_val(&env);
-                topic == Symbol::new(&env, router_common::EVENT_EXECUTION_RETRY)
-            })
-            .expect("execution_retry event not found");
-        let (retry_target, retry_function, retry_attempts, delay_ms): (Address, Symbol, u32, u64) =
-            retry_event.2.into_val(&env);
-        assert_eq!(retry_target, mock_id);
-        assert_eq!(retry_function, function);
-        assert_eq!(retry_attempts, 1);
-        // attempt_index = attempts - 1 = 0 -> delay == backoff_base_ms unchanged.
-        assert_eq!(delay_ms, 500);
-
-        // The eventual success should still emit `execution_result` with attempts=2.
-        let exec_event = all_events
-            .iter()
-            .find(|e| {
-                let topic: Symbol = e.1.get(0).unwrap().into_val(&env);
-                topic == Symbol::new(&env, router_common::EVENT_EXECUTION_RESULT)
-            })
-            .expect("execution_result event not found");
-        let (_, _, evt_success, evt_attempts): (Address, Symbol, bool, u32) =
-            exec_event.2.into_val(&env);
-        assert!(evt_success);
-        assert_eq!(evt_attempts, 2);
+        let retry_event = all_events.iter().find(|e| {
+            let topic: Symbol = e.1.get(0).unwrap().into_val(&env);
+            topic == Symbol::new(&env, router_common::EVENT_EXECUTION_RETRY)
+        });
+        assert!(
+            retry_event.is_none(),
+            "execution_retry should never be emitted now that execute() makes a single attempt"
+        );
     }
 
     // ── Issue #956: simulate() success path coverage ───────────────────────────
@@ -2358,8 +2402,8 @@ mod tests {
     //   following FlakyTarget's pattern) and that result.simulated==true.
     //
     // Test 2: simulate_first=true against a non-existent contract — asserts
-    //   Err(ExecutionError::SimulationFailed) is returned and that no
-    //   counters persist (the failed invocation's storage writes roll back).
+    //   Ok(ExecutionResult { success: false, .. }) is returned and that the
+    //   failure bookkeeping (TotalErrors, ExecHistory) persists (issue #1624).
 
     // A static counter to track the total number of times SimulatedTarget
     // is invoked (simulation + real invocation combined). Rolled back storage
@@ -2424,11 +2468,16 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_simulate_first_true_failure_returns_simulation_failed() {
+    fn test_execute_simulate_first_true_failure_persists_through_client() {
+        // Issue #1624: a failed simulation used to return
+        // Err(SimulationFailed), which rolled back the failure bookkeeping
+        // (TotalErrors, ExecHistory) this same branch had just written. It
+        // now returns Ok(ExecutionResult { success: false, .. }) so those
+        // writes persist, the same as the ContractRejected failure path.
         let (env, _admin, client) = setup();
         let caller = Address::generate(&env);
         // Use a random address with no registered contract — dry_run_invoke will
-        // return false and the SimulationFailed early-return fires.
+        // return false and the simulation-failure early-return fires.
         let target = Address::generate(&env);
         let function = Symbol::new(&env, "transfer");
 
@@ -2441,15 +2490,18 @@ mod tests {
             amount: 1_000_000,
         };
 
-        let result = client.try_execute(&caller, &request);
-        assert_eq!(result, Err(Ok(ExecutionError::SimulationFailed)));
+        let result = client.execute(&caller, &request);
+        assert!(!result.success);
+        assert!(result.simulated);
+        assert_eq!(result.attempts, 0);
 
-        // log_error does increment TotalErrors inside the SimulationFailed
-        // branch, but returning Err rolls back the invocation's storage writes,
-        // so nothing persists.
         let (total_execs, total_errors) = client.stats();
         assert_eq!(total_execs, 0);
-        assert_eq!(total_errors, 0);
+        assert_eq!(total_errors, 1);
+
+        let history = client.get_execution_history(&1);
+        assert_eq!(history.len(), 1);
+        assert!(!history.get(0).unwrap().success);
     }
 
     // ── NotInitialized coverage (#1467) ───────────────────────────────────────
