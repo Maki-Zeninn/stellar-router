@@ -263,8 +263,12 @@ impl RouterQuote {
     /// Remove the custom fee for a specific route, reverting it to the default fee.
     ///
     /// After this call, `get_route_fee` for this route returns the contract's
-    /// default fee. If no custom fee was set for this route, this is a no-op
-    /// (the route continues using the default fee). Caller must be the admin.
+    /// default fee. This also clears any fee tier schedule configured for the
+    /// route via `set_route_fee_tiers`, since `resolve_route_fee_bps` checks
+    /// tiers before the flat fee. Calling this on a route that only has a tier
+    /// schedule (no flat fee) is therefore not a no-op — it removes the tiers.
+    /// If the route has neither a flat fee nor tiers configured, this is a
+    /// no-op. Caller must be the admin.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -326,14 +330,15 @@ impl RouterQuote {
     /// # Errors
     /// * [`QuoteError::Unauthorized`] — if caller is not the admin.
     /// * [`QuoteError::TooManyTiers`] — if tiers.len() exceeds [`MAX_FEE_TIERS_PER_ROUTE`].
-    /// * [`QuoteError::InvalidFeeTier`] — if any tier has a negative `min_amount`.
+    /// * [`QuoteError::InvalidFeeTier`] — if any tier has a negative `min_amount`,
+    ///   or if two tiers share the same `min_amount`.
     /// * [`QuoteError::InvalidFeeBps`] — if any tier's `fee_bps` > 10000.
+    /// * [`QuoteError::TooManyRoutes`] — if the configured-routes index is full ([`MAX_TRACKED_ROUTES`]).
     ///
     /// # Note
     /// Passing an empty `tiers` vector clears any previously-configured tier
     /// schedule for the route. After clearing, quotes for the route fall back
     /// to the flat route fee (if any) or the default fee.
-    /// * [`QuoteError::TooManyRoutes`] — if the configured-routes index is full ([`MAX_TRACKED_ROUTES`]).
     pub fn set_route_fee_tiers(
         env: Env,
         caller: Address,
@@ -361,6 +366,19 @@ impl RouterQuote {
             let position = find_insertion_index(sorted_tiers.len(), |idx| {
                 tier.min_amount < sorted_tiers.get(idx).unwrap().min_amount
             });
+
+            // (#1621) Reject duplicate `min_amount`s: resolve_route_fee_bps
+            // walks the sorted list and keeps overwriting the matching fee
+            // while `amount_in >= tier.min_amount`, so a duplicate makes the
+            // later-inserted tier silently win and the other tier is dead.
+            let is_duplicate = (position > 0
+                && sorted_tiers.get(position - 1).unwrap().min_amount == tier.min_amount)
+                || (position < sorted_tiers.len()
+                    && sorted_tiers.get(position).unwrap().min_amount == tier.min_amount);
+            if is_duplicate {
+                return Err(QuoteError::InvalidFeeTier);
+            }
+
             sorted_tiers.insert(position, tier.clone());
         }
 
@@ -1484,6 +1502,27 @@ mod tests {
             FeeTier {
                 min_amount: -1,
                 fee_bps: 50,
+            },
+        ];
+        let result = client.try_set_route_fee_tiers(&admin, &route, &tiers);
+        assert_eq!(result, Err(Ok(QuoteError::InvalidFeeTier)));
+    }
+
+    #[test]
+    fn test_set_route_fee_tiers_rejects_duplicate_min_amount() {
+        // (#1621) Two tiers with the same min_amount must be rejected instead
+        // of silently letting the later one win.
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+        let tiers = vec![
+            &env,
+            FeeTier {
+                min_amount: 1000,
+                fee_bps: 50,
+            },
+            FeeTier {
+                min_amount: 1000,
+                fee_bps: 10,
             },
         ];
         let result = client.try_set_route_fee_tiers(&admin, &route, &tiers);
