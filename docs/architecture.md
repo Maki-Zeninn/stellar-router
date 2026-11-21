@@ -272,3 +272,58 @@ ensures that router-core is available before contracts that optionally integrate
 8. `router-quote` (optionally references router-core for route resolution)
 
 See [`docs/deployment.md`](deployment.md) for full deployment instructions.
+
+---
+
+## Storage Layout (Issue #1633)
+
+All nine contracts currently store every key — including data that grows with
+usage — under `env.storage().instance()`. Instance storage is a single ledger
+entry per contract, read on every invocation, and bounded by the network's
+contract-data entry size limit (64 KiB today). A contract whose instance
+entry grows past that limit fails **every** call, including admin calls that
+could otherwise clean it up — there is no recovery path short of a migration
+to a new contract instance.
+
+The existing per-key caps (`max_routes`, `MAX_TRACKED_ROUTES`, history size
+limits, etc.) were sized to bound unbounded growth, not to fit the 64 KiB
+ledger-entry limit — several of them are far above what the limit allows at
+typical encoded key/value sizes. See #1632 for one concrete case
+(`router-middleware`'s call log) that reproduces this directly.
+
+### Per-contract storage key classification
+
+| Contract | Stays in `instance()` (small, bounded, read on every call) | Moves to `persistent()` (grows with usage) | Moves to `temporary()` (naturally expires) |
+|---|---|---|---|
+| `router-core` | `Admin`, global config/flags, counters | `Route(name)`, aliases, tags, dependencies, scores | — |
+| `router-registry` | `Admin`, global config | Every registered name/version entry, the address index | — |
+| `router-access` | `Admin`, role definitions (bounded, admin-managed) | `AddressRoles`, `RoleMembers`, blacklist entries | `RoleExpiry` (already has a natural expiry semantic) |
+| `router-middleware` | `Admin`, `GlobalEnabled`, `TotalCalls`, `ConfiguredRoutes` | `RouteCallState` (per-caller rate-limit map), `CallLog`/`CallLogSummary` (see #1632 for the concrete redesign) | Per-caller rate-limit window entries, once split out of `RouteCallState` |
+| `router-timelock` | `Admin`, config | Queued operations | Executed/cancelled operations, once past their retention window |
+| `router-execution` | `Admin`, `TotalExecutions`, `TotalErrors`, config | `ExecHistory` (see #1626, already moved to a persistent ring buffer) | — |
+| `router-multicall` | `Admin`, config, `TotalBatches` | Stored batch results (`DataKey::BatchResult`) | — |
+| `router-quote` | `Admin`, `ConfiguredRoutes` index, default fee | Per-route `RouteFee` / `RouteFeeTiers` (currently small enough individually, but the index itself should stay bounded by `MAX_TRACKED_ROUTES`) | — |
+| `router-common` | n/a (shared library crate, no storage of its own) | n/a | n/a |
+
+Each `persistent()` entry needs its own TTL extension (via
+`extend_instance_ttl`'s persistent-storage counterpart) on every
+read/write that touches it, following the same threshold/extend-to pattern
+already used for instance storage — see `router_common::extend_instance_ttl`
+and its call sites across every contract for the convention to mirror.
+`temporary()` entries don't need TTL management at all; they're simply gone
+once their ledger-defined temporary-entry lifetime elapses, which is the
+right fit for rate-limit windows and similar short-lived bookkeeping.
+
+### Status
+
+This issue tracks the overall plan; #1626 and #1632 track (or, in #1626's
+case, have already landed) the concrete per-contract migrations for
+`router-execution`'s execution history and `router-middleware`'s call log
+respectively. The remaining contracts' persistent-storage migrations are not
+yet implemented — this section exists so each migration PR has an agreed
+target layout to implement against, rather than ad hoc per-contract
+decisions. A migration note belongs in
+[`docs/upgrading.md`](upgrading.md) once a given contract's migration lands,
+since moving existing instance-storage data to persistent storage changes
+how that data is read and (for already-deployed instances) requires a
+one-time migration step.
