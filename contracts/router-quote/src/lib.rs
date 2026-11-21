@@ -106,6 +106,11 @@ pub enum QuoteError {
     InvalidFeeTier = 10,
     /// Too many fee tiers configured for a single route. Cannot exceed [`MAX_FEE_TIERS_PER_ROUTE`].
     TooManyTiers = 11,
+    /// `get_best_quote` or `get_quotes_sorted` was called with requests that
+    /// don't all share the same `token_in`, `token_out` and `amount_in`.
+    /// Comparing `amount_out` across requests for different tokens or input
+    /// amounts is meaningless, so such requests are rejected outright.
+    MismatchedRequests = 12,
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -152,6 +157,29 @@ fn find_insertion_index(len: u32, mut should_insert_before: impl FnMut(u32) -> b
         }
     }
     len
+}
+
+/// Returns `Err(QuoteError::MismatchedRequests)` if any request in `requests`
+/// differs from the first in `token_in`, `token_out` or `amount_in`.
+///
+/// Comparing `amount_out` across requests only makes sense when they all
+/// quote the same input amount of the same input token into the same output
+/// token; otherwise the "best" `amount_out` is meaningless (e.g. 100 USDC vs.
+/// 90 XLM, or a quote for 1,000 units vs. one for 10). A `requests` vector of
+/// length 0 or 1 is trivially consistent and always passes.
+fn require_matching_requests(requests: &Vec<QuoteRequest>) -> Result<(), QuoteError> {
+    if let Some(first) = requests.get(0) {
+        for i in 1..requests.len() {
+            let other = requests.get(i).unwrap();
+            if other.token_in != first.token_in
+                || other.token_out != first.token_out
+                || other.amount_in != first.amount_in
+            {
+                return Err(QuoteError::MismatchedRequests);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[contractimpl]
@@ -425,7 +453,13 @@ impl RouterQuote {
 
     /// Get all configured routes and their effective fees.
     ///
-    /// Returns a vector of (route_name, fee_bps) pairs.
+    /// Returns a vector of (route_name, fee_bps) pairs. The reported fee is
+    /// the one that would actually apply at the smallest possible
+    /// `amount_in` (i.e. `amount_in = 1`), matching `resolve_route_fee_bps`:
+    /// the lowest tier's `fee_bps` is only reported when that tier's
+    /// `min_amount` is `0` (so it always applies); otherwise the route's
+    /// flat/default fee is reported, since no tier would match a small
+    /// enough `amount_in`.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -442,7 +476,14 @@ impl RouterQuote {
                 Ok(t) => t,
                 Err(_) => Vec::new(&env), // Treat an uninitialized/errored tier lookup as "no tiers"; the route is only skipped below if the flat-fee fallback also fails
             };
-            let fee = if let Some(lowest) = tiers.get(0) {
+            // Issue #1620: a tier only ever applies once `amount_in >=
+            // tier.min_amount` (see `resolve_route_fee_bps`). So the lowest
+            // tier's fee is only representative of the route's effective fee
+            // when that tier's `min_amount` is 0 - otherwise amounts below
+            // it fall back to the flat/default fee, and reporting the tier
+            // fee here would disagree with what `get_quote` actually charges
+            // for small amounts.
+            let fee = if let Some(lowest) = tiers.get(0).filter(|t| t.min_amount == 0) {
                 lowest.fee_bps
             } else if let Ok(fee) = Self::get_route_fee(env.clone(), route.clone()) {
                 fee
@@ -547,6 +588,11 @@ impl RouterQuote {
     /// Calculates quotes for all provided requests and returns the single
     /// quote with the highest amount_out. Useful for automatic route selection.
     ///
+    /// All requests must share the same `token_in`, `token_out` and
+    /// `amount_in`: `amount_out` is only comparable across requests that
+    /// quote the same input amount of the same input token into the same
+    /// output token.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `requests` - Vector of quote requests to compare.
@@ -557,12 +603,14 @@ impl RouterQuote {
     /// # Errors
     /// * [`QuoteError::NotInitialized`] — if the contract has not been initialized.
     /// * [`QuoteError::NoQuotesProvided`] — if requests vector is empty.
+    /// * [`QuoteError::MismatchedRequests`] — if requests don't all share the same `token_in`, `token_out` and `amount_in`.
     /// * [`QuoteError::InvalidAmount`] — if any amount_in <= 0.
     /// * [`QuoteError::ArithmeticOverflow`] — if any request's fee/output calculation overflows.
     pub fn get_best_quote(
         env: Env,
         requests: Vec<QuoteRequest>,
     ) -> Result<QuoteResponse, QuoteError> {
+        require_matching_requests(&requests)?;
         let quotes = Self::get_quotes(env.clone(), requests)?;
 
         let mut best_quote = quotes.get(0).unwrap();
@@ -588,6 +636,13 @@ impl RouterQuote {
     /// that fail (e.g. invalid amount, arithmetic overflow), and returns the
     /// remaining quotes sorted from highest to lowest `amount_out`.
     ///
+    /// All requests must share the same `token_in`, `token_out` and
+    /// `amount_in`: `amount_out` is only comparable, and therefore only
+    /// sortable, across requests that quote the same input amount of the
+    /// same input token into the same output token. Unlike per-request
+    /// failures, a mismatch across requests is rejected outright rather than
+    /// silently dropped, since there is no well-defined subset to fall back to.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `requests` - Vector of quote requests to evaluate.
@@ -599,6 +654,7 @@ impl RouterQuote {
     /// # Errors
     /// * [`QuoteError::NoQuotesProvided`] — if requests vector is empty.
     /// * [`QuoteError::NotInitialized`] — if the contract has not been initialized.
+    /// * [`QuoteError::MismatchedRequests`] — if requests don't all share the same `token_in`, `token_out` and `amount_in`.
     pub fn get_quotes_sorted(
         env: Env,
         requests: Vec<QuoteRequest>,
@@ -613,6 +669,7 @@ impl RouterQuote {
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(QuoteError::NotInitialized);
         }
+        require_matching_requests(&requests)?;
 
         // Collect valid quotes, skipping failures.
         let mut sorted: Vec<QuoteResponse> = Vec::new(&env);
@@ -1387,6 +1444,94 @@ mod tests {
     }
 
     #[test]
+    fn test_get_best_quote_rejects_mismatched_token_out() {
+        // Issue #1622 regression test: comparing amount_out across requests
+        // for different token_out is meaningless (e.g. 100 USDC vs 90 XLM),
+        // so get_best_quote must reject it rather than silently pick one.
+        let (env, admin, client) = setup();
+        let route1 = String::from_str(&env, "route-a");
+        let route2 = String::from_str(&env, "route-b");
+        client.set_route_fee(&admin, &route1, &30);
+        client.set_route_fee(&admin, &route2, &30);
+
+        let token_in = Address::generate(&env);
+
+        let mut requests = Vec::new(&env);
+        requests.push_back(QuoteRequest {
+            route: route1,
+            token_in: token_in.clone(),
+            token_out: Address::generate(&env),
+            amount_in: 10000,
+        });
+        requests.push_back(QuoteRequest {
+            route: route2,
+            token_in,
+            token_out: Address::generate(&env), // different token_out
+            amount_in: 10000,
+        });
+
+        let result = client.try_get_best_quote(&requests);
+        assert_eq!(result, Err(Ok(QuoteError::MismatchedRequests)));
+    }
+
+    #[test]
+    fn test_get_best_quote_rejects_mismatched_amount_in() {
+        let (env, admin, client) = setup();
+        let route1 = String::from_str(&env, "route-a");
+        let route2 = String::from_str(&env, "route-b");
+        client.set_route_fee(&admin, &route1, &30);
+        client.set_route_fee(&admin, &route2, &30);
+
+        let token_in = Address::generate(&env);
+        let token_out = Address::generate(&env);
+
+        let mut requests = Vec::new(&env);
+        requests.push_back(QuoteRequest {
+            route: route1,
+            token_in: token_in.clone(),
+            token_out: token_out.clone(),
+            amount_in: 10000,
+        });
+        requests.push_back(QuoteRequest {
+            route: route2,
+            token_in,
+            token_out,
+            amount_in: 10, // different amount_in
+        });
+
+        let result = client.try_get_best_quote(&requests);
+        assert_eq!(result, Err(Ok(QuoteError::MismatchedRequests)));
+    }
+
+    #[test]
+    fn test_get_quotes_sorted_rejects_mismatched_requests() {
+        let (env, admin, client) = setup();
+        let route1 = String::from_str(&env, "route-a");
+        let route2 = String::from_str(&env, "route-b");
+        client.set_route_fee(&admin, &route1, &30);
+        client.set_route_fee(&admin, &route2, &30);
+
+        let token_in = Address::generate(&env);
+
+        let mut requests = Vec::new(&env);
+        requests.push_back(QuoteRequest {
+            route: route1,
+            token_in: token_in.clone(),
+            token_out: Address::generate(&env),
+            amount_in: 10000,
+        });
+        requests.push_back(QuoteRequest {
+            route: route2,
+            token_in,
+            token_out: Address::generate(&env), // different token_out
+            amount_in: 10000,
+        });
+
+        let result = client.try_get_quotes_sorted(&requests);
+        assert_eq!(result, Err(Ok(QuoteError::MismatchedRequests)));
+    }
+
+    #[test]
     fn test_set_default_fee() {
         let (_env, admin, client) = setup();
         client.set_default_fee(&admin, &200); // 2%
@@ -1531,7 +1676,67 @@ mod tests {
             all_configured_routes.get(4).unwrap().0,
             String::from_str(&env, "curve")
         );
-        assert_eq!(all_configured_routes.get(4).unwrap().1, 25);
+        // curve's first tier only applies at amount_in >= 1000, so the
+        // effective fee at a small amount is the flat fee (100), not the
+        // tier's 25 bps. See `test_get_all_configured_routes_tier_min_amount_above_zero`.
+        assert_eq!(all_configured_routes.get(4).unwrap().1, 100);
+    }
+
+    #[test]
+    fn test_get_all_configured_routes_tier_min_amount_above_zero() {
+        // Issue #1620 regression test: when a route's lowest fee tier has
+        // `min_amount > 0`, `get_all_configured_routes` must report the
+        // same fee that `get_quote` would actually charge at the smallest
+        // possible amount (amount_in = 1), not the tier's fee_bps.
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "curve");
+        client.set_route_fee(&admin, &route, &30); // flat/default fee: 30 bps
+
+        let mut tiers = Vec::new(&env);
+        tiers.push_back(FeeTier {
+            min_amount: 1_000,
+            fee_bps: 20,
+        });
+        client.set_route_fee_tiers(&admin, &route, &tiers);
+
+        let all_configured_routes = client.get_all_configured_routes();
+        assert_eq!(all_configured_routes.len(), 1);
+        assert_eq!(all_configured_routes.get(0).unwrap().0, route);
+
+        // Must match what get_quote would charge for amount_in = 1.
+        let request = QuoteRequest {
+            route: route.clone(),
+            token_in: Address::generate(&env),
+            token_out: Address::generate(&env),
+            amount_in: 1,
+        };
+        let fee_at_small_amount = client.get_quote(&request);
+        assert_eq!(all_configured_routes.get(0).unwrap().1, 30);
+        assert_eq!(fee_at_small_amount.fee_bps, 30);
+        assert_eq!(
+            all_configured_routes.get(0).unwrap().1,
+            fee_at_small_amount.fee_bps
+        );
+    }
+
+    #[test]
+    fn test_get_all_configured_routes_tier_min_amount_zero_is_reported() {
+        // When the lowest tier's min_amount is 0, it always applies, so it
+        // is correctly the effective fee at the smallest amount and should
+        // still be reported.
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "curve");
+        client.set_route_fee(&admin, &route, &30);
+
+        let mut tiers = Vec::new(&env);
+        tiers.push_back(FeeTier {
+            min_amount: 0,
+            fee_bps: 20,
+        });
+        client.set_route_fee_tiers(&admin, &route, &tiers);
+
+        let all_configured_routes = client.get_all_configured_routes();
+        assert_eq!(all_configured_routes.get(0).unwrap().1, 20);
     }
 
     #[test]
