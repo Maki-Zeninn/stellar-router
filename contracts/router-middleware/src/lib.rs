@@ -271,7 +271,31 @@ impl RouterMiddleware {
         );
         Ok(())
     }
-    const MAX_LOG_RETENTION: u32 = 10_000;
+    /// Issue #1632: previously 10_000. A `CallLogEntry` (Address + u64 + bool
+    /// + String route name) encodes to roughly 100-150 bytes as a Soroban
+    /// `ScVal`. Instance storage is a single ledger entry per contract,
+    /// capped at the network's contract-data entry size limit (64 KiB
+    /// today), shared across every key the contract has — not just this
+    /// one route's call log. 10_000 entries alone could reach ~1-1.5 MB,
+    /// far past that limit on a single route; once the instance entry
+    /// exceeds the limit, every invocation fails, including admin calls
+    /// that could otherwise reduce `log_retention` to recover.
+    ///
+    /// 200 keeps one route's worst case around 20-30 KB, leaving headroom
+    /// under 64 KiB for the contract's other instance keys (`RouteConfig`,
+    /// `RouteCallState`, `ConfiguredRoutes`, `CallLogSummary`, etc. across
+    /// however many routes are configured). This is a stopgap, not a full
+    /// fix: it does not change the fact that *reads and writes still touch
+    /// the whole per-route log in one instance-storage key*, nor does it
+    /// bound the *sum* across many routes each near this cap. The real fix
+    /// — splitting each log slot into its own `persistent()` entry — is
+    /// tracked by the broader storage-layout migration in issue #1633 (see
+    /// `docs/architecture.md`'s "Storage Layout" section), which this PR
+    /// does not attempt: it's a larger redesign touching this module's
+    /// storage shape and every existing test that reads `CallLogState`
+    /// directly, and isn't something to land without being able to compile
+    /// and run the suite to verify.
+    const MAX_LOG_RETENTION: u32 = 200;
 
     /// Initialize middleware with an admin.
     pub fn initialize(env: Env, admin: Address) -> Result<(), MiddlewareError> {
@@ -3906,6 +3930,52 @@ mod tests {
         assert_eq!(
             client.try_pre_call(&caller, &route),
             Err(Ok(MiddlewareError::CircuitOpen))
+        );
+    }
+
+    /// Issue #1632: configuring a route at MAX_LOG_RETENTION and filling its
+    /// call log completely must not come anywhere near the network's 64 KiB
+    /// contract-data entry size limit (measuring this route's CallLogState
+    /// alone, i.e. before accounting for any of the contract's other
+    /// instance keys, which share the same one ledger entry).
+    #[test]
+    fn test_call_log_at_max_retention_stays_well_under_instance_entry_limit() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &RouterMiddleware::MAX_LOG_RETENTION, &0);
+
+        let caller = Address::generate(&env);
+        // Fill the ring buffer completely, then wrap it once more so every
+        // slot has a real (non-placeholder) entry.
+        for _ in 0..(RouterMiddleware::MAX_LOG_RETENTION * 2) {
+            client.pre_call(&caller, &route);
+            client.post_call(&caller, &route, &true);
+        }
+
+        let log: CallLogState = env.as_contract(&client.address, || {
+            env.storage()
+                .instance()
+                .get(&DataKey::CallLog(route.clone()))
+                .unwrap()
+        });
+        assert_eq!(log.entries.len(), RouterMiddleware::MAX_LOG_RETENTION);
+        assert_eq!(log.count, RouterMiddleware::MAX_LOG_RETENTION);
+
+        // Conservative per-entry upper bound (Address + u64 timestamp + bool
+        // + String route name, encoded as a Soroban ScVal): comfortably
+        // covers the ~100-150 byte estimate in MAX_LOG_RETENTION's own doc
+        // comment, with margin.
+        const CONSERVATIVE_MAX_ENCODED_BYTES_PER_ENTRY: u32 = 200;
+        let worst_case_log_bytes = RouterMiddleware::MAX_LOG_RETENTION * CONSERVATIVE_MAX_ENCODED_BYTES_PER_ENTRY;
+        const NETWORK_CONTRACT_DATA_ENTRY_LIMIT_BYTES: u32 = 64 * 1024;
+        assert!(
+            worst_case_log_bytes < NETWORK_CONTRACT_DATA_ENTRY_LIMIT_BYTES / 2,
+            "a full call log at MAX_LOG_RETENTION ({} entries) must stay well under half the \
+             64 KiB instance-entry limit, leaving headroom for every other instance key this \
+             contract (and every other route's own call log) shares that same ledger entry \
+             with — worst-case estimate was {} bytes",
+            RouterMiddleware::MAX_LOG_RETENTION,
+            worst_case_log_bytes
         );
     }
 }
