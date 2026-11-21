@@ -6,7 +6,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   wasm-size-check:
@@ -62,14 +62,17 @@ jobs:
                 if [ -n "$BASELINE_SIZE" ]; then
                   INCREASE=$((SIZE - BASELINE_SIZE))
                   PERCENT=$((INCREASE * 100 / BASELINE_SIZE))
-                  
+
                   if [ $PERCENT -gt 10 ]; then
-                    echo "❌ $contract: Size increased by ${PERCENT}% (${BASELINE_SIZE} → ${SIZE} bytes)"
+                    echo "❌ $contract: Size increased by ${PERCENT}% (${BASELINE_SIZE} → ${SIZE} bytes, +${INCREASE} bytes)"
                     REGRESSION_DETECTED=1
-                  elif [ $PERCENT -gt 0 ]; then
-                    echo "⚠️  $contract: Size increased by ${PERCENT}% (${BASELINE_SIZE} → ${SIZE} bytes)"
+                  elif [ $INCREASE -gt 0 ]; then
+                    echo "⚠️  $contract: Size increased by ${PERCENT}% (${BASELINE_SIZE} → ${SIZE} bytes, +${INCREASE} bytes)"
+                  elif [ $INCREASE -eq 0 ]; then
+                    echo "➖ $contract: Size unchanged (${SIZE} bytes)"
                   else
-                    echo "✅ $contract: Size decreased by $((PERCENT * -1))% (${BASELINE_SIZE} → ${SIZE} bytes)"
+                    DECREASE=$((INCREASE * -1))
+                    echo "✅ $contract: Size decreased by ${DECREASE} bytes (${BASELINE_SIZE} → ${SIZE} bytes)"
                   fi
                 fi
               fi
@@ -82,8 +85,31 @@ jobs:
             exit 1
           fi
 
-      - name: Update WASM size baseline
+      - name: Upload WASM artifacts for baseline update
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-size-baseline-binaries
+          path: target/wasm32-unknown-unknown/release/*.wasm
+          retention-days: 1
+
+  update-baseline:
+    name: Update WASM Size Baseline
+    runs-on: ubuntu-latest
+    needs: wasm-size-check
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-size-baseline-binaries
+          path: target/wasm32-unknown-unknown/release/
+
+      - name: Update WASM size baseline
         run: |
           CONTRACTS=(
             "router_core"
@@ -95,10 +121,10 @@ jobs:
             "router_execution"
             "router_quote"
           )
-          
+
           BASELINE_FILE=".wasm-size-baseline.txt"
           > "$BASELINE_FILE"
-          
+
           for contract in "${CONTRACTS[@]}"; do
             WASM_FILE="target/wasm32-unknown-unknown/release/${contract}.wasm"
             if [ -f "$WASM_FILE" ]; then
@@ -106,7 +132,7 @@ jobs:
               echo "${contract}:${SIZE}" >> "$BASELINE_FILE"
             fi
           done
-          
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "$BASELINE_FILE"

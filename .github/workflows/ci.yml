@@ -226,7 +226,7 @@ jobs:
       # missing") if an rpc-url is supplied without an explicit passphrase
       # to match. TestAccount/DeployedContract only ever pass --network.
       - name: Run integration tests
-        run: cargo test --manifest-path integration-tests/Cargo.toml --test integration_tests -- --ignored --test-threads=1 --nocapture
+        run: cargo test --manifest-path integration-tests/Cargo.toml --test integration_tests -- --ignored --test-threads=1 --nocapture 2>&1 | tee integration-tests.log
 
       - name: Upload integration test results
         if: always()
@@ -234,7 +234,6 @@ jobs:
         with:
           name: integration-test-results
           path: |
-            target/debug/
             *.log
           retention-days: 7
 
