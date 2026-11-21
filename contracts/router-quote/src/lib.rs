@@ -291,8 +291,12 @@ impl RouterQuote {
     /// Remove the custom fee for a specific route, reverting it to the default fee.
     ///
     /// After this call, `get_route_fee` for this route returns the contract's
-    /// default fee. If no custom fee was set for this route, this is a no-op
-    /// (the route continues using the default fee). Caller must be the admin.
+    /// default fee. This also clears any fee tier schedule configured for the
+    /// route via `set_route_fee_tiers`, since `resolve_route_fee_bps` checks
+    /// tiers before the flat fee. Calling this on a route that only has a tier
+    /// schedule (no flat fee) is therefore not a no-op — it removes the tiers.
+    /// If the route has neither a flat fee nor tiers configured, this is a
+    /// no-op. Caller must be the admin.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -319,6 +323,13 @@ impl RouterQuote {
         env.storage()
             .instance()
             .remove(&DataKey::RouteFeeTiers(route.clone()));
+
+        // (#1619) Both the flat fee and the tier schedule are gone, so the
+        // route is no longer "configured" — drop it from the index too,
+        // otherwise entries that were unset still count against
+        // MAX_TRACKED_ROUTES forever and the admin has no way to reclaim
+        // the slot.
+        Self::untrack_configured_route(&env, &route);
 
         env.events().publish(
             (Symbol::new(&env, router_common::EVENT_ROUTE_FEE_UNSET),),
@@ -347,14 +358,15 @@ impl RouterQuote {
     /// # Errors
     /// * [`QuoteError::Unauthorized`] — if caller is not the admin.
     /// * [`QuoteError::TooManyTiers`] — if tiers.len() exceeds [`MAX_FEE_TIERS_PER_ROUTE`].
-    /// * [`QuoteError::InvalidFeeTier`] — if any tier has a negative `min_amount`.
+    /// * [`QuoteError::InvalidFeeTier`] — if any tier has a negative `min_amount`,
+    ///   or if two tiers share the same `min_amount`.
     /// * [`QuoteError::InvalidFeeBps`] — if any tier's `fee_bps` > 10000.
+    /// * [`QuoteError::TooManyRoutes`] — if the configured-routes index is full ([`MAX_TRACKED_ROUTES`]).
     ///
     /// # Note
     /// Passing an empty `tiers` vector clears any previously-configured tier
     /// schedule for the route. After clearing, quotes for the route fall back
     /// to the flat route fee (if any) or the default fee.
-    /// * [`QuoteError::TooManyRoutes`] — if the configured-routes index is full ([`MAX_TRACKED_ROUTES`]).
     pub fn set_route_fee_tiers(
         env: Env,
         caller: Address,
@@ -382,13 +394,44 @@ impl RouterQuote {
             let position = find_insertion_index(sorted_tiers.len(), |idx| {
                 tier.min_amount < sorted_tiers.get(idx).unwrap().min_amount
             });
+
+            // (#1621) Reject duplicate `min_amount`s: resolve_route_fee_bps
+            // walks the sorted list and keeps overwriting the matching fee
+            // while `amount_in >= tier.min_amount`, so a duplicate makes the
+            // later-inserted tier silently win and the other tier is dead.
+            let is_duplicate = (position > 0
+                && sorted_tiers.get(position - 1).unwrap().min_amount == tier.min_amount)
+                || (position < sorted_tiers.len()
+                    && sorted_tiers.get(position).unwrap().min_amount == tier.min_amount);
+            if is_duplicate {
+                return Err(QuoteError::InvalidFeeTier);
+            }
+
             sorted_tiers.insert(position, tier.clone());
         }
 
-        Self::track_configured_route(&env, &route)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::RouteFeeTiers(route.clone()), &sorted_tiers);
+        if sorted_tiers.is_empty() {
+            // Clearing the tier schedule. If there's no flat RouteFee left
+            // either, the route has no fee configuration anymore, so drop
+            // it from the ConfiguredRoutes index (#1619) instead of
+            // tracking it.
+            env.storage()
+                .instance()
+                .remove(&DataKey::RouteFeeTiers(route.clone()));
+
+            if !env
+                .storage()
+                .instance()
+                .has(&DataKey::RouteFee(route.clone()))
+            {
+                Self::untrack_configured_route(&env, &route);
+            }
+        } else {
+            Self::track_configured_route(&env, &route)?;
+            env.storage()
+                .instance()
+                .set(&DataKey::RouteFeeTiers(route.clone()), &sorted_tiers);
+        }
 
         env.events().publish(
             (Symbol::new(&env, router_common::EVENT_ROUTE_FEE_TIERS_SET),),
@@ -811,6 +854,21 @@ impl RouterQuote {
             Self::write_configured_routes(env, &routes);
         }
         Ok(())
+    }
+
+    /// Remove `route` from the `ConfiguredRoutes` index, if present.
+    ///
+    /// Called once a route has no remaining fee configuration (neither a
+    /// flat `RouteFee` nor a `RouteFeeTiers` schedule), so the
+    /// [`MAX_TRACKED_ROUTES`] index doesn't permanently fill up with routes
+    /// that were configured once and later unset (#1619).
+    fn untrack_configured_route(env: &Env, route: &String) {
+        let routes = Self::read_configured_routes(env);
+        if let Some(position) = routes.iter().position(|r| r == *route) {
+            let mut routes = routes;
+            routes.remove(position as u32);
+            Self::write_configured_routes(env, &routes);
+        }
     }
 
     fn resolve_route_fee_bps(env: Env, route: String, amount_in: i128) -> Result<u32, QuoteError> {
@@ -1596,6 +1654,27 @@ mod tests {
     }
 
     #[test]
+    fn test_set_route_fee_tiers_rejects_duplicate_min_amount() {
+        // (#1621) Two tiers with the same min_amount must be rejected instead
+        // of silently letting the later one win.
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+        let tiers = vec![
+            &env,
+            FeeTier {
+                min_amount: 1000,
+                fee_bps: 50,
+            },
+            FeeTier {
+                min_amount: 1000,
+                fee_bps: 10,
+            },
+        ];
+        let result = client.try_set_route_fee_tiers(&admin, &route, &tiers);
+        assert_eq!(result, Err(Ok(QuoteError::InvalidFeeTier)));
+    }
+
+    #[test]
     fn test_set_route_fee_tiers_rejects_fee_bps_over_max() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "uniswap");
@@ -2086,5 +2165,92 @@ mod tests {
 
         let result = client.try_get_quotes_sorted(&requests);
         assert_eq!(result, Err(Ok(QuoteError::NotInitialized)));
+    }
+
+    // ── Issue #1619: unset_route_fee must release its ConfiguredRoutes slot ───
+
+    #[test]
+    fn test_unset_route_fee_removes_route_from_configured_routes() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+        client.set_route_fee(&admin, &route, &30);
+
+        assert!(client
+            .get_all_configured_routes()
+            .iter()
+            .any(|(r, _)| r == route));
+
+        client.unset_route_fee(&admin, &route);
+
+        assert!(
+            !client
+                .get_all_configured_routes()
+                .iter()
+                .any(|(r, _)| r == route),
+            "an unset route must not still be reported as configured"
+        );
+    }
+
+    /// Clearing a route's only remaining fee tiers (with no flat RouteFee
+    /// left either) must also free its ConfiguredRoutes slot.
+    #[test]
+    fn test_set_route_fee_tiers_with_empty_vec_removes_route_from_configured_routes() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "uniswap");
+        let tiers = vec![
+            &env,
+            FeeTier {
+                min_amount: 0,
+                fee_bps: 10,
+            },
+        ];
+        client.set_route_fee_tiers(&admin, &route, &tiers);
+
+        assert!(client
+            .get_all_configured_routes()
+            .iter()
+            .any(|(r, _)| r == route));
+
+        let empty: Vec<FeeTier> = Vec::new(&env);
+        client.set_route_fee_tiers(&admin, &route, &empty);
+
+        assert!(
+            !client
+                .get_all_configured_routes()
+                .iter()
+                .any(|(r, _)| r == route),
+            "clearing a route's only fee configuration must release its ConfiguredRoutes slot"
+        );
+    }
+
+    /// Reproduces the issue's exact scenario: fill the index to
+    /// MAX_TRACKED_ROUTES, unset one, then confirm a brand new route can
+    /// still be configured instead of permanently failing with
+    /// TooManyRoutes.
+    #[test]
+    fn test_unset_route_fee_frees_a_slot_at_max_tracked_routes() {
+        let (env, admin, client) = setup();
+        env.budget().reset_unlimited();
+
+        for i in 0..MAX_TRACKED_ROUTES {
+            let route = String::from_str(&env, &format!("route-{}", i));
+            client.set_route_fee(&admin, &route, &10);
+        }
+
+        let blocked = String::from_str(&env, "one-too-many");
+        assert_eq!(
+            client.try_set_route_fee(&admin, &blocked, &10),
+            Err(Ok(QuoteError::TooManyRoutes))
+        );
+
+        let freed = String::from_str(&env, "route-0");
+        client.unset_route_fee(&admin, &freed);
+
+        let new_route = String::from_str(&env, "brand-new-route");
+        let result = client.try_set_route_fee(&admin, &new_route, &10);
+        assert!(
+            result.is_ok(),
+            "unsetting a route at MAX_TRACKED_ROUTES must free its slot for a new route"
+        );
     }
 }

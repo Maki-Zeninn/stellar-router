@@ -2,8 +2,11 @@
 set -euo pipefail
 
 # Validate cross-contract dependency graph.
-# Parses Cargo.toml for workspace crate deps and scans for env.invoke_contract
-# calls to build a runtime dependency graph. Fails on circular dependencies.
+# Parses Cargo.toml for workspace crate deps to build the dependency graph that
+# the circular-dependency check (cycle detection via tsort) actually covers.
+# Separately scans for env.invoke_contract / try_invoke_contract calls and
+# reports which contracts make runtime cross-contract calls, for visibility
+# only — the runtime scan is not part of the cycle check.
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 EXIT_CODE=0
@@ -122,6 +125,8 @@ echo "  3. router-middleware"
 echo "  4. router-timelock"
 echo "  5. router-multicall"
 echo "  6. router-core"
+echo "  7. router-quote"
+echo "  8. router-execution"
 
 if [ "$EXIT_CODE" -ne 0 ]; then
     echo ""

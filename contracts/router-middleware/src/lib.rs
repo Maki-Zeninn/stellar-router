@@ -62,6 +62,12 @@ pub enum DataKey {
     Executing(String), // route_name -> bool
     /// Timestamp of the last rate limit pruning for a route (to throttle O(n) pruning operations).
     LastRateLimitPrune(String), // route_name -> u64
+    /// Issue #1634: set by a successful `pre_call(caller, route)` and
+    /// consumed (removed) by the next `post_call(caller, route, ..)`. Ties
+    /// outcome reporting to a prior, authorised `pre_call` for the same
+    /// (route, caller) pair, so an arbitrary address can't forge circuit
+    /// breaker / call-log state for a route it never actually called into.
+    PendingCallMarker(String, Address), // (route, caller) -> bool
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -271,7 +277,31 @@ impl RouterMiddleware {
         );
         Ok(())
     }
-    const MAX_LOG_RETENTION: u32 = 10_000;
+    /// Issue #1632: previously 10_000. A `CallLogEntry` (Address + u64 + bool
+    /// + String route name) encodes to roughly 100-150 bytes as a Soroban
+    /// `ScVal`. Instance storage is a single ledger entry per contract,
+    /// capped at the network's contract-data entry size limit (64 KiB
+    /// today), shared across every key the contract has — not just this
+    /// one route's call log. 10_000 entries alone could reach ~1-1.5 MB,
+    /// far past that limit on a single route; once the instance entry
+    /// exceeds the limit, every invocation fails, including admin calls
+    /// that could otherwise reduce `log_retention` to recover.
+    ///
+    /// 200 keeps one route's worst case around 20-30 KB, leaving headroom
+    /// under 64 KiB for the contract's other instance keys (`RouteConfig`,
+    /// `RouteCallState`, `ConfiguredRoutes`, `CallLogSummary`, etc. across
+    /// however many routes are configured). This is a stopgap, not a full
+    /// fix: it does not change the fact that *reads and writes still touch
+    /// the whole per-route log in one instance-storage key*, nor does it
+    /// bound the *sum* across many routes each near this cap. The real fix
+    /// — splitting each log slot into its own `persistent()` entry — is
+    /// tracked by the broader storage-layout migration in issue #1633 (see
+    /// `docs/architecture.md`'s "Storage Layout" section), which this PR
+    /// does not attempt: it's a larger redesign touching this module's
+    /// storage shape and every existing test that reads `CallLogState`
+    /// directly, and isn't something to land without being able to compile
+    /// and run the suite to verify.
+    const MAX_LOG_RETENTION: u32 = 200;
 
     /// Initialize middleware with an admin.
     pub fn initialize(env: Env, admin: Address) -> Result<(), MiddlewareError> {
@@ -300,6 +330,7 @@ impl RouterMiddleware {
         burst_allowance: u32,
     ) -> Result<(), MiddlewareError> {
         caller.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, MiddlewareError)?;
 
         if window_seconds == 0 && max_calls_per_window > 0 {
@@ -400,6 +431,7 @@ impl RouterMiddleware {
         // and call-log attribution for addresses that never signed anything.
         // (Issue #1315)
         caller.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
 
         // ── Reentrancy guard: set ────────────────────────────────────────────
         if env
@@ -489,10 +521,11 @@ impl RouterMiddleware {
                     &mut route_call_state,
                 );
                 if blocked {
-                    // Persist the (potentially half-open) state before leaving.
-                    env.storage()
-                        .instance()
-                        .set(&DataKey::RouteCallState(route.clone()), &route_call_state);
+                    // Issue #1630: this invocation returns Err below, and
+                    // Soroban rolls back every storage write of a failed
+                    // invocation (see rate_limit.rs's module doc), so there
+                    // is nothing to persist here — only clear the reentrancy
+                    // guard before leaving.
                     env.storage()
                         .instance()
                         .remove(&DataKey::Executing(route.clone()));
@@ -562,10 +595,12 @@ impl RouterMiddleware {
 
                     match strategy {
                         RateLimitStrategy::Reject => {
-                            // Persist updated violation count before rejecting.
-                            env.storage()
-                                .instance()
-                                .set(&DataKey::RouteCallState(route.clone()), &route_call_state);
+                            // Issue #1630: this invocation returns Err below,
+                            // and Soroban rolls back every storage write of a
+                            // failed invocation (see rate_limit.rs's module
+                            // doc), so the updated violation count computed
+                            // above is never persisted here — only clear the
+                            // reentrancy guard before rejecting.
                             env.storage()
                                 .instance()
                                 .remove(&DataKey::Executing(route.clone()));
@@ -648,6 +683,12 @@ impl RouterMiddleware {
             .instance()
             .remove(&DataKey::Executing(route.clone()));
 
+        // Issue #1634: authorise exactly one post_call report for this
+        // (route, caller) pair — consumed (removed) by post_call itself.
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingCallMarker(route.clone(), caller.clone()), &true);
+
         Ok(())
     }
 
@@ -659,6 +700,22 @@ impl RouterMiddleware {
         // to an arbitrary `caller` address that never signed anything.
         // (Issue #1315)
         caller.require_auth();
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+
+        // ── Issue #1634: require a matching in-flight pre_call ───────────────
+        // require_auth() only proves the caller signed this transaction, not
+        // that they're allowed to report outcomes for `route` — without this
+        // check, any account could send failure_threshold post_call(.., false)
+        // transactions to open the circuit breaker for every real caller, or
+        // close a circuit early with post_call(.., true) during half-open.
+        // A successful pre_call(caller, route) leaves a one-shot marker here;
+        // post_call consumes it, so an outcome report must be paired with a
+        // prior, authorised pre_call for the exact same (route, caller).
+        let marker_key = DataKey::PendingCallMarker(route.clone(), caller.clone());
+        if !env.storage().instance().get::<DataKey, bool>(&marker_key).unwrap_or(false) {
+            return;
+        }
+        env.storage().instance().remove(&marker_key);
 
         env.events().publish(
             (Symbol::new(&env, router_common::EVENT_POST_CALL),),
@@ -3906,6 +3963,157 @@ mod tests {
         assert_eq!(
             client.try_pre_call(&caller, &route),
             Err(Ok(MiddlewareError::CircuitOpen))
+        );
+    }
+
+    // ── Issue #1635: pre_call/post_call/configure_route must extend TTL ──────
+
+    /// `pre_call` is the contract's hottest path; it alone must be able to
+    /// keep the instance alive even if no admin call ever runs again.
+    #[test]
+    fn test_pre_call_extends_instance_ttl() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &0, &0);
+        let caller = Address::generate(&env);
+
+        // Let the instance TTL (freshly extended by configure_route above)
+        // decay below the extend threshold.
+        env.ledger()
+            .with_mut(|l| l.sequence_number += INSTANCE_TTL_THRESHOLD + 1);
+
+        client.pre_call(&caller, &route);
+
+        let ttl = env.as_contract(&client.address, || env.storage().instance().get_ttl());
+        assert!(
+            ttl >= INSTANCE_TTL_EXTEND_TO - 1,
+            "pre_call must extend the instance TTL close to INSTANCE_TTL_EXTEND_TO, got {}",
+            ttl
+        );
+    }
+
+    /// `post_call` must also re-extend the instance TTL on its own, not just
+    /// piggyback on a `pre_call` made earlier in the same transaction set.
+    #[test]
+    fn test_post_call_extends_instance_ttl() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &0, &0);
+        let caller = Address::generate(&env);
+        client.pre_call(&caller, &route);
+
+        env.ledger()
+            .with_mut(|l| l.sequence_number += INSTANCE_TTL_THRESHOLD + 1);
+
+        client.post_call(&caller, &route, &true);
+
+        let ttl = env.as_contract(&client.address, || env.storage().instance().get_ttl());
+        assert!(
+            ttl >= INSTANCE_TTL_EXTEND_TO - 1,
+            "post_call must extend the instance TTL close to INSTANCE_TTL_EXTEND_TO, got {}",
+            ttl
+        );
+    }
+
+    /// `configure_route` is already covered indirectly by every other test
+    /// (they all call it in `setup`/route configuration), but this asserts
+    /// the TTL effect explicitly, matching the issue's acceptance criteria.
+    #[test]
+    fn test_configure_route_extends_instance_ttl() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+
+        env.ledger()
+            .with_mut(|l| l.sequence_number += INSTANCE_TTL_THRESHOLD + 1);
+
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &0, &0);
+
+        let ttl = env.as_contract(&client.address, || env.storage().instance().get_ttl());
+        assert!(
+            ttl >= INSTANCE_TTL_EXTEND_TO - 1,
+            "configure_route must extend the instance TTL close to INSTANCE_TTL_EXTEND_TO, got {}",
+            ttl
+        );
+    }
+
+    // ── Issue #1634: post_call must be paired with a prior pre_call ─────────
+
+    /// An address that never went through `pre_call` for a route can't use
+    /// `post_call(success=false)` to trip that route's circuit breaker for
+    /// everyone else — the call must be a complete no-op: no event, no
+    /// call-log entry, no circuit breaker state change.
+    #[test]
+    fn test_post_call_without_prior_pre_call_has_no_effect() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        // Low failure_threshold so a single effective post_call(false) would
+        // open the circuit if the call were not rejected as unpaired.
+        client.configure_route(&admin, &route, &0, &0, &true, &1, &60, &0, &0);
+
+        let attacker = Address::generate(&env);
+        // No pre_call(attacker, route) was ever made.
+        client.post_call(&attacker, &route, &false);
+
+        assert_eq!(
+            client.get_call_log_length(&route),
+            0,
+            "an unpaired post_call must not append to the call log"
+        );
+        assert!(
+            client.circuit_breaker_state(&route).is_none(),
+            "an unpaired post_call must not create or open circuit breaker state"
+        );
+
+        // A real caller who did go through pre_call is unaffected by the
+        // attacker's no-op attempt, and their own post_call still works.
+        let real_caller = Address::generate(&env);
+        client.pre_call(&real_caller, &route);
+        client.post_call(&real_caller, &route, &false);
+        let state = client.circuit_breaker_state(&route).unwrap();
+        assert!(state.is_open, "a paired post_call must still open the circuit as before");
+    /// Issue #1632: configuring a route at MAX_LOG_RETENTION and filling its
+    /// call log completely must not come anywhere near the network's 64 KiB
+    /// contract-data entry size limit (measuring this route's CallLogState
+    /// alone, i.e. before accounting for any of the contract's other
+    /// instance keys, which share the same one ledger entry).
+    #[test]
+    fn test_call_log_at_max_retention_stays_well_under_instance_entry_limit() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &0, &0, &true, &0, &0, &RouterMiddleware::MAX_LOG_RETENTION, &0);
+
+        let caller = Address::generate(&env);
+        // Fill the ring buffer completely, then wrap it once more so every
+        // slot has a real (non-placeholder) entry.
+        for _ in 0..(RouterMiddleware::MAX_LOG_RETENTION * 2) {
+            client.pre_call(&caller, &route);
+            client.post_call(&caller, &route, &true);
+        }
+
+        let log: CallLogState = env.as_contract(&client.address, || {
+            env.storage()
+                .instance()
+                .get(&DataKey::CallLog(route.clone()))
+                .unwrap()
+        });
+        assert_eq!(log.entries.len(), RouterMiddleware::MAX_LOG_RETENTION);
+        assert_eq!(log.count, RouterMiddleware::MAX_LOG_RETENTION);
+
+        // Conservative per-entry upper bound (Address + u64 timestamp + bool
+        // + String route name, encoded as a Soroban ScVal): comfortably
+        // covers the ~100-150 byte estimate in MAX_LOG_RETENTION's own doc
+        // comment, with margin.
+        const CONSERVATIVE_MAX_ENCODED_BYTES_PER_ENTRY: u32 = 200;
+        let worst_case_log_bytes = RouterMiddleware::MAX_LOG_RETENTION * CONSERVATIVE_MAX_ENCODED_BYTES_PER_ENTRY;
+        const NETWORK_CONTRACT_DATA_ENTRY_LIMIT_BYTES: u32 = 64 * 1024;
+        assert!(
+            worst_case_log_bytes < NETWORK_CONTRACT_DATA_ENTRY_LIMIT_BYTES / 2,
+            "a full call log at MAX_LOG_RETENTION ({} entries) must stay well under half the \
+             64 KiB instance-entry limit, leaving headroom for every other instance key this \
+             contract (and every other route's own call log) shares that same ledger entry \
+             with — worst-case estimate was {} bytes",
+            RouterMiddleware::MAX_LOG_RETENTION,
+            worst_case_log_bytes
         );
     }
 }
