@@ -613,6 +613,10 @@ impl RouterExecution {
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(ExecutionError::NotInitialized);
         }
+        // Issue #1627: estimate_fee is probably the most frequently invoked
+        // read on this contract (every caller estimates before submitting),
+        // so it must extend the instance TTL like the other reads do (#1302).
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         if amount <= 0 {
             return Err(ExecutionError::InvalidAmount);
         }
@@ -934,7 +938,16 @@ impl RouterExecution {
     /// Get cumulative execution statistics.
     ///
     /// Returns `(total_executions, total_errors)`.
-    pub fn stats(env: Env) -> (u64, u64) {
+    ///
+    /// # Errors
+    /// Returns `ExecutionError::NotInitialized` if the contract has not been initialized.
+    pub fn stats(env: Env) -> Result<(u64, u64), ExecutionError> {
+        // Issue #1627: match max_history_size/backoff_config/get_execution_history
+        // (#1108, #1110) — an uninitialized contract reports NotInitialized
+        // instead of silently claiming zero executions and zero errors.
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(ExecutionError::NotInitialized);
+        }
         // Issue #1302: extend TTL from this frequently-invoked read call too.
         router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         let execs: u64 = env
@@ -947,7 +960,7 @@ impl RouterExecution {
             .instance()
             .get(&DataKey::TotalErrors)
             .unwrap_or(0);
-        (execs, errors)
+        Ok((execs, errors))
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -1183,6 +1196,27 @@ mod tests {
         assert_eq!(client.admin(), admin);
     }
 
+    /// Issue #1627: estimate_fee is the most frequently invoked read on this
+    /// contract, so it must re-extend the instance TTL like every other read.
+    #[test]
+    fn test_estimate_fee_extends_instance_ttl() {
+        let (env, _, client) = setup();
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+
+        env.ledger()
+            .with_mut(|l| l.sequence_number += INSTANCE_TTL_THRESHOLD + 1);
+
+        client.estimate_fee(&target, &function, &1_000_000, &0);
+
+        let ttl = env.as_contract(&client.address, || env.storage().instance().get_ttl());
+        assert!(
+            ttl >= INSTANCE_TTL_EXTEND_TO - 1,
+            "estimate_fee must extend the instance TTL close to INSTANCE_TTL_EXTEND_TO, got {}",
+            ttl
+        );
+    }
+
     #[test]
     fn test_fee_estimate_normal_load() {
         let (env, _, client) = setup();
@@ -1272,6 +1306,19 @@ mod tests {
     fn test_stats_initial() {
         let (_, _, client) = setup();
         assert_eq!(client.stats(), (0, 0));
+    }
+
+    /// Issue #1627: stats() on an uninitialized contract must report
+    /// NotInitialized, matching max_history_size/backoff_config/
+    /// get_execution_history (#1108, #1110), instead of silently claiming
+    /// zero executions and zero errors.
+    #[test]
+    fn test_stats_fails_when_not_initialized() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, RouterExecution);
+        let client = RouterExecutionClient::new(&env, &contract_id);
+        let result = client.try_stats();
+        assert_eq!(result, Err(Ok(ExecutionError::NotInitialized)));
     }
 
     #[test]
