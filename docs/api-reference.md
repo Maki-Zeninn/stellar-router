@@ -81,7 +81,7 @@ different things depending on which contract returned it.
 | `MiddlewareDisabled` | 6 | Global middleware enforcement is disabled. | Re-enable middleware or treat the route as temporarily unavailable. |
 | `InvalidConfig` | 7 | `configure_route` is called with `max_calls_per_window > 0` but `window_seconds == 0`, or with `log_retention > 10000`; or `configure_caller_rate_limit` is called with `max_calls > 0` but `window_secs == 0`. | Set a positive window (or `0` max calls for unlimited), and keep `log_retention` at or below `10000`. |
 | `CircuitOpen` | 8 | The route's circuit breaker is open after repeated failures. | Wait for the recovery window, reset the breaker, or fix the failing downstream route. |
-| `Reentrancy` | 9 | A `pre_call` for the same route is already in progress, or the route's execution guard was left set. | An admin calls `reset_guard(route)` to clear the guard. |
+| _(retired)_ | 9 | Formerly `Reentrancy`. Never returned: the `pre_call` reentrancy guard was removed (Soroban rejects contract re-entry at the host level). The value is reserved so it is not confused with errors from old deployments. | — |
 
 ### router-timelock `TimelockError`
 
@@ -1048,9 +1048,11 @@ Returns every route name that has been passed to `configure_route`.
 ---
 
 ### `pre_call(caller, route) → Result<(), MiddlewareError>`
-Must be called (and authorized by `caller`) before routing. Checks, in order: the reentrancy guard, global enable, route enable, the circuit breaker, then the rate limit. Routes that were never configured only get the global-enable check. On success increments the total-call counter and emits `pre_call`.
+Must be called (and authorized by `caller`) before routing. Checks, in order: global enable, route enable, the circuit breaker, then the rate limit. Routes that were never configured only get the global-enable check. On success increments the total-call counter and emits `pre_call`.
 
-**Errors:** `Reentrancy`, `MiddlewareDisabled`, `RouteDisabled`, `CircuitOpen`, `RateLimitExceeded` (only under the `Reject` strategy)
+`pre_call` no longer takes a per-route reentrancy guard: it makes no cross-contract calls, and Soroban rejects contract re-entry at the host level, so the guard could never fire. `Reentrancy` is retired and never returned.
+
+**Errors:** `MiddlewareDisabled`, `RouteDisabled`, `CircuitOpen`, `RateLimitExceeded` (only under the `Reject` strategy)
 
 ---
 
@@ -1060,7 +1062,7 @@ Must be called (and authorized by `caller`) after routing. Emits `post_call`, ap
 ---
 
 ### `reset_guard(caller, route) → Result<(), MiddlewareError>`
-Emergency escape hatch that clears a stuck reentrancy guard for `route`, which would otherwise make every `pre_call` on it return `Reentrancy`. Not needed in normal operation. Caller must be admin. Emits `guard_reset`.
+**Deprecated — no-op.** Formerly an emergency escape hatch that cleared a stuck reentrancy guard for `route`. The guard has been removed, so this function does nothing beyond the admin authorization check; it is kept only for ABI compatibility. Caller must be admin. Emits `guard_reset`.
 
 **Errors:** `Unauthorized`, `NotInitialized`
 
@@ -1519,7 +1521,14 @@ operations. Emits `min_delay_updated` with `(old_min_delay, new_min_delay)`.
 ### `execute_batch(caller, calls: Vec<CallDescriptor>, simulate: bool) → Result<BatchSummary, MulticallError>`
 Executes a batch of calls. Any authenticated address can call this (not admin-only). If `simulate = true`, calls are attempted but `total_batches` is not incremented. If a call with `required = true` fails, the batch aborts immediately.
 
-**Errors:** `EmptyBatch`, `BatchTooLarge`, `RequiredCallFailed`, `NotInitialized`
+**Failure reasons.** Each failed call is reported with a `reason`:
+
+- `budget_exceeded` — only when the host error is a budget error (`ScErrorType::Budget`). `instruction_budget` is not applied to the invocation, so this is rare and reflects the transaction's overall budget.
+- `invoke_failed` — every other failure (target returned a contract error, panicked, or does not exist), **regardless of whether `instruction_budget` was set**.
+
+**`max_total_gas`.** When `max_total_gas` is `Some(limit)`, every call in the batch must declare an `instruction_budget`; a call with `instruction_budget: None` is rejected with `InvalidConfig` before anything is invoked. The declared budgets are summed (saturating) and the batch is rejected with `GasLimitExceeded` if the total exceeds `limit`. Note that declared budgets are only checked, not enforced: the calls still run under the transaction's overall budget.
+
+**Errors:** `EmptyBatch`, `BatchTooLarge`, `RequiredCallFailed`, `NotInitialized`, `InvalidConfig` (`max_total_gas` is `Some` and a call has no `instruction_budget`), `GasLimitExceeded`
 
 ---
 
@@ -1853,7 +1862,7 @@ Each contract defines its own `#[contracterror]` enum. Use the tables below as t
 | `MiddlewareDisabled` | `6` | Global middleware toggle is disabled | Re-enable global middleware before routed calls |
 | `InvalidConfig` | `7` | Invalid route config (e.g. non-zero max calls with zero window) | Validate config invariants client-side before write |
 | `CircuitOpen` | `8` | Circuit breaker open for route and recovery window not elapsed | Wait for recovery window or reset circuit via admin |
-| `Reentrancy` | `9` | `pre_call` re-entered for the same route, or the route's guard was left set | Admin calls `reset_guard(route)` |
+| _(retired)_ | `9` | Formerly `Reentrancy`. Never returned; the `pre_call` reentrancy guard was removed. The value is reserved for compatibility with old deployments | — |
 
 ### router-timelock (`TimelockError`)
 
@@ -1887,7 +1896,8 @@ Each contract defines its own `#[contracterror]` enum. Use the tables below as t
 | `BatchTooLarge` | `4` | `execute_batch` call count exceeds configured max | Split calls into smaller batches or raise max as admin |
 | `EmptyBatch` | `5` | `execute_batch` called with zero calls | Validate non-empty input before submit |
 | `RequiredCallFailed` | `6` | A call marked `required=true` fails and aborts batch | Retry after fixing failing target/function/input, or mark optional if acceptable |
-| `InvalidConfig` | `7` | Invalid config such as `max_batch_size = 0` | Enforce positive config values client-side |
+| `InvalidConfig` | `7` | Invalid config such as `max_batch_size = 0`, or `max_total_gas` is `Some` and a call has no `instruction_budget` | Enforce positive config values client-side; declare a budget on every call when using `max_total_gas` |
+| `GasLimitExceeded` | `8` | The sum of declared `instruction_budget`s exceeds `max_total_gas` | Split the batch or lower the declared budgets |
 
 ---
 
@@ -1916,7 +1926,7 @@ Each contract defines its own `#[contracterror]` enum. Use the tables below as t
 | `target` | `Address` | Contract to call |
 | `function` | `Symbol` | Function name |
 | `required` | `bool` | Abort batch on failure |
-| `instruction_budget` | `Option<u64>` | Reserved for future budget metering |
+| `instruction_budget` | `Option<u64>` | Reserved for future budget metering; not applied to the invocation. Required on every call when `max_total_gas` is `Some` |
 
 ### `BatchSummary`
 | Field | Type | Description |
@@ -1924,4 +1934,4 @@ Each contract defines its own `#[contracterror]` enum. Use the tables below as t
 | `total` | `u32` | Total calls attempted |
 | `succeeded` | `u32` | Successful calls |
 | `failed` | `u32` | Failed calls |
-| `budget_exceeded_count` | `u32` | Failed calls that had a budget set |
+| `budget_exceeded_count` | `u32` | Failed calls whose host error was a budget error (`ScErrorType::Budget`) |

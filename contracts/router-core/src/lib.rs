@@ -19,7 +19,10 @@
 //! - `route_overwritten` ΓÇö Route overwritten by same name (route_name, old_address, new_address)
 //! - `route_removed` ΓÇö Route removed (route_name)
 //! - `route_paused` ΓÇö Route paused/unpaused (route_name, paused)
-//! - `route_resolve_paused` ΓÇö Route resolution paused (route_name)
+//! - `route_resolve_paused` - unused: `resolve` returns `Err` on a paused
+//!   route and the host discards events from a failing invocation, so this
+//!   topic is never actually published. Kept defined in `router_common` for
+//!   source compatibility.
 //! - `routed` ΓÇö Route resolved (route_name, address)
 //! - `router_paused` ΓÇö Router globally paused/unpaused (paused)
 //! - `metadata_updated` ΓÇö Route metadata updated (route_name, has_metadata: bool)
@@ -27,15 +30,41 @@
 //! - `route_tag_removed` ΓÇö Route tag removed (route_name, tag)
 //! - `route_ttl_set` ΓÇö Route TTL set at registration (route_name, expiry_ledger)
 //! - `route_ttl_extended` ΓÇö Route TTL extended (route_name, new_expiry_ledger)
-//! - `route_resolve_expired` ΓÇö Route resolution attempted on an expired route (route_name)
+//! - `route_resolve_expired` - unused: `resolve` returns `Err` on an expired
+//!   route and the host discards events from a failing invocation, so this
+//!   topic is never actually published. Kept defined in `router_common` for
+//!   source compatibility.
 //! - `alias_added` ΓÇö Route alias added (existing_name, alias_name)
 //! - `alias_removed` ΓÇö Route alias removed (alias_name)
-//! - `alias_resolved` ΓÇö Route alias resolved (alias_name, selected_route_name)
+//! - `alias_resolved` - Route alias resolved, only when resolution succeeds
+//!   (alias_name, selected_route_name)
 //! - `best_route_selected` ΓÇö Best route selected (route_name, best_score)
 //! - `route_scored` ΓÇö Route score updated (route_name, liquidity_score, fee_bps, reliability_score)
 //! - `max_routes_updated` ΓÇö Max route count limit updated (old_max, new_max)
 //! - `scoring_weights_updated` ΓÇö Scoring weights updated (liquidity_weight, reliability_weight, fee_divisor)
 //! - `admin_transferred` ΓÇö Admin transferred (old_admin, new_admin)
+//! - `route_registered` — Route registered (route_name, address)
+//! - `route_updated` — Route updated (route_name)
+//! - `route_overwritten` — Route overwritten by same name (route_name, old_address, new_address)
+//! - `route_removed` — Route removed (route_name)
+//! - `route_paused` — Route paused/unpaused (route_name, paused)
+//! - `route_resolve_paused` — Route resolution paused (route_name)
+//! - `routed` — Route resolved (route_name, address)
+//! - `router_paused` — Router globally paused/unpaused (paused)
+//! - `metadata_updated` — Route metadata updated (route_name, has_metadata: bool)
+//! - `route_tag_added` — Route tag added (route_name, tag)
+//! - `route_tag_removed` — Route tag removed (route_name, tag)
+//! - `route_ttl_set` — Route TTL set at registration (route_name, expiry_ledger)
+//! - `route_ttl_extended` — Route TTL extended (route_name, new_expiry_ledger)
+//! - `route_resolve_expired` — Route resolution attempted on an expired route (route_name)
+//! - `alias_added` — Route alias added (existing_name, alias_name)
+//! - `alias_removed` — Route alias removed (alias_name)
+//! - `alias_resolved` — Route alias resolved (alias_name, selected_route_name)
+//! - `best_route_selected` — Best route selected (route_name, best_score)
+//! - `route_scored` — Route score updated (route_name, liquidity_score, fee_bps, reliability_score)
+//! - `max_routes_updated` — Max route count limit updated (old_max, new_max)
+//! - `scoring_weights_updated` — Scoring weights updated (liquidity_weight, reliability_weight, fee_divisor)
+//! - `admin_transferred` — Admin transferred (old_admin, new_admin)
 
 pub mod scoring;
 
@@ -45,7 +74,7 @@ use soroban_sdk::{
 #[cfg(test)]
 extern crate alloc;
 
-// ΓöÇΓöÇ Storage Keys ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Storage Keys ──────────────────────────────────────────────────────────────
 
 #[contracttype]
 pub enum DataKey {
@@ -235,7 +264,7 @@ pub struct RouterStats {
     pub scored_routes: u32,
 }
 
-// ΓöÇΓöÇ Errors ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Errors ────────────────────────────────────────────────────────────────────
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -259,11 +288,19 @@ pub enum RouterError {
     TooManyRoutes = 17,
     /// `fee_divisor` must be positive (> 0) when configuring scoring weights.
     InvalidScoringWeights = 18,
+    /// A batch input exceeded its documented maximum size.
+    BatchTooLarge = 19,
 }
 
 /// Maximum allowed recursion depth for dependency resolution.
 const MAX_RECURSION_DEPTH: u32 = 10;
-// ΓöÇΓöÇ Constants ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+
+/// Maximum number of names accepted by [`RouterCore::batch_resolve`] in a
+/// single call. Larger inputs are rejected with [`RouterError::BatchTooLarge`]
+/// instead of exhausting the transaction budget with an opaque host error.
+pub const MAX_BATCH_RESOLVE: u32 = 50;
+
+// ── Constants ─────────────────────────────────────────────────────────────────
 
 /// The Stellar "zero" address — used as a sentinel for "no owner" / invalid address checks.
 ///
@@ -280,7 +317,7 @@ const INSTANCE_TTL_THRESHOLD: u32 = 17280 * 30;
 /// ~60 days at 5 s/ledger.
 const INSTANCE_TTL_EXTEND_TO: u32 = 17280 * 60;
 
-// ΓöÇΓöÇ Contract ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Contract ──────────────────────────────────────────────────────────────────
 
 /// Returns `true` if `entry` has a TTL set and the current ledger sequence
 /// number exceeds its expiry ledger. Routes with `expires_at: None` never expire.
@@ -977,13 +1014,25 @@ impl RouterCore {
     /// Looks up the contract address registered under `name`, validates that
     /// neither the router nor the individual route is paused or expired,
     /// increments the total-routed counter, and emits a `routed` event. If
-    /// `name` is an alias, resolves to the original route.
+    /// `name` is an alias, resolves to the original route and emits
+    /// `alias_resolved`.
     ///
     /// When scored routes exist, score-based selection is applied via a cached
     /// best-route key (maintained on score/pause/removal changes): the
     /// highest-scoring non-paused, non-expired route is returned automatically
     /// in O(1). If no scored, eligible route exists, falls back to the direct
     /// lookup by `name`.
+    ///
+    /// # Events
+    /// `alias_resolved` and `routed` are only published once resolution is
+    /// known to succeed. On every error path below (including
+    /// `RouteExpired` and `RoutePaused`) no event is published: the host
+    /// discards all events emitted during an invocation that returns `Err`,
+    /// so publishing them on a failing path would be invisible to indexers
+    /// and `getEvents` anyway (it would only show up in-process via
+    /// `env.events().all()` in unit tests). Callers that need to observe
+    /// these failures should inspect the failed transaction itself (e.g.
+    /// via `try_resolve`), not router events.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -1049,36 +1098,30 @@ impl RouterCore {
             })
             .unwrap_or(resolved_name);
 
-        if alias_used {
-            env.events().publish(
-                (Symbol::new(&env, router_common::EVENT_ALIAS_RESOLVED),),
-                (name.clone(), final_name.clone()),
-            );
-        }
-
         let entry: RouteEntry = env
             .storage()
             .instance()
             .get(&DataKey::Route(final_name.clone()))
             .ok_or(RouterError::RouteNotFound)?;
 
+        // These two checks return `Err` on failure, and the host discards all
+        // events from an invocation that returns `Err`. No event is published
+        // here: see the `# Events` section above.
         if is_route_expired(&env, &entry) {
-            env.events().publish(
-                (Symbol::new(
-                    &env,
-                    router_common::EVENT_ROUTE_RESOLVE_EXPIRED,
-                ),),
-                (final_name.clone(),),
-            );
             return Err(RouterError::RouteExpired);
         }
 
         if entry.paused {
-            env.events().publish(
-                (Symbol::new(&env, router_common::EVENT_ROUTE_RESOLVE_PAUSED),),
-                (final_name.clone(),),
-            );
             return Err(RouterError::RoutePaused);
+        }
+
+        // Resolution is now known to succeed, so it is safe to publish
+        // `alias_resolved` - it will actually be observable by indexers.
+        if alias_used {
+            env.events().publish(
+                (Symbol::new(&env, router_common::EVENT_ALIAS_RESOLVED),),
+                (name.clone(), final_name.clone()),
+            );
         }
 
         // Increment total routed counter
@@ -3397,7 +3440,13 @@ mod tests {
     }
 
     #[test]
-    fn test_paused_route_emits_event() {
+    fn test_paused_route_resolve_emits_no_event() {
+        // `resolve` on a paused route returns `Err`, and the host discards
+        // all events published during an invocation that fails. So
+        // `resolve` must not publish `route_resolve_paused` on this path:
+        // doing so would be misleading (it would never be observable by
+        // indexers/getEvents, only in-process). This is what is actually
+        // observable via `try_resolve`.
         let (env, admin, client) = setup();
         let name = String::from_str(&env, "oracle");
         let addr = Address::generate(&env);
@@ -3405,21 +3454,14 @@ mod tests {
         client.register_route(&admin, &name, &addr, &None);
         client.set_route_paused(&admin, &name, &true);
 
-        // Attempt to resolve the paused route
-        let _ = client.try_resolve(&name);
+        let events_before = env.events().all().len();
 
-        // Verify the route_resolve_paused event was emitted
-        let event = env.events().all().last().unwrap().clone();
-        assert_eq!(event.0, client.address);
-        assert_eq!(
-            event.1,
-            vec![
-                &env,
-                Symbol::new(&env, router_common::EVENT_ROUTE_RESOLVE_PAUSED).into_val(&env)
-            ]
-        );
-        let (emitted_name,): (String,) = event.2.into_val(&env);
-        assert_eq!(emitted_name, name);
+        // Attempt to resolve the paused route
+        let result = client.try_resolve(&name);
+        assert_eq!(result, Err(Ok(RouterError::RoutePaused)));
+
+        // No new event was published by the failed resolve attempt.
+        assert_eq!(env.events().all().len(), events_before);
     }
 
     #[test]
@@ -3672,7 +3714,7 @@ mod tests {
     fn test_register_name_too_long_fails() {
         let (env, admin, client) = setup();
         let addr = Address::generate(&env);
-        // 65 alphanumeric chars ΓÇö exceeds max length of 64
+        // 65 alphanumeric chars — exceeds max length of 64
         let long_name = String::from_str(&env, &"a".repeat(65));
         let result = client.try_register_route(&admin, &long_name, &addr, &None);
         assert_eq!(result, Err(Ok(RouterError::InvalidRouteName)));
@@ -4235,7 +4277,12 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_alias_to_paused_route_emits_canonical_name() {
+    fn test_resolve_alias_to_paused_route_emits_no_event() {
+        // Resolving an alias that points at a paused route fails with
+        // `RoutePaused`. Since that's an `Err` path, the host discards all
+        // events from the invocation: neither `alias_resolved` (which would
+        // have carried the canonical name) nor `route_resolve_paused` is
+        // actually observable, so `resolve` must not publish either here.
         let (env, admin, client) = setup();
         let name = String::from_str(&env, "oracle");
         let alias = String::from_str(&env, "oracle-v1");
@@ -4245,22 +4292,14 @@ mod tests {
         client.add_alias(&admin, &name, &alias);
         client.set_route_paused(&admin, &name, &true);
 
-        // Attempt to resolve the paused alias
-        let _ = client.try_resolve(&alias);
+        let events_before = env.events().all().len();
 
-        // Verify the route_resolve_paused event was emitted with canonical name
-        let event = env.events().all().last().unwrap().clone();
-        assert_eq!(event.0, client.address);
-        assert_eq!(
-            event.1,
-            vec![
-                &env,
-                Symbol::new(&env, router_common::EVENT_ROUTE_RESOLVE_PAUSED).into_val(&env)
-            ]
-        );
-        let (emitted_name,): (String,) = event.2.into_val(&env);
-        assert_eq!(emitted_name, name); // Should be canonical name, not alias
-        assert_ne!(emitted_name, alias); // Explicitly verify it's not the alias
+        // Attempt to resolve the paused alias
+        let result = client.try_resolve(&alias);
+        assert_eq!(result, Err(Ok(RouterError::RoutePaused)));
+
+        // No new event was published by the failed resolve attempt.
+        assert_eq!(env.events().all().len(), events_before);
     }
 
     #[test]
@@ -6358,7 +6397,13 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_expired_route_emits_event() {
+    fn test_resolve_expired_route_emits_no_event() {
+        // `resolve` on an expired route returns `Err(RouteExpired)`. The
+        // host discards all events published during a failing invocation,
+        // so `route_resolve_expired` would never be observable by indexers
+        // or `getEvents` even if published here. `resolve` must therefore
+        // not publish it; `try_resolve`'s `Err` result is what is actually
+        // observable.
         let (env, admin, client) = setup();
         let name = String::from_str(&env, "temp-route");
         let addr = Address::generate(&env);
@@ -6366,16 +6411,12 @@ mod tests {
 
         env.ledger().with_mut(|li| li.sequence_number += 2);
 
-        let _ = client.try_resolve(&name);
+        let events_before = env.events().all().len();
 
-        let event = env.events().all().last().unwrap().clone();
-        assert_eq!(
-            event.1,
-            vec![
-                &env,
-                Symbol::new(&env, "route_resolve_expired").into_val(&env)
-            ]
-        );
+        let result = client.try_resolve(&name);
+        assert_eq!(result, Err(Ok(RouterError::RouteExpired)));
+
+        assert_eq!(env.events().all().len(), events_before);
     }
 
     #[test]
@@ -7290,12 +7331,116 @@ mod tests {
         let (env, client) = setup_uninitialized();
         let name = String::from_str(&env, "oracle");
         let names = vec![&env, name.clone()];
-        let results = client.batch_resolve(&names);
+        let results = client.batch_resolve(&names).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(
             results.get(0).unwrap(),
             BatchResolveResult::Err(ResolveError::NotInitialized)
         );
+    }
+
+    // ── Issue #1650: batch_resolve input cap ─────────────────────────────────
+
+    #[test]
+    fn test_batch_resolve_accepts_batch_at_limit() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+        let mut names = Vec::new(&env);
+        for i in 0..MAX_BATCH_RESOLVE {
+            let name = String::from_str(&env, &alloc::string::String::from("route").repeat(1));
+            let name = String::from_str(&env, &alloc::format!("route-{}", i));
+            client.register_route(&admin, &name, &addr, &None);
+            names.push_back(name);
+        }
+
+        let results = client.batch_resolve(&names).unwrap();
+        assert_eq!(results.len(), MAX_BATCH_RESOLVE);
+        for i in 0..MAX_BATCH_RESOLVE {
+            assert_eq!(results.get(i).unwrap(), BatchResolveResult::Ok(addr.clone()));
+        }
+    }
+
+    #[test]
+    fn test_batch_resolve_rejects_batch_over_limit() {
+        let (env, _admin, client) = setup();
+        let mut names = Vec::new(&env);
+        for i in 0..(MAX_BATCH_RESOLVE + 1) {
+            names.push_back(String::from_str(&env, &alloc::format!("route-{}", i)));
+        }
+
+        let result = client.try_batch_resolve(&names);
+        assert_eq!(result, Err(Ok(RouterError::BatchTooLarge)));
+    }
+
+    // ── Issue #1651: expired route reclamation ───────────────────────────────
+
+    #[test]
+    fn test_reregister_route_after_expiry_succeeds() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        let new_addr = Address::generate(&env);
+
+        client.register_route_with_ttl(&admin, &name, &addr, &None, &10);
+        env.ledger().set_sequence_number(11);
+        assert_eq!(
+            client.try_resolve(&name),
+            Err(Ok(RouterError::RouteExpired))
+        );
+
+        // The expired entry must be treated as absent: re-registering the same
+        // name succeeds and does not bump RouteCount.
+        client.register_route(&admin, &name, &new_addr, &None);
+        assert_eq!(client.resolve(&name), new_addr);
+        assert_eq!(client.get_route_count(), 1);
+    }
+
+    #[test]
+    fn test_prune_expired_routes_reclaims_slots() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+
+        let expired_a = String::from_str(&env, "expired-a");
+        let expired_b = String::from_str(&env, "expired-b");
+        let live = String::from_str(&env, "live");
+
+        client.register_route_with_ttl(&admin, &expired_a, &addr, &None, &10);
+        client.register_route_with_ttl(&admin, &expired_b, &addr, &None, &10);
+        client.register_route(&admin, &live, &addr, &None);
+        assert_eq!(client.get_route_count(), 3);
+
+        env.ledger().set_sequence_number(11);
+
+        // Prune only one of the two expired routes.
+        assert_eq!(client.prune_expired_routes(&admin, &1), 1);
+        assert_eq!(client.get_route_count(), 2);
+
+        // Prune the rest.
+        assert_eq!(client.prune_expired_routes(&admin, &10), 1);
+        assert_eq!(client.get_route_count(), 1);
+
+        // Nothing left to prune; the live route is untouched.
+        assert_eq!(client.prune_expired_routes(&admin, &10), 0);
+        assert_eq!(client.resolve(&live), addr);
+        assert_eq!(
+            client.try_resolve(&expired_a),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+    }
+
+    #[test]
+    fn test_prune_expired_routes_unauthorized() {
+        let (env, admin, client) = setup();
+        let attacker = Address::generate(&env);
+        let name = String::from_str(&env, "oracle");
+        client.register_route_with_ttl(&admin, &name, &Address::generate(&env), &None, &10);
+        env.ledger().set_sequence_number(11);
+
+        assert_eq!(
+            client.try_prune_expired_routes(&attacker, &10),
+            Err(Ok(RouterError::Unauthorized))
+        );
+        assert_eq!(client.get_route_count(), 1);
     }
 
     // ── Issue #1459: add_route_tag validation and auto-created metadata ──────

@@ -20,7 +20,7 @@ const MAX_PAGE_LIMIT: u32 = 100;
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, xdr::ToXdr, Address, Bytes, BytesN, Env,
-    String, Symbol, Vec,
+    String, Symbol, Val, Vec,
 };
 
 /// Complete storage-key map for the router-timelock contract.
@@ -52,13 +52,21 @@ pub struct Op {
     pub proposer: Address,
     /// Human-readable description of the operation; can be updated via `update_description`.
     pub description: String,
-    /// Address the operation applies to.
+    /// Address the operation applies to (the contract that `execute` invokes).
     pub target: Address,
+    /// Name of the function on `target` that `execute` invokes.
+    pub function: Symbol,
+    /// Arguments passed to `target.function` when `execute` runs.
+    pub args: Vec<Val>,
     /// Unix timestamp (ledger time) after which the operation becomes executable.
     pub eta: u64,
     /// Seconds after `eta` during which the operation may be executed.
     /// After `eta + grace_period_seconds` the operation is considered expired
     /// and can no longer be executed.
+    ///
+    /// Must be at least [`RouterTimelock::MIN_GRACE_PERIOD_SECONDS`] (1 hour)
+    /// and at most [`RouterTimelock::MAX_GRACE_PERIOD_SECONDS`] (30 days);
+    /// `queue` rejects values outside that range.
     pub grace_period_seconds: u64,
     /// Whether `execute` has successfully run for this operation.
     pub executed: bool,
@@ -124,6 +132,16 @@ pub enum TimelockError {
     ExpiryOverflow = 16,
     /// `ledger_timestamp + delay` overflows `u64`.
     DelayTooLong = 17,
+    /// `grace_period_seconds` is below [`RouterTimelock::MIN_GRACE_PERIOD_SECONDS`].
+    ///
+    /// A zero (or very short) grace period produces an operation that can only
+    /// be executed in a ledger whose timestamp falls inside a window narrower
+    /// than the ledger close time, so it would almost always expire without
+    /// ever being executable.
+    GracePeriodTooShort = 18,
+    /// A dependency of this operation was cancelled, or expired without being
+    /// executed, so this operation could never execute.
+    DependencyBlocked = 19,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -183,6 +201,15 @@ impl RouterTimelock {
     /// operation closer to its intended execution time.
     const MAX_GRACE_PERIOD_SECONDS: u64 = 30 * 24 * 60 * 60; // 30 days
 
+    /// Minimum allowed `grace_period_seconds` when queueing an operation.
+    ///
+    /// Set to 1 hour (3 600 seconds). Stellar ledgers close roughly every
+    /// 5 seconds, so a much shorter window (in particular `0`, which would
+    /// only be executable in a ledger whose timestamp equals `eta` exactly)
+    /// would make operations expire before they can realistically be
+    /// executed. Admins who want a short window should use this minimum.
+    const MIN_GRACE_PERIOD_SECONDS: u64 = 60 * 60; // 1 hour
+
     /// Minimum remaining TTL (in ledgers) before instance storage is extended.
     /// ~30 days at 5 s/ledger.
     const INSTANCE_TTL_THRESHOLD: u32 = 17280 * 30;
@@ -222,9 +249,22 @@ impl RouterTimelock {
 
     /// Queue an operation. Returns the op_id (SHA-256 of description + target + eta).
     ///
+    /// `target` / `function` / `args` describe the call that `execute` will
+    /// perform once the delay has elapsed: `execute` invokes
+    /// `target.function(args)` and only marks the operation executed if that
+    /// invocation succeeds.
+    ///
     /// `grace_period_seconds` defines the window after `eta` during which the
     /// operation may be executed. Once `eta + grace_period_seconds` has elapsed
     /// the operation is considered expired and can no longer be executed.
+    /// It must be between [`RouterTimelock::MIN_GRACE_PERIOD_SECONDS`]
+    /// (1 hour) and [`RouterTimelock::MAX_GRACE_PERIOD_SECONDS`] (30 days);
+    /// values outside that range are rejected with `GracePeriodTooShort` /
+    /// `GracePeriodTooLong`.
+    ///
+    /// Every dependency must exist, must not be cancelled, and must not have
+    /// expired without executing — otherwise the new operation could never
+    /// run, so `queue` rejects it with `DependencyBlocked`.
     ///
     /// Emits `op_queued` with `(op_id, target, eta, grace_period_seconds)`.
     pub fn queue(
@@ -232,6 +272,8 @@ impl RouterTimelock {
         proposer: Address,
         description: String,
         target: Address,
+        function: Symbol,
+        args: Vec<Val>,
         delay: u64,
         grace_period_seconds: u64,
         deps: Vec<Bytes>,
@@ -265,6 +307,12 @@ impl RouterTimelock {
         // creates operations that can never expire in practice.
         if grace_period_seconds > Self::MAX_GRACE_PERIOD_SECONDS {
             return Err(TimelockError::GracePeriodTooLong);
+        }
+        // A zero (or sub-hour) grace period produces an op whose executable
+        // window is narrower than the ledger close time, so it would almost
+        // always expire without ever being executable.
+        if grace_period_seconds < Self::MIN_GRACE_PERIOD_SECONDS {
+            return Err(TimelockError::GracePeriodTooShort);
         }
 
         let pending: Vec<Bytes> = env
@@ -1083,6 +1131,28 @@ impl RouterTimelock {
         Ok(())
     }
 
+    /// Reject a dependency that can never be executed: it was cancelled, or
+    /// it expired without executing. Executed and still-pending dependencies
+    /// are accepted. Used by `queue` so it cannot create an operation that is
+    /// `Blocked` from the moment it is queued.
+    fn require_dependency_not_blocked(env: &Env, dep_id: &Bytes) -> Result<(), TimelockError> {
+        let now = env.ledger().timestamp();
+        match env
+            .storage()
+            .instance()
+            .get::<DataKey, Op>(&DataKey::Op(dep_id.clone()))
+        {
+            Some(dep_op) => {
+                if dep_op.cancelled || (!dep_op.executed && Self::is_expired(&dep_op, now)) {
+                    return Err(TimelockError::DependencyBlocked);
+                }
+                Ok(())
+            }
+            // A dependency that doesn't exist can never execute either.
+            None => Err(TimelockError::DependencyBlocked),
+        }
+    }
+
     /// Returns `true` if any dependency of `op_id`, direct or transitive, can
     /// never be executed — it was cancelled, it expired without executing,
     /// its storage no longer exists, or it is itself blocked by one of *its*
@@ -1303,6 +1373,8 @@ mod tests {
                 proposer: admin.clone(),
                 description: desc.clone(),
                 target: target.clone(),
+                function: Symbol::new(&env, "noop"),
+                args: Vec::new(&env),
                 eta,
                 grace_period_seconds: GRACE,
                 executed: true,
@@ -3251,17 +3323,46 @@ mod tests {
         );
     }
 
-    /// queue() must accept a grace_period_seconds of zero (no expiry window —
-    /// operation expires immediately after eta).
+    /// queue() must reject a grace_period_seconds of zero: such an op would
+    /// only be executable in a ledger whose timestamp equals eta exactly.
     #[test]
-    fn test_queue_accepts_zero_grace_period() {
+    fn test_queue_rejects_zero_grace_period() {
         let (env, admin, client) = setup();
         let target = Address::generate(&env);
         let desc = String::from_str(&env, "zero grace");
         let deps: Vec<Bytes> = Vec::new(&env);
 
         let result = client.try_queue(&admin, &desc, &target, &3600, &0, &deps);
-        assert!(result.is_ok(), "grace_period_seconds == 0 must be accepted");
+        assert_eq!(result, Err(Ok(TimelockError::GracePeriodTooShort)));
+    }
+
+    /// queue() must reject a grace_period_seconds below MIN_GRACE_PERIOD_SECONDS.
+    #[test]
+    fn test_queue_rejects_grace_period_below_min() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "short grace");
+        let deps: Vec<Bytes> = Vec::new(&env);
+
+        let below_min: u64 = 60 * 60 - 1;
+        let result = client.try_queue(&admin, &desc, &target, &3600, &below_min, &deps);
+        assert_eq!(result, Err(Ok(TimelockError::GracePeriodTooShort)));
+    }
+
+    /// queue() must accept a grace_period_seconds exactly at MIN_GRACE_PERIOD_SECONDS.
+    #[test]
+    fn test_queue_accepts_grace_period_at_exact_min() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "min grace");
+        let deps: Vec<Bytes> = Vec::new(&env);
+
+        let min_grace: u64 = 60 * 60;
+        let result = client.try_queue(&admin, &desc, &target, &3600, &min_grace, &deps);
+        assert!(
+            result.is_ok(),
+            "grace_period_seconds == MIN_GRACE_PERIOD_SECONDS must be accepted"
+        );
     }
 
     /// execute() must return Expired when now > eta + grace_period_seconds,
@@ -3317,6 +3418,8 @@ mod tests {
                 proposer: admin.clone(),
                 description: desc.clone(),
                 target: target.clone(),
+                function: Symbol::new(&env, "noop"),
+                args: Vec::new(&env),
                 eta: u64::MAX,
                 grace_period_seconds: 1,
                 executed: false,

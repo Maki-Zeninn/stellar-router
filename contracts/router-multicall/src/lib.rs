@@ -64,6 +64,13 @@ const MAX_ARGS_PER_CALL: u32 = 20;
 /// are removed to prevent unbounded ledger growth.
 const MAX_STORED_BATCHES: u64 = 50;
 
+/// Number of ledgers below which the contract's instance storage TTL is
+/// considered "low" and is extended on the next entry-point call.
+const INSTANCE_TTL_THRESHOLD: u32 = 17280 * 30;
+/// Number of ledgers the contract's instance storage TTL is extended to on
+/// every entry-point call.
+const INSTANCE_TTL_EXTEND_TO: u32 = 17280 * 60;
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /// A single call descriptor in a batch.
@@ -98,12 +105,12 @@ pub struct BatchSummary {
     pub total: u32,
     pub succeeded: u32,
     pub failed: u32,
-    /// Number of calls that failed while an `instruction_budget` was set.
+    /// Number of calls that failed with a host-reported budget error.
     ///
-    /// Because the Soroban host does not currently expose a per-call CPU
-    /// counter to guest contracts, this counts calls that *failed* and had a
-    /// budget specified — a conservative proxy until host metering is
-    /// surfaced to contracts.
+    /// `instruction_budget` is not enforced by this contract, so this only
+    /// counts calls whose failure was reported by the host as a budget error
+    /// (`ScErrorType::Budget`). A call that fails for any other reason is
+    /// reported as `invoke_failed`, even if it declared a budget.
     pub budget_exceeded_count: u32,
 }
 
@@ -123,6 +130,14 @@ pub enum MulticallError {
     /// `execute_batch` was called with an empty `calls` vector.
     EmptyBatch = 5,
     /// A `CallDescriptor` with `required = true` failed during `execute_batch`, aborting the batch.
+    ///
+    /// Issue #1631: because the whole `execute_batch` invocation returns this
+    /// error, Soroban rolls back every event and storage write it made — the
+    /// per-call `call_result`/`call_failed` events for *this* and every
+    /// earlier call in the batch, included. This error code alone therefore
+    /// gives off-chain consumers no on-chain detail about which call index
+    /// failed; only the simulate/dry-run path (or a non-`required` retry)
+    /// can observe that.
     RequiredCallFailed = 6,
     /// A configuration value (e.g. `max_batch_size`) was zero or otherwise invalid.
     InvalidConfig = 7,
@@ -150,6 +165,7 @@ impl RouterMulticall {
         caller: Address,
         new_wasm_hash: BytesN<32>,
     ) -> Result<(), MulticallError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, MulticallError)?;
         let event_hash = new_wasm_hash.clone();
@@ -178,6 +194,7 @@ impl RouterMulticall {
     /// * [`MulticallError::AlreadyInitialized`] — if the contract has already been initialized.
     /// * [`MulticallError::InvalidConfig`] — if `max_batch_size` is zero.
     pub fn initialize(env: Env, admin: Address, max_batch_size: u32) -> Result<(), MulticallError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(MulticallError::AlreadyInitialized);
         }
@@ -224,6 +241,11 @@ impl RouterMulticall {
     /// instruction counters to guest contracts, this is a pre-flight budget
     /// check on declared budgets, not a runtime measurement.
     ///
+    /// When `max_total_gas` is `Some`, **every** call must declare an
+    /// `instruction_budget`; a call with `None` is rejected with
+    /// [`MulticallError::InvalidConfig`] rather than silently counting as zero
+    /// and bypassing the limit.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `caller` - The address initiating the batch; must authenticate.
@@ -239,8 +261,10 @@ impl RouterMulticall {
     ///   `DataKey::BatchResult(batch_id, call_index)` for later inspection.
     /// * `fail_fast` - If `true`, abort the batch on the first optional-call failure.
     /// * `max_total_gas` - Optional cumulative instruction-budget cap. When `Some`,
-    ///   the sum of all `instruction_budget` fields in `calls` must not exceed this
-    ///   value; otherwise the batch is rejected with [`MulticallError::GasLimitExceeded`].
+    ///   every call must declare an `instruction_budget` (otherwise
+    ///   [`MulticallError::InvalidConfig`]) and the sum of those budgets must not
+    ///   exceed this value; otherwise the batch is rejected with
+    ///   [`MulticallError::GasLimitExceeded`].
     ///
     /// # Returns
     /// A [`BatchCallResult`] with per-call success/failure records.
@@ -249,7 +273,11 @@ impl RouterMulticall {
     /// * [`MulticallError::EmptyBatch`] — if `calls` is empty.
     /// * [`MulticallError::BatchTooLarge`] — if `calls` exceeds `max_batch_size`.
     /// * [`MulticallError::GasLimitExceeded`] — if the cumulative declared budget exceeds `max_total_gas`.
+    /// * [`MulticallError::InvalidConfig`] — if `max_total_gas` is `Some` and any call omits `instruction_budget`.
     /// * [`MulticallError::RequiredCallFailed`] — if a call with `required = true` fails.
+    ///   See the error variant's own doc comment: this gives no per-call
+    ///   on-chain detail, since the failing invocation's rollback discards
+    ///   every event this call published, including the earlier ones.
     /// * [`MulticallError::NotInitialized`] — if the contract has not been initialized.
     /// * [`MulticallError::Reentrancy`] — if called from within an executing batch.
     /// * [`MulticallError::ArgsTooLarge`] — if any call's `args` vector exceeds `MAX_ARGS_PER_CALL`.
@@ -262,6 +290,7 @@ impl RouterMulticall {
         fail_fast: bool,
         max_total_gas: Option<u64>,
     ) -> Result<router_common::BatchCallResult, MulticallError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
 
         // Reentrancy guard
@@ -296,6 +325,10 @@ impl RouterMulticall {
         // Pre-flight checks: validate args length and check declared cumulative instruction budgets.
         // Because Soroban does not expose per-call instruction counters to guest contracts
         // at runtime, this is a declared-budget check rather than a live measurement.
+        //
+        // When `max_total_gas` is `Some`, every call MUST declare an `instruction_budget`:
+        // a call with `None` would otherwise count as zero and silently bypass the limit
+        // (issue #1639). Undeclared budgets are rejected with `InvalidConfig`.
         let mut cumulative: u64 = 0;
         for call in calls.iter() {
             if call.args.len() > MAX_ARGS_PER_CALL {
@@ -303,11 +336,17 @@ impl RouterMulticall {
                 return Err(MulticallError::ArgsTooLarge);
             }
             if let Some(gas_limit) = max_total_gas {
-                if let Some(budget) = call.instruction_budget {
-                    cumulative = cumulative.saturating_add(budget);
-                    if cumulative > gas_limit {
+                match call.instruction_budget {
+                    Some(budget) => {
+                        cumulative = cumulative.saturating_add(budget);
+                        if cumulative > gas_limit {
+                            env.storage().instance().remove(&DataKey::Executing);
+                            return Err(MulticallError::GasLimitExceeded);
+                        }
+                    }
+                    None => {
                         env.storage().instance().remove(&DataKey::Executing);
-                        return Err(MulticallError::GasLimitExceeded);
+                        return Err(MulticallError::InvalidConfig);
                     }
                 }
             }
@@ -343,7 +382,16 @@ impl RouterMulticall {
             if success {
                 result.record_success(call_index, call_result);
             } else {
-                let reason = if call.instruction_budget.is_some() {
+                // Only report `budget_exceeded` when the host actually reports a
+                // budget error. `instruction_budget` is not enforced (see the
+                // field docs), so a target returning an error, panicking or not
+                // existing must be reported as `invoke_failed` regardless of
+                // whether the caller set a budget (issue #1638).
+                let is_budget_error = match &invoke_result {
+                    Err(Ok(err)) => err.is_type(soroban_sdk::xdr::ScErrorType::Budget),
+                    _ => false,
+                };
+                let reason = if is_budget_error {
                     router_common::FAILURE_REASON_BUDGET_EXCEEDED
                 } else {
                     router_common::FAILURE_REASON_INVOKE_FAILED
@@ -368,10 +416,14 @@ impl RouterMulticall {
 
             if !success {
                 if call.required {
-                    env.events().publish(
-                        (Symbol::new(&env, router_common::EVENT_CALL_FAILED),),
-                        (call_index, &call.target, &call.function, simulate),
-                    );
+                    // Issue #1631: no event is published here. The
+                    // `return Err` below makes this whole invocation fail,
+                    // and Soroban discards every event and storage write a
+                    // failed invocation made — so a `call_failed` event
+                    // published here would never actually reach the ledger
+                    // (nor would the `call_result` events already published
+                    // for earlier calls in this batch). See
+                    // `MulticallError::RequiredCallFailed`'s doc comment.
                     env.storage().instance().remove(&DataKey::Executing);
                     return Err(MulticallError::RequiredCallFailed);
                 }
@@ -474,6 +526,7 @@ impl RouterMulticall {
         caller: Address,
         max_batch_size: u32,
     ) -> Result<(), MulticallError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         caller.require_auth();
         router_common::require_admin_simple!(&env, &caller, &DataKey::Admin, MulticallError)?;
         if max_batch_size == 0 {
@@ -513,6 +566,7 @@ impl RouterMulticall {
     /// # Errors
     /// * [`MulticallError::NotInitialized`] — if the contract has not been initialized.
     pub fn total_batches(env: Env) -> Result<u64, MulticallError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         env.storage()
             .instance()
             .get(&DataKey::TotalBatches)
@@ -530,6 +584,7 @@ impl RouterMulticall {
     /// # Errors
     /// * [`MulticallError::NotInitialized`] — if the contract has not been initialized.
     pub fn max_batch_size(env: Env) -> Result<u32, MulticallError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         env.storage()
             .instance()
             .get(&DataKey::MaxBatchSize)
@@ -547,6 +602,7 @@ impl RouterMulticall {
     /// # Errors
     /// * [`MulticallError::NotInitialized`] — if the contract has not been initialized.
     pub fn admin(env: Env) -> Result<Address, MulticallError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         env.storage()
             .instance()
             .get(&DataKey::Admin)
@@ -584,6 +640,7 @@ impl RouterMulticall {
         batch_id: u64,
         call_index: u32,
     ) -> Result<Option<router_common::CallResult>, MulticallError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         Ok(env
             .storage()
             .instance()
@@ -625,6 +682,7 @@ impl RouterMulticall {
         env: Env,
         batch_id: u64,
     ) -> Result<Vec<router_common::CallResult>, MulticallError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         let mut results = Vec::new(&env);
         let mut call_index = 0u32;
 
@@ -664,6 +722,7 @@ impl RouterMulticall {
         current: Address,
         new_admin: Address,
     ) -> Result<(), MulticallError> {
+        router_common::extend_instance_ttl(&env, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
         current.require_auth();
         router_common::require_admin_simple!(&env, &current, &DataKey::Admin, MulticallError)?;
         router_common::admin_transfer_complete!(&env, &current, &new_admin, &DataKey::Admin);
@@ -1003,6 +1062,34 @@ mod tests {
         assert_eq!(client.total_batches(), 0);
     }
 
+    /// Issue #1631: a required-call failure must not publish a `call_failed`
+    /// event (or any other event from this invocation) — the whole batch
+    /// invocation returns `Err`, and Soroban discards every event a failed
+    /// invocation published, so publishing one here was dead code that could
+    /// never actually reach the ledger.
+    #[test]
+    fn test_required_call_failure_publishes_no_events() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "fail"),
+            required: true,
+            instruction_budget: None,
+            args: Vec::new(&env),
+        });
+
+        let result = client.try_execute_batch(&caller, &calls, &false, &false, &false, &None);
+        assert_eq!(result, Err(Ok(MulticallError::RequiredCallFailed)));
+        assert!(
+            env.events().all().is_empty(),
+            "a failed required call must leave no events behind"
+        );
+    }
+
     #[test]
     fn test_admin_getter() {
         let (_env, admin, client) = setup();
@@ -1275,13 +1362,16 @@ mod tests {
     }
 
     #[test]
-    fn test_budget_exceeded_count_increments_on_budgeted_failure() {
+    fn test_budget_exceeded_count_zero_for_non_budget_failures() {
+        // Issue #1638: failures are only labelled budget_exceeded when the host
+        // reports a budget error, which never happens for a target returning an
+        // error — regardless of whether instruction_budget was set.
         let (env, _admin, client) = setup();
         let mock_id = env.register_contract(None, MockContract);
         let caller = Address::generate(&env);
 
         let mut calls = Vec::new(&env);
-        // Failing call WITH a budget set — should count as budget_exceeded
+        // Failing call WITH a budget set — still invoke_failed, not budget_exceeded
         calls.push_back(CallDescriptor {
             target: mock_id.clone(),
             function: Symbol::new(&env, "fail"),
@@ -1289,7 +1379,7 @@ mod tests {
             instruction_budget: Some(500_000),
             args: Vec::new(&env),
         });
-        // Failing call WITHOUT a budget set — should NOT count
+        // Failing call WITHOUT a budget set
         calls.push_back(CallDescriptor {
             target: mock_id.clone(),
             function: Symbol::new(&env, "fail"),
@@ -1297,7 +1387,7 @@ mod tests {
             instruction_budget: None,
             args: Vec::new(&env),
         });
-        // Successful call with a budget — should NOT count
+        // Successful call with a budget
         calls.push_back(CallDescriptor {
             target: mock_id.clone(),
             function: Symbol::new(&env, "success"),
@@ -1311,7 +1401,7 @@ mod tests {
         assert_eq!(total, 3);
         assert_eq!(succeeded, 1);
         assert_eq!(failed, 2);
-        assert_eq!(budget_failure_count(&env, &summary), 1);
+        assert_eq!(budget_failure_count(&env, &summary), 0);
     }
 
     #[test]
@@ -1990,9 +2080,10 @@ mod tests {
     }
 
     #[test]
-    fn test_max_total_gas_no_budgets_set_always_passes() {
-        // Calls without instruction_budget set should not contribute to the gas total;
-        // even with a tight gas limit the batch should execute normally.
+    fn test_max_total_gas_requires_declared_budgets() {
+        // Issue #1639: when max_total_gas is Some, calls without an
+        // instruction_budget must be rejected rather than silently counting
+        // as zero and bypassing the limit.
         let (env, _admin, client) = setup();
         let mock_id = env.register_contract(None, MockContract);
         let caller = Address::generate(&env);
@@ -2007,10 +2098,101 @@ mod tests {
         });
 
         let result = client.try_execute_batch(&caller, &calls, &false, &false, &false, &Some(1u64));
-        assert!(
-            result.is_ok(),
-            "calls with no budget should not trip gas limit"
-        );
+        assert_eq!(result, Err(Ok(MulticallError::InvalidConfig)));
+        assert_eq!(client.total_batches(), 0);
+    }
+
+    #[test]
+    fn test_max_total_gas_zero_with_none_budgets_rejected() {
+        // Issue #1639: a batch of calls with no declared budgets must not pass
+        // max_total_gas = Some(0).
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        for _ in 0..5 {
+            calls.push_back(CallDescriptor {
+                target: mock_id.clone(),
+                function: Symbol::new(&env, "success"),
+                required: true,
+                instruction_budget: None,
+                args: Vec::new(&env),
+            });
+        }
+
+        let result = client.try_execute_batch(&caller, &calls, &false, &false, &false, &Some(0u64));
+        assert_eq!(result, Err(Ok(MulticallError::InvalidConfig)));
+        assert_eq!(client.total_batches(), 0);
+
+        // Reentrancy guard must be cleared — a subsequent call must not return Reentrancy.
+        let mut ok_calls = Vec::new(&env);
+        ok_calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: true,
+            instruction_budget: None,
+            args: Vec::new(&env),
+        });
+        let second = client.try_execute_batch(&caller, &ok_calls, &false, &false, &false, &None);
+        assert!(second.is_ok());
+    }
+
+    #[test]
+    fn test_contract_error_reported_as_invoke_failed_with_budget() {
+        // Issue #1638: a target returning an error must be reported as
+        // invoke_failed even when the caller set an instruction_budget.
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "fail"),
+            required: false,
+            instruction_budget: Some(500_000),
+            args: Vec::new(&env),
+        });
+
+        let summary = client.execute_batch(&caller, &calls, &false, &false, &false, &None);
+        assert_eq!(summary.failures.len(), 1);
+        assert_eq!(budget_failure_count(&env, &summary), 0);
+
+        let invoke_msg =
+            soroban_sdk::String::from_str(&env, router_common::FAILURE_REASON_INVOKE_FAILED);
+        let failure = summary.failures.get(0).unwrap();
+        match failure.error {
+            router_common::BatchItemError::Custom(ref msg) => assert_eq!(msg, &invoke_msg),
+            _ => panic!("expected Custom failure reason"),
+        }
+    }
+
+    #[test]
+    fn test_instance_ttl_extended_after_execute_batch() {
+        // Issue #1637: execute_batch must extend the instance storage TTL.
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: true,
+            instruction_budget: None,
+            args: Vec::new(&env),
+        });
+
+        client.execute_batch(&caller, &calls, &false, &false, &false, &None);
+
+        env.as_contract(&client.address, || {
+            let ttl = env.storage().instance().get_ttl();
+            assert!(
+                ttl >= INSTANCE_TTL_THRESHOLD,
+                "instance TTL should be extended after execute_batch, got {ttl}"
+            );
+        });
     }
 
     #[test]

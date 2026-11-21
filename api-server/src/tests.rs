@@ -33,6 +33,7 @@ fn test_app() -> Router {
     Router::new()
         .route("/simulate", post(handlers::simulate))
         .route("/health", get(handlers::health))
+        .route("/ready", get(handlers::ready))
         .route("/routes", get(handlers::list_routes))
         .route("/routes/:name", get(handlers::get_route))
         .layer(middleware::from_fn_with_state(
@@ -105,32 +106,42 @@ async fn test_list_routes_returns_500_on_rpc_error() {
 }
 
 #[tokio::test]
-async fn test_health_returns_503_when_rpc_unreachable() {
+async fn test_health_returns_ok_even_when_rpc_unreachable() {
+    // Issue #1616: /health is a liveness check — it must stay 200 regardless
+    // of upstream RPC reachability, so a public RPC outage doesn't make an
+    // orchestrator restart-loop an otherwise-healthy container. `test_app()`
+    // points at an unreachable RPC endpoint ("http://localhost:1").
     let app = test_app();
     let resp = app
         .oneshot(
             Request::builder()
                 .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "ok");
+}
+
+#[tokio::test]
+async fn test_ready_returns_503_when_rpc_unreachable() {
+    let app = test_app();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/ready")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-}
-
-#[tokio::test]
-async fn test_health_returns_degraded_body_when_rpc_down() {
-    let app = test_app();
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/health")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
     let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();

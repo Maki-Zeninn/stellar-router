@@ -139,7 +139,7 @@ Uses range-based codes to distinguish error categories.
 | 6    | `MiddlewareDisabled` |
 | 7    | `InvalidConfig` |
 | 8    | `CircuitOpen` |
-| 9    | `Reentrancy` |
+| 9    | `Reentrancy` *(retired; no longer returned; do not reuse)* |
 | **10** | ← next available |
 
 ---

@@ -344,10 +344,25 @@ Each entry includes:
 
 Failed calls include descriptive messages:
 
-- `"budget_exceeded"` - Call failed and had an instruction_budget set
-- `"invoke_failed"` - Contract invocation failed for other reasons
+- `"budget_exceeded"` - The host returned a budget error (`ScErrorType::Budget`) for the invocation
+- `"invoke_failed"` - Contract invocation failed for any other reason (target returned an error, panicked, or does not exist)
+
+`instruction_budget` is currently reserved for future budget metering and is not enforced on the
+invocation, so setting it does **not** cause a failure to be reported as `"budget_exceeded"`. A
+target returning a contract error is always reported as `"invoke_failed"`, regardless of
+`instruction_budget`.
 
 These messages help identify the root cause of batch failures without exposing internal contract details.
+
+### `max_total_gas` and Undeclared Budgets
+
+When `max_total_gas` is `Some`, the pre-check only sums the `instruction_budget` values that calls
+declare. Calls with `instruction_budget: None` contribute zero to the cumulative total and are
+therefore not constrained by `max_total_gas` (a batch of calls with no budgets passes any limit,
+including `Some(0)`). To have a call counted against `max_total_gas`, declare an
+`instruction_budget` for it. Note that because budgets are not yet enforced, `max_total_gas` only
+constrains the numbers the caller chose, not the actual cost of the batch.
+=======
 
 ### Example: Handling Batch Errors
 
@@ -366,10 +381,10 @@ for failure in result.failures.iter() {
     let call = calls.get(failure.index as u32).unwrap();
     match failure.message.as_str() {
         "budget_exceeded" => {
-            // Handle budget exceeded for this specific call
+            // Host reported a budget error for this call
         }
         "invoke_failed" => {
-            // Handle general invocation failure
+            // Target error, panic or missing contract (instruction_budget is not enforced)
         }
         _ => {
             // Handle unknown failure

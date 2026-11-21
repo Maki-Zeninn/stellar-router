@@ -78,6 +78,10 @@ pub enum RegistryError {
     /// [`RouterRegistry::deprecate_many`] when `entries` exceeds
     /// `MAX_BULK_BATCH_SIZE`.
     BatchTooLarge = 13,
+    /// Returned by the registration entry points when `name` is empty,
+    /// whitespace-only, longer than 64 bytes, or contains characters
+    /// outside `[A-Za-z0-9/-]`.
+    InvalidName = 14,
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -903,10 +907,14 @@ impl RouterRegistry {
             RegistryError::BatchTooLarge => router_common::BatchItemError::Custom(
                 soroban_sdk::String::from_str(env, "BatchTooLarge"),
             ),
+            RegistryError::InvalidName => router_common::BatchItemError::InvalidName,
         }
     }
 
     fn validate_registration(env: &Env, name: &String, version: u32) -> Result<(), RegistryError> {
+        if !router_common::validate_contract_name(name) {
+            return Err(RegistryError::InvalidName);
+        }
         if version == 0 {
             return Err(RegistryError::InvalidVersion);
         }
@@ -2537,5 +2545,190 @@ mod tests {
         // Nothing should have been written: fail_fast only writes in the
         // second loop, which never runs once pre-validation fails.
         assert!(client.versions(&name).is_empty());
+    }
+
+    // ── Issue #1643: contract name validation ────────────────────────────────
+
+    /// Builds a `soroban_sdk::String` of `len` `'a'` bytes.
+    fn long_name(env: &Env, len: u32) -> String {
+        let mut buf = [b'a'; 128];
+        let n = len as usize;
+        assert!(n <= buf.len());
+        String::from_bytes(env, &buf[..n])
+    }
+
+    #[test]
+    fn test_register_rejects_empty_name() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "");
+        let addr = Address::generate(&env);
+        let result = client.try_register(&admin, &name, &addr, &1);
+        assert_eq!(result, Err(Ok(RegistryError::InvalidName)));
+        assert!(client.get_all_names().is_empty());
+    }
+
+    #[test]
+    fn test_register_rejects_whitespace_only_name() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+        for ws in [" ", "   ", "\t", "\n"] {
+            let name = String::from_str(&env, ws);
+            let result = client.try_register(&admin, &name, &addr, &1);
+            assert_eq!(
+                result,
+                Err(Ok(RegistryError::InvalidName)),
+                "whitespace-only name {:?} must be rejected",
+                ws
+            );
+        }
+        assert!(client.get_all_names().is_empty());
+    }
+
+    #[test]
+    fn test_register_rejects_over_long_name() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+        // 64 bytes is the maximum accepted length; 65 must be rejected.
+        let name = long_name(&env, 65);
+        let result = client.try_register(&admin, &name, &addr, &1);
+        assert_eq!(result, Err(Ok(RegistryError::InvalidName)));
+        assert!(client.get_all_names().is_empty());
+    }
+
+    #[test]
+    fn test_register_rejects_control_characters_in_name() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+        for bad in ["oracle\x00", "oracle\x01", "ora\x7fcle", "oracle!"] {
+            let name = String::from_str(&env, bad);
+            let result = client.try_register(&admin, &name, &addr, &1);
+            assert_eq!(
+                result,
+                Err(Ok(RegistryError::InvalidName)),
+                "name {:?} must be rejected",
+                bad
+            );
+        }
+        assert!(client.get_all_names().is_empty());
+    }
+
+    #[test]
+    fn test_register_accepts_valid_names() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+        for good in ["oracle", "my-contract", "my/contract", "A1_b9", "x"] {
+            let name = String::from_str(&env, good);
+            let result = client.try_register(&admin, &name, &addr, &1);
+            assert_eq!(result, Ok(Ok(())), "name {:?} must be accepted", good);
+        }
+        // Exactly 64 bytes is still valid.
+        let max_name = long_name(&env, 64);
+        assert_eq!(client.try_register(&admin, &max_name, &addr, &1), Ok(Ok(())));
+    }
+
+    #[test]
+    fn test_register_with_check_rejects_invalid_names() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+        let over_long = long_name(&env, 65);
+        let cases = [
+            String::from_str(&env, ""),
+            String::from_str(&env, "   "),
+            over_long,
+            String::from_str(&env, "oracle\x00"),
+        ];
+        for name in cases.iter() {
+            let result =
+                client.try_register_with_check(&admin, name, &addr, &1, &None::<Symbol>);
+            assert_eq!(result, Err(Ok(RegistryError::InvalidName)));
+        }
+        assert!(client.get_all_names().is_empty());
+    }
+
+    #[test]
+    fn test_register_with_check_accepts_valid_name() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+        let name = String::from_str(&env, "oracle");
+        let result = client.try_register_with_check(&admin, &name, &addr, &1, &None::<Symbol>);
+        assert_eq!(result, Ok(Ok(())));
+        assert_eq!(client.get(&name, &1).address, addr);
+    }
+
+    #[test]
+    fn test_bulk_register_rejects_invalid_names_per_item() {
+        let (env, admin, client) = setup();
+        let over_long = long_name(&env, 65);
+        let entries = vec![
+            &env,
+            BulkRegistrationInput {
+                name: String::from_str(&env, ""),
+                address: Address::generate(&env),
+                version: 1,
+            },
+            BulkRegistrationInput {
+                name: String::from_str(&env, "   "),
+                address: Address::generate(&env),
+                version: 1,
+            },
+            BulkRegistrationInput {
+                name: over_long,
+                address: Address::generate(&env),
+                version: 1,
+            },
+            BulkRegistrationInput {
+                name: String::from_str(&env, "oracle\x00"),
+                address: Address::generate(&env),
+                version: 1,
+            },
+            BulkRegistrationInput {
+                name: String::from_str(&env, "oracle"),
+                address: Address::generate(&env),
+                version: 1,
+            },
+        ];
+        let result = client.bulk_register(&admin, &entries, &false);
+        assert_eq!(result.successes.len(), 1);
+        assert_eq!(result.successes.get(0).unwrap().index, 4);
+        assert_eq!(result.failures.len(), 4);
+        for i in 0..4u32 {
+            assert_eq!(result.failures.get(i).unwrap().index, i);
+            assert_eq!(
+                result.failures.get(i).unwrap().error,
+                router_common::BatchItemError::InvalidName
+            );
+        }
+        // Only the valid name was persisted.
+        let names = client.get_all_names();
+        assert_eq!(names.len(), 1);
+        assert_eq!(names.get(0).unwrap(), String::from_str(&env, "oracle"));
+    }
+
+    #[test]
+    fn test_bulk_register_fail_fast_rejects_invalid_name() {
+        let (env, admin, client) = setup();
+        let entries = vec![
+            &env,
+            BulkRegistrationInput {
+                name: String::from_str(&env, "oracle"),
+                address: Address::generate(&env),
+                version: 1,
+            },
+            BulkRegistrationInput {
+                name: String::from_str(&env, ""),
+                address: Address::generate(&env),
+                version: 1,
+            },
+        ];
+        let result = client.bulk_register(&admin, &entries, &true);
+        assert_eq!(result.successes.len(), 0);
+        assert_eq!(result.failures.len(), 1);
+        assert_eq!(result.failures.get(0).unwrap().index, 1);
+        assert_eq!(
+            result.failures.get(0).unwrap().error,
+            router_common::BatchItemError::InvalidName
+        );
+        // fail_fast writes nothing once pre-validation fails.
+        assert!(client.get_all_names().is_empty());
     }
 }
