@@ -20,12 +20,41 @@ use crate::{
     get,
     path = "/health",
     responses(
-        (status = 200, description = "Service is healthy", body = HealthResponse),
-        (status = 503, description = "RPC is unavailable", body = HealthResponse),
+        (status = 200, description = "Process is alive", body = HealthResponse),
     )
 )]
 /// GET /health
-pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
+///
+/// Liveness check only: always returns 200 once the process is up, with no
+/// dependency on the upstream Soroban RPC. This is what `Dockerfile`'s
+/// `HEALTHCHECK` and `docker-compose.yml`'s `healthcheck` probe — a public
+/// RPC outage must not make an orchestrator restart-loop an otherwise-healthy
+/// container (restarting it cannot fix an upstream outage). For RPC
+/// reachability, see `/ready`.
+pub async fn health(State(_state): State<AppState>) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(HealthResponse {
+            status: "ok".to_string(),
+            rpc: "unknown".to_string(),
+        }),
+    )
+}
+
+#[utoipa::path(
+    get,
+    path = "/ready",
+    responses(
+        (status = 200, description = "Upstream RPC is reachable", body = HealthResponse),
+        (status = 503, description = "Upstream RPC is unavailable", body = HealthResponse),
+    )
+)]
+/// GET /ready
+///
+/// Readiness check: reports whether the upstream Soroban RPC is reachable.
+/// Use this for traffic-admission/load-balancer decisions; use `/health`
+/// (which never depends on RPC reachability) for container liveness.
+pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
     match state.rpc.health_check().await {
         Ok(()) => (
             StatusCode::OK,
