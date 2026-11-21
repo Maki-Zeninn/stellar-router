@@ -123,6 +123,14 @@ pub enum MulticallError {
     /// `execute_batch` was called with an empty `calls` vector.
     EmptyBatch = 5,
     /// A `CallDescriptor` with `required = true` failed during `execute_batch`, aborting the batch.
+    ///
+    /// Issue #1631: because the whole `execute_batch` invocation returns this
+    /// error, Soroban rolls back every event and storage write it made — the
+    /// per-call `call_result`/`call_failed` events for *this* and every
+    /// earlier call in the batch, included. This error code alone therefore
+    /// gives off-chain consumers no on-chain detail about which call index
+    /// failed; only the simulate/dry-run path (or a non-`required` retry)
+    /// can observe that.
     RequiredCallFailed = 6,
     /// A configuration value (e.g. `max_batch_size`) was zero or otherwise invalid.
     InvalidConfig = 7,
@@ -250,6 +258,9 @@ impl RouterMulticall {
     /// * [`MulticallError::BatchTooLarge`] — if `calls` exceeds `max_batch_size`.
     /// * [`MulticallError::GasLimitExceeded`] — if the cumulative declared budget exceeds `max_total_gas`.
     /// * [`MulticallError::RequiredCallFailed`] — if a call with `required = true` fails.
+    ///   See the error variant's own doc comment: this gives no per-call
+    ///   on-chain detail, since the failing invocation's rollback discards
+    ///   every event this call published, including the earlier ones.
     /// * [`MulticallError::NotInitialized`] — if the contract has not been initialized.
     /// * [`MulticallError::Reentrancy`] — if called from within an executing batch.
     /// * [`MulticallError::ArgsTooLarge`] — if any call's `args` vector exceeds `MAX_ARGS_PER_CALL`.
@@ -368,10 +379,14 @@ impl RouterMulticall {
 
             if !success {
                 if call.required {
-                    env.events().publish(
-                        (Symbol::new(&env, router_common::EVENT_CALL_FAILED),),
-                        (call_index, &call.target, &call.function, simulate),
-                    );
+                    // Issue #1631: no event is published here. The
+                    // `return Err` below makes this whole invocation fail,
+                    // and Soroban discards every event and storage write a
+                    // failed invocation made — so a `call_failed` event
+                    // published here would never actually reach the ledger
+                    // (nor would the `call_result` events already published
+                    // for earlier calls in this batch). See
+                    // `MulticallError::RequiredCallFailed`'s doc comment.
                     env.storage().instance().remove(&DataKey::Executing);
                     return Err(MulticallError::RequiredCallFailed);
                 }
@@ -1001,6 +1016,34 @@ mod tests {
         assert_eq!(result, Err(Ok(MulticallError::RequiredCallFailed)));
         // Total batches should NOT increment if it failed
         assert_eq!(client.total_batches(), 0);
+    }
+
+    /// Issue #1631: a required-call failure must not publish a `call_failed`
+    /// event (or any other event from this invocation) — the whole batch
+    /// invocation returns `Err`, and Soroban discards every event a failed
+    /// invocation published, so publishing one here was dead code that could
+    /// never actually reach the ledger.
+    #[test]
+    fn test_required_call_failure_publishes_no_events() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "fail"),
+            required: true,
+            instruction_budget: None,
+            args: Vec::new(&env),
+        });
+
+        let result = client.try_execute_batch(&caller, &calls, &false, &false, &false, &None);
+        assert_eq!(result, Err(Ok(MulticallError::RequiredCallFailed)));
+        assert!(
+            env.events().all().is_empty(),
+            "a failed required call must leave no events behind"
+        );
     }
 
     #[test]
