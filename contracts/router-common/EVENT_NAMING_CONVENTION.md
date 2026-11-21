@@ -24,6 +24,11 @@ All smart contracts in the stellar-router suite follow a consistent event naming
    - Include the target of the action (e.g., old and new admin for `admin_transferred`)
    - Include identifiers needed to track the action (e.g., route name, role, address)
 
+5. **Each event topic has exactly one payload shape across the workspace**
+   - A topic name must map to a single, documented payload shape everywhere it is emitted
+   - Do not reuse a topic for a different payload in another contract; introduce a new topic instead
+   - Indexers must be able to decode an event from its topic alone, without knowing the emitting contract
+
 ## Examples by Contract
 
 ### router-core
@@ -51,6 +56,8 @@ All smart contracts in the stellar-router suite follow a consistent event naming
 ### router-registry
 - `contract_registered` — (contract_name, version)
 - `contract_deprecated` — (contract_name, version, reason)
+- `bulk_register_completed` — (caller, operation, successes, failures)
+- `deprecate_many_completed` — (caller, operation, successes, failures)
 - `admin_transferred` — (old_admin, new_admin)
 
 ### router-access
@@ -76,7 +83,7 @@ All smart contracts in the stellar-router suite follow a consistent event naming
 ### router-multicall
 - `call_result` — (caller, target, function, success)
 - `call_failed` — (caller, target, function, error)
-- `batch_executed` — (summary data)
+- `batch_executed` — (caller, batch_id: u64, succeeded: u32, failed: u32, processed: u32, simulate: bool): router-multicall only; other contracts must not emit this topic
 - `max_batch_size_updated` — (old_size, new_size)
 - `initialized` — (admin, max_batch_size)
 - `admin_transferred` — (old_admin, new_admin)

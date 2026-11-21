@@ -4813,8 +4813,204 @@ mod tests {
         client.set_route_score(&admin, &second, &score);
 
         // Equal composite scores retain the first route encountered.
-        assert_eq!(client.resolve(&first), first_address);
-        assert_eq!(client.resolve(&second), first_address);
+        assert_eq!(client.resolve_best(&None), first_address);
+        assert_eq!(client.resolve_best(&None), first_address);
+    }
+
+    // ── Issue #1648: resolve(name) must be scoped to the requested name ──────
+
+    #[test]
+    fn test_resolve_uses_cached_best_route() {
+        // Scoring a route must not change what `resolve` returns for other names.
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let dex = String::from_str(&env, "dex");
+        let oracle_address = Address::generate(&env);
+        let dex_address = Address::generate(&env);
+        client.register_route(&admin, &oracle, &oracle_address, &None);
+        client.register_route(&admin, &dex, &dex_address, &None);
+
+        // Give `dex` a much better score than `oracle`.
+        client.set_route_score(
+            &admin,
+            &dex,
+            &RouteScore {
+                liquidity_score: 100,
+                fee_bps: 0,
+                reliability_score: 100,
+            },
+        );
+        client.set_route_score(
+            &admin,
+            &oracle,
+            &RouteScore {
+                liquidity_score: 10,
+                fee_bps: 50,
+                reliability_score: 10,
+            },
+        );
+
+        // `resolve` returns the requested route regardless of scores.
+        assert_eq!(client.resolve(&oracle), oracle_address);
+        assert_eq!(client.resolve(&dex), dex_address);
+
+        // Best-route selection is explicit and returns the highest score.
+        assert_eq!(client.resolve_best(&None), dex_address);
+    }
+
+    #[test]
+    fn test_resolve_nonexistent_name_returns_route_not_found_with_scores() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let missing = String::from_str(&env, "does-not-exist");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &oracle, &addr, &None);
+        client.set_route_score(
+            &admin,
+            &oracle,
+            &RouteScore {
+                liquidity_score: 100,
+                fee_bps: 0,
+                reliability_score: 100,
+            },
+        );
+
+        assert_eq!(
+            client.try_resolve(&missing),
+            Err(Ok(RouterError::RouteNotFound))
+        );
+    }
+
+    #[test]
+    fn test_resolve_paused_requested_route_returns_route_paused_with_scores() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let dex = String::from_str(&env, "dex");
+        let oracle_address = Address::generate(&env);
+        let dex_address = Address::generate(&env);
+        client.register_route(&admin, &oracle, &oracle_address, &None);
+        client.register_route(&admin, &dex, &dex_address, &None);
+        client.set_route_score(
+            &admin,
+            &dex,
+            &RouteScore {
+                liquidity_score: 100,
+                fee_bps: 0,
+                reliability_score: 100,
+            },
+        );
+
+        client.set_route_paused(&admin, &oracle, &true);
+
+        assert_eq!(
+            client.try_resolve(&oracle),
+            Err(Ok(RouterError::RoutePaused))
+        );
+        // The unpaused route still resolves normally.
+        assert_eq!(client.resolve(&dex), dex_address);
+    }
+
+    #[test]
+    fn test_resolve_expired_requested_route_returns_route_expired_with_scores() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let dex = String::from_str(&env, "dex");
+        let oracle_address = Address::generate(&env);
+        let dex_address = Address::generate(&env);
+        client.register_route_with_ttl(&admin, &oracle, &oracle_address, &Some(1));
+        client.register_route(&admin, &dex, &dex_address, &None);
+        client.set_route_score(
+            &admin,
+            &dex,
+            &RouteScore {
+                liquidity_score: 100,
+                fee_bps: 0,
+                reliability_score: 100,
+            },
+        );
+
+        env.ledger().with_mut(|li| li.sequence_number += 2);
+
+        assert_eq!(
+            client.try_resolve(&oracle),
+            Err(Ok(RouterError::RouteExpired))
+        );
+        assert_eq!(client.resolve(&dex), dex_address);
+    }
+
+    #[test]
+    fn test_resolve_best_scoped_by_tag() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        let dex = String::from_str(&env, "dex");
+        let vault = String::from_str(&env, "vault");
+        let oracle_address = Address::generate(&env);
+        let dex_address = Address::generate(&env);
+        let vault_address = Address::generate(&env);
+        let oracle_tag = String::from_str(&env, "oracle-group");
+        let dex_tag = String::from_str(&env, "dex-group");
+
+        let mut oracle_tags = Vec::new(&env);
+        oracle_tags.push_back(oracle_tag.clone());
+        client.register_route(
+            &admin,
+            &oracle,
+            &oracle_address,
+            &Some(RouteMetadata {
+                description: String::from_str(&env, "oracle"),
+                tags: oracle_tags,
+                owner: admin.clone(),
+            }),
+        );
+        let mut dex_tags = Vec::new(&env);
+        dex_tags.push_back(dex_tag.clone());
+        client.register_route(
+            &admin,
+            &dex,
+            &dex_address,
+            &Some(RouteMetadata {
+                description: String::from_str(&env, "dex"),
+                tags: dex_tags,
+                owner: admin.clone(),
+            }),
+        );
+        client.register_route(&admin, &vault, &vault_address, &None);
+
+        // `dex` is globally best, `oracle` is best within its own group.
+        client.set_route_score(
+            &admin,
+            &dex,
+            &RouteScore {
+                liquidity_score: 100,
+                fee_bps: 0,
+                reliability_score: 100,
+            },
+        );
+        client.set_route_score(
+            &admin,
+            &oracle,
+            &RouteScore {
+                liquidity_score: 50,
+                fee_bps: 0,
+                reliability_score: 50,
+            },
+        );
+
+        assert_eq!(client.resolve_best(&None), dex_address);
+        assert_eq!(client.resolve_best(&Some(oracle_tag)), oracle_address);
+        assert_eq!(client.resolve_best(&Some(dex_tag)), dex_address);
+    }
+
+    #[test]
+    fn test_resolve_best_returns_route_not_found_when_no_scored_route() {
+        let (env, admin, client) = setup();
+        let oracle = String::from_str(&env, "oracle");
+        client.register_route(&admin, &oracle, &Address::generate(&env), &None);
+
+        assert_eq!(
+            client.try_resolve_best(&None),
+            Err(Ok(RouterError::RouteNotFound))
+        );
     }
 
     #[test]

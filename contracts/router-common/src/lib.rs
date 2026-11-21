@@ -48,6 +48,18 @@
 //!    - Role events: `role_granted`, `role_revoked`, `role_parent_set`
 //!    - Route events: `route_registered`, `route_updated`, `route_overwritten`
 //!
+//! 6. **One payload shape per topic** - Each event topic must have exactly one
+//!    payload shape across the entire workspace. Indexers subscribe to topics,
+//!    not to contracts, so two contracts publishing the same topic with
+//!    different data layouts force every decoder to know which contract emitted
+//!    the event. If a contract needs a different payload, give it a distinct
+//!    topic instead.
+//!    - `EVENT_BATCH_EXECUTED` (`batch_executed`) is reserved for
+//!      router-multicall's `(caller, batch_id, succeeded, failed, processed,
+//!      simulate)` payload. router-registry's bulk operations publish
+//!      `EVENT_BULK_REGISTER_COMPLETED` / `EVENT_DEPRECATE_MANY_COMPLETED`
+//!      instead.
+//!
 //! ## Standard Event Topics
 //!
 //! Use these constants when publishing events to ensure consistency:
@@ -210,8 +222,22 @@ pub const EVENT_CALL_RESULT: &str = "call_result";
 /// Standard event topic for a required call failure in multicall (includes index + contract context)
 pub const EVENT_CALL_FAILED: &str = "call_failed";
 
-/// Standard event topic for batch execution completion
+/// Standard event topic for batch execution completion.
+///
+/// Reserved for router-multicall's batch payload
+/// `(caller, batch_id, succeeded, failed, processed, simulate)`. Other
+/// contracts must not publish this topic with a different payload shape.
 pub const EVENT_BATCH_EXECUTED: &str = "batch_executed";
+
+/// Standard event topic for router-registry's `bulk_register` completion.
+///
+/// Payload: `(caller, operation, successes, failures)`.
+pub const EVENT_BULK_REGISTER_COMPLETED: &str = "bulk_register_completed";
+
+/// Standard event topic for router-registry's `deprecate_many` completion.
+///
+/// Payload: `(caller, operation, successes, failures)`.
+pub const EVENT_DEPRECATE_MANY_COMPLETED: &str = "deprecate_many_completed";
 
 /// Standard event topic for max batch size updates
 pub const EVENT_MAX_BATCH_SIZE_UPDATED: &str = "max_batch_size_updated";
