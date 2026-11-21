@@ -365,7 +365,13 @@ pub struct BatchFailure {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct BatchResult {
+    /// Items that completed successfully, in the order they were recorded.
+    /// Each [`BatchSuccess::index`] is the item's position in the original
+    /// batch input.
     pub successes: Vec<BatchSuccess>,
+    /// Items that failed, in the order they were recorded. Each
+    /// [`BatchFailure::index`] is the item's position in the original batch
+    /// input.
     pub failures: Vec<BatchFailure>,
 }
 
@@ -376,7 +382,14 @@ pub struct BatchResult {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct BatchCallResult {
+    /// Items that completed successfully together with their returned
+    /// [`CallResult`], in the order they were recorded. Each
+    /// [`BatchCallSuccess::index`] is the item's position in the original
+    /// batch input.
     pub successes: Vec<BatchCallSuccess>,
+    /// Items that failed, in the order they were recorded. Each
+    /// [`BatchFailure::index`] is the item's position in the original batch
+    /// input.
     pub failures: Vec<BatchFailure>,
 }
 
@@ -398,6 +411,7 @@ fn batch_has_failures(failures: &Vec<BatchFailure>) -> bool {
 }
 
 impl BatchResult {
+    /// Creates an empty result with no successes or failures.
     pub fn new(env: &Env) -> Self {
         Self {
             successes: Vec::new(env),
@@ -405,20 +419,26 @@ impl BatchResult {
         }
     }
 
+    /// Records that the item at `index` (its position in the original batch
+    /// input) succeeded.
     pub fn record_success(&mut self, index: u32) {
         self.successes.push_back(BatchSuccess { index });
     }
 
+    /// Records that the item at `index` (its position in the original batch
+    /// input) failed with `error`.
     pub fn record_failure(&mut self, index: u32, error: BatchItemError) {
         batch_record_failure(&mut self.failures, index, error);
     }
 
+    /// Returns `true` if at least one item has been recorded as failed.
     pub fn has_failures(&self) -> bool {
         batch_has_failures(&self.failures)
     }
 }
 
 impl BatchCallResult {
+    /// Creates an empty result with no successes or failures.
     pub fn new(env: &Env) -> Self {
         Self {
             successes: Vec::new(env),
@@ -426,6 +446,8 @@ impl BatchCallResult {
         }
     }
 
+    /// Records that the item at `index` (its position in the original batch
+    /// input) succeeded and returned `value`.
     pub fn record_success(&mut self, index: u32, value: CallResult) {
         self.successes.push_back(BatchCallSuccess {
             index,
@@ -433,10 +455,13 @@ impl BatchCallResult {
         });
     }
 
+    /// Records that the item at `index` (its position in the original batch
+    /// input) failed with `error`.
     pub fn record_failure(&mut self, index: u32, error: BatchItemError) {
         batch_record_failure(&mut self.failures, index, error);
     }
 
+    /// Returns `true` if at least one item has been recorded as failed.
     pub fn has_failures(&self) -> bool {
         batch_has_failures(&self.failures)
     }
@@ -444,8 +469,11 @@ impl BatchCallResult {
 
 /// Checks that `caller` matches the admin address stored under `key`.
 ///
-/// Expands to an expression that returns `Err($not_init_err)` if the key is
-/// absent, or `Err($unauth_err)` if the caller does not match.
+/// Expands to a pure expression of type `Result<(), E>`: `Err($not_init_err)`
+/// if the key is absent, `Err($unauth_err)` if the caller does not match, and
+/// `Ok(())` otherwise. The macro never returns from the enclosing function on
+/// its own — propagate the error with `?` at the call site, or inspect the
+/// result directly (e.g. `if require_admin!(..).is_err() { .. }`).
 ///
 /// # Arguments
 /// * `$env`          — `&Env` reference
@@ -462,14 +490,17 @@ impl BatchCallResult {
 /// ```
 #[macro_export]
 macro_rules! require_admin {
-    ($env:expr, $caller:expr, $key:expr, $not_init_err:expr, $unauth_err:expr) => {{
-        let admin: soroban_sdk::Address =
-            $env.storage().instance().get($key).ok_or($not_init_err)?;
-        if &admin != $caller {
-            return Err($unauth_err);
+    ($env:expr, $caller:expr, $key:expr, $not_init_err:expr, $unauth_err:expr) => {
+        match $env
+            .storage()
+            .instance()
+            .get::<_, soroban_sdk::Address>($key)
+        {
+            None => Err($not_init_err),
+            Some(admin) if &admin != $caller => Err($unauth_err),
+            Some(_) => Ok(()),
         }
-        Ok::<(), _>(())
-    }};
+    };
 }
 
 /// Convenience version when using DataKey::Admin and standard error variants.
@@ -634,15 +665,9 @@ mod tests {
         Unauthorized = 2,
     }
 
-    // Issue #1211: `require_admin!`/`require_admin_simple!` expand to a bare
-    // block whose internal `?`/`return` escape to the *caller's* enclosing
-    // function — by design, so contract methods can write
-    // `require_admin_simple!(...)?;` directly. Inside these tests that
-    // enclosing scope is the `env.as_contract(&id, || { ... })` closure, so
-    // the closure itself must be the thing typed `Result<(), AdminTestError>`
-    // and asserted on — not an internal `let result = ...;` line, which the
-    // escaping `return` on any error path would skip entirely, leaving the
-    // original `assert_eq!` calls unreachable dead code on the error branches.
+    // Issue #1653: `require_admin!`/`require_admin_simple!` expand to a pure
+    // `Result<(), E>` expression with no `?`/`return` that escapes to the
+    // caller, so the result can be asserted on directly.
 
     /// require_admin! returns Ok(()) when the caller matches the stored admin.
     #[test]
