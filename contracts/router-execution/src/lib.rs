@@ -176,10 +176,20 @@ pub struct ExecutionRequest {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExecutionRecord {
+    /// Ledger close time (seconds since the Unix epoch), per
+    /// `env.ledger().timestamp()`, at which this entry was appended.
     pub timestamp: u64,
+    /// Target contract address that was (or would have been) invoked.
     pub target: Address,
+    /// Function name that was (or would have been) invoked on `target`.
     pub function: Symbol,
+    /// Whether the logged attempt succeeded.
     pub success: bool,
+    /// The computed `base_fee + resource_fee` for the request, mirroring
+    /// `estimate_fee` without surge pricing (see `compute_actual_fee`).
+    /// This is the fee the contract calculated, not what the network
+    /// actually charged. It is `0` when the entry was logged for a
+    /// simulation failure (the request never reached the execution phase).
     pub fee_paid: i128,
 }
 
@@ -187,8 +197,12 @@ pub struct ExecutionRecord {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExecutionResult {
+    /// Target contract address that was invoked.
     pub target: Address,
+    /// Function name that was invoked on `target`.
     pub function: Symbol,
+    /// Whether the execution succeeded. Always `true` when returned: a
+    /// failed execution returns `Err(ExecutionError)` instead of this type.
     pub success: bool,
     /// Number of attempts made before success (1 = succeeded on first try, 2 = succeeded after 1 retry, etc.).
     /// Only populated on successful execution; failures return `Err(ExecutionError)` instead.
@@ -201,7 +215,9 @@ pub struct ExecutionResult {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct SimulationResult {
+    /// Target contract address that was simulated.
     pub target: Address,
+    /// Function name that was simulated on `target`.
     pub function: Symbol,
     /// `true` if the simulated call would succeed on-chain.
     pub success: bool,
