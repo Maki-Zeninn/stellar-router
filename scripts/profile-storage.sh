@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Profile storage key counts per contract by counting DataKey variants in source.
-# Compares against .storage-baseline.txt and fails if any contract exceeds its baseline.
+# Compares against .storage-baseline.txt (format: contract_name storage_key_count)
+# and fails if any contract exceeds its baseline.
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BASELINE="$REPO_ROOT/.storage-baseline.txt"
@@ -20,14 +21,21 @@ EXIT_CODE=0
 
 for contract_dir in "$REPO_ROOT"/contracts/*/; do
     contract_name=$(basename "$contract_dir")
-    lib_file="$contract_dir/src/lib.rs"
 
-    if [ ! -f "$lib_file" ]; then
+    if [ ! -d "$contract_dir/src" ]; then
         continue
     fi
 
-    # Count DataKey variants (lines between "enum DataKey {" and the closing "}")
-    key_count=$(sed -n '/enum DataKey/,/^}/p' "$lib_file" | grep -cE '^\s+\w+' || true)
+    # Count DataKey variants across all source files in the contract (not just
+    # lib.rs), anchored on the variant name itself so a variant whose fields
+    # span multiple lines (e.g. `Foo(\n    String,\n    Address,\n)`) counts
+    # once, not once per field line.
+    key_count=0
+    for src_file in "$contract_dir"src/*.rs; do
+        [ -f "$src_file" ] || continue
+        count=$(sed -n '/enum DataKey/,/^}/p' "$src_file" | grep -cE '^\s+[A-Z][A-Za-z0-9_]*\s*[,({]' || true)
+        key_count=$((key_count + count))
+    done
 
     echo "$contract_name $key_count" >> "$PROFILE_OUT"
 
