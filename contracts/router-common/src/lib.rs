@@ -21,7 +21,7 @@
 //! - [`BatchItemError`] — structured error variants for batch item failures
 //!
 //! ## String Helpers
-//! - [`is_whitespace_only`] — checks whether a string is empty or all ASCII whitespace
+//! - [`validate_contract_name`] — validates a contract/route name (1–64 chars, `[A-Za-z0-9/-]`)
 //!
 //! ## Event Topic Naming Convention
 //!
@@ -494,6 +494,34 @@ macro_rules! require_admin_simple {
 // code. It is preserved as a private helper inside the test module below so
 // its existing unit tests continue to compile and pass.
 
+// ── Name validation ───────────────────────────────────────────────────────────
+
+/// Maximum length, in bytes, of a contract or route name.
+pub const MAX_NAME_LEN: u32 = 64;
+
+/// Returns `true` if `name` is a valid contract/route name.
+///
+/// Rules (shared with router-core's `validate_route_name`):
+/// - length is between 1 and [`MAX_NAME_LEN`] bytes inclusive
+/// - every byte is in `[A-Za-z0-9/-]`
+///
+/// This rejects empty strings, whitespace-only strings, over-long strings and
+/// strings containing control characters or any other punctuation.
+pub fn validate_contract_name(name: &String) -> bool {
+    let len = name.len();
+    if len == 0 || len > MAX_NAME_LEN {
+        return false;
+    }
+    let mut buf = [0u8; MAX_NAME_LEN as usize];
+    name.copy_into_slice(&mut buf[..len as usize]);
+    buf[..len as usize].iter().all(|b| is_valid_name_byte(*b))
+}
+
+/// Returns `true` if `b` is an allowed name byte: `[A-Za-z0-9/-]`.
+fn is_valid_name_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'/' || b == b'-'
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,6 +569,56 @@ mod tests {
     #[test]
     fn test_name_with_surrounding_spaces_is_not_whitespace_only() {
         assert!(!is_whitespace_only(" oracle "));
+    }
+
+    // ── validate_contract_name tests ──────────────────────────────────────────
+
+    fn s(env: &Env, value: &str) -> String {
+        String::from_str(env, value)
+    }
+
+    #[test]
+    fn validate_contract_name_accepts_valid_names() {
+        let env = Env::default();
+        assert!(validate_contract_name(&s(&env, "oracle")));
+        assert!(validate_contract_name(&s(&env, "Oracle-1")));
+        assert!(validate_contract_name(&s(&env, "router/core")));
+        assert!(validate_contract_name(&s(&env, "a")));
+        assert!(validate_contract_name(&s(&env, &"a".repeat(64))));
+    }
+
+    #[test]
+    fn validate_contract_name_rejects_empty() {
+        let env = Env::default();
+        assert!(!validate_contract_name(&s(&env, "")));
+    }
+
+    #[test]
+    fn validate_contract_name_rejects_whitespace_only() {
+        let env = Env::default();
+        assert!(!validate_contract_name(&s(&env, " ")));
+        assert!(!validate_contract_name(&s(&env, "   ")));
+        assert!(!validate_contract_name(&s(&env, "\t")));
+        assert!(!validate_contract_name(&s(&env, "\n")));
+        assert!(!validate_contract_name(&s(&env, " \t\n")));
+    }
+
+    #[test]
+    fn validate_contract_name_rejects_over_long() {
+        let env = Env::default();
+        assert!(!validate_contract_name(&s(&env, &"a".repeat(65))));
+        assert!(!validate_contract_name(&s(&env, &"a".repeat(10240))));
+    }
+
+    #[test]
+    fn validate_contract_name_rejects_control_characters() {
+        let env = Env::default();
+        assert!(!validate_contract_name(&s(&env, "a\x00b")));
+        assert!(!validate_contract_name(&s(&env, "a\x01b")));
+        assert!(!validate_contract_name(&s(&env, "a\x7fb")));
+        assert!(!validate_contract_name(&s(&env, "a b")));
+        assert!(!validate_contract_name(&s(&env, "a_b")));
+        assert!(!validate_contract_name(&s(&env, "a.b")));
     }
 
     // ── require_admin! tests ──────────────────────────────────────────────────

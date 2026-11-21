@@ -41,7 +41,7 @@ graph TD
     Core -->|lookup address| Registry
     Core -->|verify permissions| Access
     Core -->|pre/post call hooks| Middleware
-    Core -->|queue sensitive changes| Timelock
+    Timelock -->|execute queued admin calls| Core
     
     Execution -->|resolve routes| Core
     Quote -->|simulate flow| Execution
@@ -132,8 +132,17 @@ Pre/post call hooks for any route. Supports:
 
 ### router-timelock
 A delay queue for sensitive router changes (e.g. upgrading a registry entry).
-Operations must wait a configurable minimum delay before they can be executed.
+Each queued operation records a target contract, the function to call on it, and
+the arguments to pass. Operations must wait a configurable minimum delay before
+they can be executed; `execute` performs the queued cross-contract call.
 Operations can be cancelled before execution.
+
+**Enforcement:** the delay is only enforced if the timelock contract is the
+admin of the target contract. If the target's admin is a plain account, that
+account can bypass the timelock by calling the target directly. To make the
+timelock a real on-chain control, set the timelock contract address as the
+admin of `router-core` (and any other contract whose admin functions should be
+delayed), then queue admin calls through the timelock.
 
 ### router-multicall
 Batches multiple cross-contract calls into a single transaction. Each call can be
@@ -348,18 +357,36 @@ stellar contract invoke --id <MIDDLEWARE_ID> --network testnet --source admin \
 
 ### Queue a timelock operation
 
+For the delay to be enforced, the timelock contract must be the admin of the
+target contract. For example, transfer `router-core`'s admin to the timelock:
+
 ```bash
-# 1. Queue the operation (delay = 86400 seconds = 24 hours)
+stellar contract invoke --id <CORE_ID> --network testnet --source admin \
+  -- transfer_admin \
+  --caller <ADMIN_ADDRESS> \
+  --new_admin <TIMELOCK_ID>
+```
+
+Then queue an admin call (here, `update_route` on `router-core`) through the
+timelock:
+
+```bash
+# 1. Queue the operation (delay = 86400 seconds = 24 hours).
+#    `function` is the target contract function to invoke and `args` are its
+#    arguments, in order.
 stellar contract invoke --id <TIMELOCK_ID> --network testnet --source admin \
   -- queue \
   --proposer <ADMIN_ADDRESS> \
   --description "upgrade oracle to v2" \
-  --target <NEW_ORACLE_ADDRESS> \
+  --target <CORE_ID> \
+  --function update_route \
+  --args '["<TIMELOCK_ID>", "oracle", "<NEW_ORACLE_ADDRESS>"]' \
   --delay 86400
 
 # 2. Wait for the delay to pass (24 hours on testnet)
 
-# 3. Execute the operation after the ETA
+# 3. Execute the operation after the ETA — this invokes
+#    router-core.update_route with the queued arguments
 stellar contract invoke --id <TIMELOCK_ID> --network testnet --source admin \
   -- execute \
   --caller <ADMIN_ADDRESS> \
@@ -403,6 +430,7 @@ resolution. The others are optional enhancements:
 - `router-access` — only needed if you want role-based access control
 - `router-middleware` — only needed if you want rate limiting or call hooks
 - `router-timelock` — only needed if you want delayed execution of config changes
+  (set it as the admin of the contracts whose admin calls should be delayed)
 - `router-multicall` — only needed if you want to batch multiple calls in one transaction
 
 **Can I use just one contract from this suite?**
