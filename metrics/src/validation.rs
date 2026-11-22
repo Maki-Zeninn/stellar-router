@@ -1,7 +1,7 @@
 //! Request validation for incoming HTTP query parameters.
 //!
 //! All public entry points return a structured [`ValidationError`] on failure
-//! so callers can return a clear 400 response with a descriptive message.
+//! so callers can return a clear 422 response with a descriptive message.
 //! No sensitive data is included in error messages.
 
 use axum::{
@@ -11,7 +11,7 @@ use axum::{
 };
 use serde::Serialize;
 
-/// A structured validation error returned as JSON with HTTP 400.
+/// A structured validation error returned as JSON with HTTP 422 Unprocessable Entity.
 #[derive(Debug, Serialize)]
 pub struct ValidationError {
     /// Machine-readable error code, currently always `"validation_error"`.
@@ -213,5 +213,11 @@ mod tests {
     #[test]
     fn invalid_listen_addr_rejected() {
         assert!(validate_listen_addr("not-an-addr").is_err());
+    }
+
+    #[test]
+    fn validation_error_responds_with_422() {
+        let response = ValidationError::new("bad input").into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

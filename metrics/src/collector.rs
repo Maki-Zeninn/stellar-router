@@ -537,7 +537,6 @@ mod tests {
         let metrics = RouterMetrics::new(&reg).unwrap();
         let args = Args {
             rpc_url: String::new(),
-            network_passphrase: String::new(),
             core_contract_id: core.to_string(),
             middleware_contract_id: middleware.to_string(),
             registry_contract_id: registry_id.to_string(),
