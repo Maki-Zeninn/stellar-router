@@ -1,15 +1,13 @@
 use axum::{
     body::Body,
     http::{Request, StatusCode},
-    middleware,
-    routing::{get, post},
+    routing::get,
     Router,
 };
 use serde_json::{json, Value};
 use tower::util::ServiceExt;
 
 use crate::{
-    handlers,
     rate_limit::{RateLimitConfig, RateLimiter},
     state::AppState,
     types::{
@@ -30,17 +28,9 @@ fn test_app() -> Router {
         10,
     );
 
-    Router::new()
-        .route("/simulate", post(handlers::simulate))
-        .route("/health", get(handlers::health))
-        .route("/ready", get(handlers::ready))
-        .route("/routes", get(handlers::list_routes))
-        .route("/routes/:name", get(handlers::get_route))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            crate::rate_limit::rate_limit_middleware,
-        ))
-        .with_state(state)
+    // Issue #1608: use the production router so these tests exercise the
+    // real route registrations and layer order instead of a hand-rolled copy.
+    crate::build_app(state, &[])
 }
 
 /// Like `test_app`, but with a non-empty `router_core_contract_id` so
@@ -55,13 +45,9 @@ fn test_app_with_core_contract() -> Router {
         10,
     );
 
-    Router::new()
-        .route("/routes", get(handlers::list_routes))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            crate::rate_limit::rate_limit_middleware,
-        ))
-        .with_state(state)
+    // Issue #1608: production router, so `list_routes` takes the RPC-call
+    // path under the real layer stack instead of a hand-rolled copy.
+    crate::build_app(state, &[])
 }
 
 #[tokio::test]
@@ -1058,19 +1044,10 @@ fn test_app_with_full_layer_stack(max_requests: u32, origins: &[String]) -> Rout
         10,
     );
 
-    let cors = crate::build_cors_layer(origins);
-
-    Router::new()
-        .route("/health", get(handlers::health))
-        // Mirrors the production layer order in `main.rs`: rate_limit_middleware
-        // must be innermost so request_id_middleware and cors wrap it.
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            crate::rate_limit::rate_limit_middleware,
-        ))
-        .layer(cors)
-        .layer(middleware::from_fn(crate::request_id_middleware))
-        .with_state(state)
+    // Issue #1608: the production router itself, so layer order (rate limit
+    // innermost, wrapped by CORS and request-id) comes straight from
+    // `main()` — a regression there now fails these tests.
+    crate::build_app(state, origins)
 }
 
 #[tokio::test]
@@ -1118,4 +1095,177 @@ async fn test_rate_limited_response_includes_cors_header_for_allowed_origin() {
         Some("https://example.com"),
         "429 response to an allowed origin must carry access-control-allow-origin"
     );
+}
+
+// ── Issue #1608: main() and tests share build_app, so the production layer
+// order and route registration (Swagger UI, CORS, body limit, rate limiting)
+// are exercised by tests instead of drifting unnoticed.
+
+#[tokio::test]
+async fn test_production_router_serves_docs_and_openapi_json() {
+    // `test_app()` is built by `crate::build_app` — the same router main().
+    let app = test_app();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/docs/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "GET /docs/ must serve the Swagger UI, got {}",
+        resp.status()
+    );
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/openapi.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "GET /openapi.json must succeed"
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        json["paths"].is_object(),
+        "OpenAPI spec must contain a paths object"
+    );
+}
+
+#[tokio::test]
+async fn test_production_router_429_carries_cors_and_request_id() {
+    // Zero allowed requests → the first request gets a 429 from the
+    // production stack, which must still carry CORS and x-request-id.
+    let origins = vec!["https://example.com".to_string()];
+    let app = test_app_with_full_layer_stack(0, &origins);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .header("origin", "https://example.com")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        resp.headers()
+            .get("access-control-allow-origin")
+            .map(|h| h.to_str().unwrap()),
+        Some("https://example.com"),
+        "429 must carry CORS headers"
+    );
+    assert!(
+        resp.headers().get("x-request-id").is_some(),
+        "429 must carry x-request-id"
+    );
+}
+
+#[tokio::test]
+async fn test_production_router_rejects_body_over_one_mib_with_413() {
+    let app = test_app();
+
+    // One byte over the 1 MiB DefaultBodyLimit configured in build_app.
+    let oversized = "a".repeat(1024 * 1024 + 1);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/simulate")
+                .header("content-type", "application/json")
+                .body(Body::from(oversized))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "a body over 1 MiB must be rejected with 413"
+    );
+}
+
+// ── Issue #1606: fee arithmetic must not overflow, and negative amounts
+// must be rejected with 400.
+
+#[tokio::test]
+async fn test_simulate_rejects_negative_amount() {
+    let app = test_app();
+    let body = json!({
+        "target": VALID_CONTRACT_ID,
+        "function": "transfer",
+        "amount": -1,
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/simulate")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["error"]["field"].as_str().unwrap(), "amount");
+}
+
+#[tokio::test]
+async fn test_simulate_i64_max_amount_at_surge_returns_non_negative_fee() {
+    // Issue #1606 acceptance: amount = i64::MAX with network_load_bps =
+    // 10000 must not panic or produce a negative total_fee. The RPC is
+    // unreachable in tests, so the heuristic path derives the fee from
+    // the client-controlled `amount`.
+    let app = test_app();
+    let body = json!({
+        "target": VALID_CONTRACT_ID,
+        "function": "transfer",
+        "amount": i64::MAX,
+        "network_load_bps": 10_000,
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/simulate")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let parsed: SimulateResponse = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        parsed.estimated_fees.total_fee >= 0,
+        "total_fee must not be negative, got {}",
+        parsed.estimated_fees.total_fee
+    );
+    assert!(parsed.estimated_fees.resource_fee >= 0);
 }
