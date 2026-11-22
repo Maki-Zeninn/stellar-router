@@ -90,8 +90,16 @@ impl NonceCache {
         // the hot path pays for a full DashMap scan/lock of every shard.
         self.maybe_cleanup_expired(now);
 
-        // Check if nonce already exists
-        if self.cache.contains_key(nonce) {
+        // Check if nonce already exists. An entry whose TTL has elapsed is
+        // treated as absent (and overwritten below) even if no sweep has
+        // removed it yet, so the effective lifetime is exactly the TTL.
+        let ttl = self.config.nonce_ttl_secs;
+        let seen = self
+            .cache
+            .get(nonce)
+            .map(|entry| now.saturating_sub(entry.timestamp) < ttl)
+            .unwrap_or(false);
+        if seen {
             debug!("Replay attack detected: nonce {} already seen", nonce);
             return false;
         }
@@ -251,6 +259,44 @@ mod tests {
         // rather than rejecting a legitimate new nonce (see evict_oldest).
         assert!(cache.check_and_add("nonce-3"));
         assert_eq!(cache.cache.len(), 2);
+    }
+
+    #[test]
+    fn test_nonce_reused_after_ttl_is_accepted_without_sweep() {
+        let config = ReplayProtectionConfig {
+            enabled: true,
+            cache_size: 100,
+            nonce_ttl_secs: 1,
+        };
+        let cache = NonceCache::new(config);
+
+        assert!(cache.check_and_add("nonce-ttl"));
+        // Block the periodic sweep so only the duplicate check can see the
+        // expiry, then age the entry past its 1s TTL.
+        cache.last_swept_at.store(u64::MAX, Ordering::Relaxed);
+        cache.cache.get_mut("nonce-ttl").unwrap().timestamp -= 1;
+
+        assert!(cache.check_and_add("nonce-ttl"));
+        // The reuse refreshed the entry, so an immediate replay is rejected.
+        assert!(!cache.check_and_add("nonce-ttl"));
+    }
+
+    #[test]
+    fn test_nonce_within_ttl_is_still_rejected() {
+        let config = ReplayProtectionConfig {
+            enabled: true,
+            cache_size: 100,
+            nonce_ttl_secs: 1,
+        };
+        let cache = NonceCache::new(config);
+
+        assert!(cache.check_and_add("nonce-live"));
+        cache.last_swept_at.store(u64::MAX, Ordering::Relaxed);
+        // Keep the entry inside its TTL even if a second boundary passes
+        // between the two calls.
+        cache.cache.get_mut("nonce-live").unwrap().timestamp += 1;
+
+        assert!(!cache.check_and_add("nonce-live"));
     }
 
     #[test]
