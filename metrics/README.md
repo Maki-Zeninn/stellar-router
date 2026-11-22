@@ -21,8 +21,8 @@ Soroban smart contracts run inside the Stellar network as WASM and cannot open s
 | `router_middleware_circuit_open` | Gauge | `contract`, `route` | 1 if the circuit breaker is open |
 | `router_middleware_failure_count` | Gauge | `contract`, `route` | Consecutive failure count |
 | `router_registry_total_names` | Gauge | `contract` | Total contract names registered |
-| `router_quote_total_generated` | Gauge | `contract` | Running total of `quote_generated` events |
-| `router_quote_total_fee_estimated` | Gauge | `contract` | Running total of `fee_estimated` events |
+| `router_quote_total_generated` | Counter | `contract` | Running total of `quote_generated` events |
+| `router_quote_total_fee_estimated` | Counter | `contract` | Running total of `fee_estimated` events |
 | `router_execution_total_executions` | Gauge | `contract` | Cumulative executions from on-chain storage |
 | `router_execution_total_errors` | Gauge | `contract` | Cumulative execution errors from on-chain storage |
 | `router_execution_max_retries` | Gauge | `contract` | Configured max retries from on-chain storage |

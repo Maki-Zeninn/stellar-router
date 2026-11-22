@@ -61,6 +61,9 @@ pub struct ContractEvent {
     /// The contract that emitted the event.
     #[serde(rename = "contractId")]
     pub contract_id: String,
+    /// Event identifier (used as a pagination cursor).
+    #[serde(default)]
+    pub id: String,
     /// Event topic symbols (decoded from XDR).
     pub topic: Vec<serde_json::Value>,
     /// Event value (decoded from XDR).
@@ -71,6 +74,8 @@ pub struct ContractEvent {
 #[derive(Debug, Deserialize)]
 struct GetEventsResult {
     events: Option<Vec<ContractEvent>>,
+    /// Cursor for pagination — points to the next page of results.
+    cursor: Option<String>,
 }
 
 // ── Client ────────────────────────────────────────────────────────────────────
@@ -174,23 +179,24 @@ impl SorobanRpcClient {
     ///
     /// `contract_id` — the contract whose events to query.
     /// `topic_filters` — list of topic symbol strings to match (e.g. `["quote_calculated"]`).
-    /// `start_ledger` — earliest ledger to include (0 = let the RPC choose).
+    /// `cursor` — pagination cursor from previous response.
     pub async fn get_events(
         &self,
         contract_id: &str,
         topic_filters: &[&str],
-        start_ledger: u32,
-    ) -> Result<Vec<ContractEvent>> {
+        cursor: Option<&str>,
+    ) -> Result<(Vec<ContractEvent>, Option<String>)> {
         let filters = topic_filters
             .iter()
             .map(|t| json!({ "type": "contract", "contractIds": [contract_id], "topics": [[t]] }))
             .collect::<serde_json::Value>();
 
-        let params = if start_ledger > 0 {
-            json!({ "startLedger": start_ledger, "filters": filters })
-        } else {
-            json!({ "filters": filters })
-        };
+        let mut params = json!({ "filters": filters });
+        if let Some(c) = cursor {
+            if !c.is_empty() {
+                params["cursor"] = json!(c);
+            }
+        }
 
         let req = RpcRequest {
             jsonrpc: "2.0",
@@ -218,7 +224,12 @@ impl SorobanRpcClient {
             serde_json::from_value(resp.result.ok_or_else(|| anyhow!("empty RPC result"))?)
                 .context("failed to deserialize getEvents result")?;
 
-        Ok(result.events.unwrap_or_default())
+        let events = result.events.unwrap_or_default();
+        let next_cursor = result
+            .cursor
+            .or_else(|| events.last().map(|e| e.id.clone()).filter(|id| !id.is_empty()));
+
+        Ok((events, next_cursor))
     }
 
     /// Convenience: call a view function and extract a `u64` from the result.
@@ -409,14 +420,14 @@ pub trait RpcClient: Send + Sync {
         function_name: &str,
         args_xdr: Vec<String>,
     ) -> Result<serde_json::Value>;
-    /// Fetch contract events matching the given topic filters, starting from `start_ledger`
-    /// (0 = let the RPC choose).
+    /// Fetch contract events matching the given topic filters, starting from `cursor`
+    /// (None = start from beginning).
     async fn get_events(
         &self,
         contract_id: &str,
         topic_filters: &[&str],
-        start_ledger: u32,
-    ) -> Result<Vec<ContractEvent>>;
+        cursor: Option<&str>,
+    ) -> Result<(Vec<ContractEvent>, Option<String>)>;
     /// Fetch ledger entries for the given base64-encoded XDR keys.
     async fn get_ledger_entries(&self, keys_xdr: Vec<String>) -> Result<Vec<LedgerEntry>>;
 }
@@ -445,10 +456,9 @@ impl RpcClient for SorobanRpcClient {
         &self,
         contract_id: &str,
         topic_filters: &[&str],
-        start_ledger: u32,
-    ) -> Result<Vec<ContractEvent>> {
-        self.get_events(contract_id, topic_filters, start_ledger)
-            .await
+        cursor: Option<&str>,
+    ) -> Result<(Vec<ContractEvent>, Option<String>)> {
+        self.get_events(contract_id, topic_filters, cursor).await
     }
     async fn get_ledger_entries(&self, keys_xdr: Vec<String>) -> Result<Vec<LedgerEntry>> {
         self.get_ledger_entries(keys_xdr).await
@@ -475,6 +485,8 @@ pub struct MockRpcClient {
     string_vec_responses: std::collections::HashMap<(String, String), Vec<String>>,
     simulate_responses: std::collections::HashMap<(String, String), serde_json::Value>,
     events_responses: std::collections::HashMap<(String, String), Vec<ContractEvent>>,
+    /// Event pages for cursor-based pagination. Each call to getEvents pops the next page.
+    events_pages: std::collections::HashMap<(String, String), std::sync::Mutex<Vec<Vec<ContractEvent>>>>,
     ledger_entries_responses: std::collections::HashMap<String, Vec<LedgerEntry>>,
 }
 
@@ -487,6 +499,7 @@ impl MockRpcClient {
             string_vec_responses: Default::default(),
             simulate_responses: Default::default(),
             events_responses: Default::default(),
+            events_pages: Default::default(),
             ledger_entries_responses: Default::default(),
         }
     }
@@ -517,9 +530,29 @@ impl MockRpcClient {
     }
 
     /// Pre-load a `getEvents` response for a given contract + topic.
+    /// This is a convenience method that sets up a single page of events.
     pub fn with_events(mut self, contract: &str, topic: &str, val: Vec<ContractEvent>) -> Self {
         self.events_responses
-            .insert((contract.to_string(), topic.to_string()), val);
+            .insert((contract.to_string(), topic.to_string()), val.clone());
+        self.events_pages.insert(
+            (contract.to_string(), topic.to_string()),
+            std::sync::Mutex::new(vec![val]),
+        );
+        self
+    }
+
+    /// Pre-load multiple pages of events for cursor-based pagination.
+    /// Each page is returned in order on successive calls to getEvents.
+    pub fn with_event_pages(
+        mut self,
+        contract: &str,
+        topic: &str,
+        pages: Vec<Vec<ContractEvent>>,
+    ) -> Self {
+        self.events_pages.insert(
+            (contract.to_string(), topic.to_string()),
+            std::sync::Mutex::new(pages),
+        );
         self
     }
 
@@ -584,18 +617,30 @@ impl RpcClient for MockRpcClient {
         &self,
         contract_id: &str,
         topic_filters: &[&str],
-        _start_ledger: u32,
-    ) -> Result<Vec<ContractEvent>> {
-        // Return events for the first matching topic filter.
+        _cursor: Option<&str>,
+    ) -> Result<(Vec<ContractEvent>, Option<String>)> {
         for topic in topic_filters {
-            if let Some(events) = self
-                .events_responses
-                .get(&(contract_id.to_string(), topic.to_string()))
-            {
-                return Ok(events.clone());
+            let key = (contract_id.to_string(), topic.to_string());
+            if let Some(pages_mutex) = self.events_pages.get(&key) {
+                let mut pages = pages_mutex.lock().unwrap();
+                if !pages.is_empty() {
+                    let page = pages.remove(0);
+                    let next_cursor = if !pages.is_empty() {
+                        Some("next_cursor".to_string())
+                    } else {
+                        page.last().map(|e| e.id.clone()).filter(|id| !id.is_empty())
+                    };
+                    return Ok((page, next_cursor));
+                }
+            }
+            if let Some(events) = self.events_responses.get(&key) {
+                return Ok((
+                    events.clone(),
+                    events.last().map(|e| e.id.clone()).filter(|id| !id.is_empty()),
+                ));
             }
         }
-        Ok(vec![])
+        Ok((vec![], None))
     }
 
     async fn get_ledger_entries(&self, keys_xdr: Vec<String>) -> Result<Vec<LedgerEntry>> {
