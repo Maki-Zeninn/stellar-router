@@ -385,9 +385,11 @@ impl Collector {
         // Parse each entry. The value XDR is a base64-encoded ScVal::U64.
         // We extract the numeric value from the JSON representation returned
         // by the RPC server (which decodes XDR to JSON automatically).
-        let total_executions = extract_u64_from_entry(&entries, "TotalExecutions").unwrap_or(0);
-        let total_errors = extract_u64_from_entry(&entries, "TotalErrors").unwrap_or(0);
-        let max_retries = extract_u64_from_entry(&entries, "MaxRetries").unwrap_or(0);
+        let total_executions =
+            extract_u64_from_entry(&entries, contract_id, "TotalExecutions").unwrap_or(0);
+        let total_errors =
+            extract_u64_from_entry(&entries, contract_id, "TotalErrors").unwrap_or(0);
+        let max_retries = extract_u64_from_entry(&entries, contract_id, "MaxRetries").unwrap_or(0);
 
         self.metrics
             .execution_total_executions
@@ -436,10 +438,16 @@ fn encode_contract_data_key(contract_id: &str, storage_key: &str) -> String {
 /// The RPC server returns entries with a `xdr` field containing base64-encoded
 /// `LedgerEntryData` XDR. In the JSON-decoded representation (used by some RPC
 /// versions) the value is available directly. We try both paths.
-fn extract_u64_from_entry(entries: &[crate::rpc::LedgerEntry], key_name: &str) -> Option<u64> {
+fn extract_u64_from_entry(
+    entries: &[crate::rpc::LedgerEntry],
+    contract_id: &str,
+    key_name: &str,
+) -> Option<u64> {
+    // Match the encoded key exactly: a substring match would let a key such as
+    // `MaxRetriesOverride` satisfy a lookup for `MaxRetries`.
+    let expected_key = encode_contract_data_key(contract_id, key_name);
     for entry in entries {
-        // The key field encodes the storage key name; we match by suffix.
-        if entry.key.ends_with(key_name) || entry.key.contains(key_name) {
+        if entry.key == expected_key {
             // Try to parse the xdr field as a plain u64 (mock / JSON path).
             if let Ok(n) = entry.xdr.parse::<u64>() {
                 return Some(n);
@@ -789,6 +797,46 @@ mod tests {
             3.0
         );
     }
+    #[test]
+    fn test_extract_u64_from_entry_matches_key_exactly() {
+        use crate::rpc::LedgerEntry;
+        // `MaxRetries` is a substring of `MaxRetriesOverride`; the longer key
+        // comes first so a loose match would return its value.
+        let entries = vec![
+            LedgerEntry {
+                key: "EXEC_ID:MaxRetriesOverride".to_string(),
+                xdr: "99".to_string(),
+            },
+            LedgerEntry {
+                key: "EXEC_ID:MaxRetries".to_string(),
+                xdr: "3".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            extract_u64_from_entry(&entries, "EXEC_ID", "MaxRetries"),
+            Some(3)
+        );
+        assert_eq!(
+            extract_u64_from_entry(&entries, "EXEC_ID", "MaxRetriesOverride"),
+            Some(99)
+        );
+    }
+
+    #[test]
+    fn test_extract_u64_from_entry_ignores_other_contracts() {
+        use crate::rpc::LedgerEntry;
+        let entries = vec![LedgerEntry {
+            key: "OTHER_ID:MaxRetries".to_string(),
+            xdr: "7".to_string(),
+        }];
+
+        assert_eq!(
+            extract_u64_from_entry(&entries, "EXEC_ID", "MaxRetries"),
+            None
+        );
+    }
+
     #[test]
     fn test_extract_route_paused_true() {
         let val = json!({
