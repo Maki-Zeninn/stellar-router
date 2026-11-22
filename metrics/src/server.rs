@@ -50,6 +50,33 @@ pub async fn serve(listen: String, registry: Registry, limiter: RateLimiter) -> 
     let replay_config = ReplayProtectionConfig::from_env();
     let nonce_cache = NonceCache::new(replay_config);
 
+    let app = build_app(state, auth_config, nonce_cache, limiter);
+
+    info!(%addr, "HTTP server listening");
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("failed to bind to {addr}"))?;
+
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .context("HTTP server error")?;
+
+    Ok(())
+}
+
+/// Build the application router with every route and middleware layer.
+///
+/// Shared by [`serve`] and the tests so the tests exercise the real topology
+/// rather than a hand-built copy of it.
+fn build_app(
+    state: AppState,
+    auth_config: AuthConfig,
+    nonce_cache: NonceCache,
+    limiter: RateLimiter,
+) -> Router {
     // `/health` and `/ready` are liveness/readiness probes used by Docker's
     // HEALTHCHECK and orchestrators, which don't send an API key or a
     // `X-Nonce` header. They're registered *after* `route_layer`, so — unlike
@@ -57,7 +84,7 @@ pub async fn serve(listen: String, registry: Registry, limiter: RateLimiter) -> 
     // the routes already present on the router (`/metrics` and the Swagger
     // UI), not these two. Rate limiting and the request-id middleware still
     // apply to every route via `.layer()`.
-    let app = Router::new()
+    Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .route("/metrics", get(metrics_handler))
         .route_layer(middleware::from_fn_with_state(
@@ -75,21 +102,7 @@ pub async fn serve(listen: String, registry: Registry, limiter: RateLimiter) -> 
             rate_limit_middleware,
         ))
         .layer(middleware::from_fn(request_id_middleware))
-        .with_state(state);
-
-    info!(%addr, "HTTP server listening");
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("failed to bind to {addr}"))?;
-
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await
-    .context("HTTP server error")?;
-
-    Ok(())
+        .with_state(state)
 }
 
 // ── Middleware ────────────────────────────────────────────────────────────────
@@ -212,22 +225,56 @@ async fn ready_handler(State(state): State<AppState>) -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rate_limit::RateLimitConfig;
+    use axum::extract::connect_info::MockConnectInfo;
     use axum::{body::Body, http::Request};
+    use std::time::Duration;
     use tower::util::ServiceExt; // for `oneshot`
 
-    fn make_app() -> Router {
+    /// A registry with a test gauge so the /metrics output is non-empty.
+    fn test_state() -> AppState {
         let registry = Registry::new();
-        // Register a test gauge so the /metrics output is non-empty
         let gauge = prometheus::Gauge::new("test_gauge", "a test gauge").unwrap();
         registry.register(Box::new(gauge.clone())).unwrap();
         gauge.set(42.0);
+        AppState { registry }
+    }
 
-        let state = AppState { registry };
-        Router::new()
-            .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
-            .route("/metrics", get(metrics_handler))
-            .route("/health", get(health_handler))
-            .with_state(state)
+    fn limiter(max_requests: u32) -> RateLimiter {
+        RateLimiter::new(RateLimitConfig {
+            max_requests,
+            window: Duration::from_secs(60),
+            max_buckets: 1024,
+        })
+    }
+
+    /// The real router from [`build_app`], with the client address `serve()`
+    /// gets from `into_make_service_with_connect_info` supplied by
+    /// `MockConnectInfo` (the rate limiter keys on it).
+    fn make_real_app(
+        auth_config: AuthConfig,
+        replay_enabled: bool,
+        limiter: RateLimiter,
+    ) -> Router {
+        let nonce_cache = NonceCache::new(ReplayProtectionConfig {
+            enabled: replay_enabled,
+            cache_size: 10_000,
+            nonce_ttl_secs: 3600,
+        });
+        build_app(test_state(), auth_config, nonce_cache, limiter)
+            .layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4000))))
+    }
+
+    /// The real router with auth and replay protection disabled.
+    fn make_app() -> Router {
+        make_real_app(
+            AuthConfig {
+                enabled: false,
+                api_key: None,
+            },
+            false,
+            limiter(1_000),
+        )
     }
 
     #[tokio::test]
@@ -390,41 +437,18 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    /// Builds the same route topology as `serve()` — `/metrics` behind
-    /// `route_layer`'d auth + replay-protection middleware, `/health` and
-    /// `/ready` registered afterward so they're unaffected by either.
+    /// The real router (same topology as `serve()`) with auth and replay
+    /// protection enabled — `/metrics` behind both, `/health` and `/ready`
+    /// unaffected by either.
     fn make_app_with_auth_and_replay_protection() -> Router {
-        let registry = Registry::new();
-        let gauge = prometheus::Gauge::new("test_gauge", "a test gauge").unwrap();
-        registry.register(Box::new(gauge.clone())).unwrap();
-        gauge.set(42.0);
-        let state = AppState { registry };
-
-        let auth_config = crate::auth::AuthConfig {
-            enabled: true,
-            api_key: Some("secret-key".to_string()),
-        };
-        let replay_config = ReplayProtectionConfig {
-            enabled: true,
-            cache_size: 10_000,
-            nonce_ttl_secs: 3600,
-        };
-        let nonce_cache = NonceCache::new(replay_config);
-
-        Router::new()
-            .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
-            .route("/metrics", get(metrics_handler))
-            .route_layer(middleware::from_fn_with_state(
-                nonce_cache,
-                crate::replay_protection::replay_protection_middleware,
-            ))
-            .route_layer(middleware::from_fn_with_state(
-                auth_config,
-                crate::auth::auth_middleware,
-            ))
-            .route("/health", get(health_handler))
-            .route("/ready", get(ready_handler))
-            .with_state(state)
+        make_real_app(
+            AuthConfig {
+                enabled: true,
+                api_key: Some("secret-key".to_string()),
+            },
+            true,
+            limiter(1_000),
+        )
     }
 
     #[tokio::test]
@@ -505,5 +529,58 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Issue #1585: rate limiting on the real router ─────────────────────
+
+    #[tokio::test]
+    async fn test_real_router_rate_limits_every_route() {
+        let app = make_real_app(
+            AuthConfig {
+                enabled: false,
+                api_key: None,
+            },
+            false,
+            limiter(2),
+        );
+
+        for uri in ["/health", "/metrics"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri} within the limit");
+        }
+
+        // Third request from the same client in the window: rejected, on the
+        // probe route too, with a Retry-After header and a request id.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(response.headers().contains_key("retry-after"));
+        assert!(response.headers().contains_key("x-request-id"));
+    }
+
+    #[tokio::test]
+    async fn test_real_router_sets_request_id_header() {
+        let response = make_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().contains_key("x-request-id"));
     }
 }
