@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # ── Build stage ───────────────────────────────────────────────────────────────
-FROM rust:1.88-slim AS builder
+FROM rust:1.88.0-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 RUN rustup target add wasm32-unknown-unknown
@@ -49,7 +49,7 @@ RUN cargo build --target wasm32-unknown-unknown --release \
 # ── Metrics exporter builder ──────────────────────────────────────────────────
 # router-metrics-exporter is its own standalone workspace (see metrics/Cargo.toml),
 # not a member of the root workspace, so it's built separately.
-FROM rust:1.88-slim AS metrics-builder
+FROM rust:1.88.0-slim AS metrics-builder
 RUN apt-get update && \
     apt-get install -y --no-install-recommends curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
