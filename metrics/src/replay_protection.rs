@@ -13,6 +13,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::env;
@@ -95,18 +96,33 @@ impl NonceCache {
         // the hot path pays for a full DashMap scan/lock of every shard.
         self.maybe_cleanup_expired(now);
 
-        // Check if nonce already exists
-        if self.cache.contains_key(nonce) {
-            debug!("Replay attack detected: nonce {} already seen", nonce);
-            return false;
-        }
-
         // If still at capacity after TTL cleanup, evict the oldest entry to
-        // bound memory use rather than rejecting a legitimate nonce.
-        if self.cache.len() >= self.config.cache_size {
+        // bound memory use rather than rejecting a legitimate nonce. This runs
+        // before taking the entry below: `evict_oldest` scans every shard and
+        // must not run while that entry's shard lock is held.
+        if self.cache.len() >= self.config.cache_size && !self.cache.contains_key(nonce) {
             self.evict_oldest();
         }
 
+        // Check and insert under one shard lock, so concurrent requests with
+        // the same nonce cannot both see it as new. An entry whose TTL has
+        // elapsed is treated as absent (and overwritten) even if no sweep has
+        // removed it yet, so the effective lifetime is exactly the TTL.
+        let ttl = self.config.nonce_ttl_secs;
+        match self.cache.entry(nonce.to_string()) {
+            Entry::Occupied(mut occupied) => {
+                if now.saturating_sub(occupied.get().timestamp) < ttl {
+                    debug!("Replay attack detected: nonce {} already seen", nonce);
+                    return false;
+                }
+                occupied.insert(NonceEntry { timestamp: now });
+                true
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(NonceEntry { timestamp: now });
+                true
+            }
+        }
         // Add nonce to cache
         self.cache
             .insert(nonce.to_string(), NonceEntry { timestamp: now });
@@ -279,6 +295,92 @@ mod tests {
     }
 
     #[test]
+    fn test_nonce_reused_after_ttl_is_accepted_without_sweep() {
+        let config = ReplayProtectionConfig {
+            enabled: true,
+            cache_size: 100,
+            nonce_ttl_secs: 1,
+        };
+        let cache = NonceCache::new(config);
+
+        assert!(cache.check_and_add("nonce-ttl"));
+        // Block the periodic sweep so only the duplicate check can see the
+        // expiry, then age the entry past its 1s TTL.
+        cache.last_swept_at.store(u64::MAX, Ordering::Relaxed);
+        cache.cache.get_mut("nonce-ttl").unwrap().timestamp -= 1;
+
+        assert!(cache.check_and_add("nonce-ttl"));
+        // The reuse refreshed the entry, so an immediate replay is rejected.
+        assert!(!cache.check_and_add("nonce-ttl"));
+    }
+
+    #[test]
+    fn test_nonce_within_ttl_is_still_rejected() {
+        let config = ReplayProtectionConfig {
+            enabled: true,
+            cache_size: 100,
+            nonce_ttl_secs: 1,
+        };
+        let cache = NonceCache::new(config);
+
+        assert!(cache.check_and_add("nonce-live"));
+        cache.last_swept_at.store(u64::MAX, Ordering::Relaxed);
+        // Keep the entry inside its TTL even if a second boundary passes
+        // between the two calls.
+        cache.cache.get_mut("nonce-live").unwrap().timestamp += 1;
+
+        assert!(!cache.check_and_add("nonce-live"));
+    }
+
+    #[test]
+    fn test_concurrent_replays_of_one_nonce_accept_exactly_one() {
+        const THREADS: usize = 32;
+        let cache = NonceCache::new(ReplayProtectionConfig {
+            enabled: true,
+            cache_size: 100,
+            nonce_ttl_secs: 3600,
+        });
+        let barrier = std::sync::Barrier::new(THREADS);
+        let accepted = AtomicU64::new(0);
+
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                scope.spawn(|| {
+                    barrier.wait();
+                    if cache.check_and_add("nonce-race") {
+                        accepted.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.cache.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_tasks_replaying_one_nonce_accept_exactly_one() {
+        const TASKS: usize = 32;
+        let cache = NonceCache::new(ReplayProtectionConfig {
+            enabled: true,
+            cache_size: 100,
+            nonce_ttl_secs: 3600,
+        });
+
+        let handles: Vec<_> = (0..TASKS)
+            .map(|_| {
+                let cache = cache.clone();
+                tokio::spawn(async move { cache.check_and_add("nonce-task-race") })
+            })
+            .collect();
+
+        let mut accepted = 0;
+        for handle in handles {
+            if handle.await.unwrap() {
+                accepted += 1;
+            }
+        }
+        assert_eq!(accepted, 1);
     fn test_nonce_cache_evicts_oldest_in_insertion_order() {
         let config = ReplayProtectionConfig {
             enabled: true,
