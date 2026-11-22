@@ -315,7 +315,6 @@ stellar contract invoke --id <CONTRACT_ID> --network testnet -- total_routed
 | Flag | Env Var | Default | Description |
 |------|---------|---------|-------------|
 | `--rpc-url` | `ROUTER_RPC_URL` | `https://soroban-testnet.stellar.org` | Soroban RPC endpoint |
-| `--network-passphrase` | `ROUTER_NETWORK_PASSPHRASE` | `Test SDF Network ; September 2015` | Stellar network passphrase |
 | `--core-contract-id` | `ROUTER_CORE_CONTRACT_ID` | `` | router-core contract ID |
 | `--middleware-contract-id` | `ROUTER_MIDDLEWARE_CONTRACT_ID` | `` | router-middleware contract ID |
 | `--registry-contract-id` | `ROUTER_REGISTRY_CONTRACT_ID` | `` | router-registry contract ID |

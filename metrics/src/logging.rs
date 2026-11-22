@@ -4,7 +4,8 @@
 //! - JSON format (machine-readable, no sensitive data)
 //! - Timestamps (RFC 3339)
 //! - Log levels controlled via `RUST_LOG` env var
-//! - Request-ID propagation via [`RequestId`] span field
+//! - Request-ID propagation via the `request_id` span field set by
+//!   `server::request_id_middleware`, using IDs from [`new_request_id`]
 
 use anyhow::Result;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};

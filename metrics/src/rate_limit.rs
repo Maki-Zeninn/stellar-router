@@ -1,6 +1,13 @@
-//! Token-bucket rate limiter middleware.
+//! Fixed-window rate limiter middleware.
 //!
-//! Limits requests per IP address. The client cannot influence its own
+//! Limits requests per IP address with a fixed-window counter: each key may
+//! make up to `max_requests` requests per `window`, and the counter resets to
+//! zero once `window` has elapsed since the window started. Because the
+//! windows are fixed rather than sliding, a client can send up to
+//! `2 * max_requests` requests in a short burst straddling a window boundary
+//! (the end of one window plus the start of the next).
+//!
+//! The client cannot influence its own
 //! bucket key: an unauthenticated, client-supplied override (e.g. a header)
 //! would let an attacker pick a fresh key per request and dodge the limit
 //! entirely, and would also let them evict every other client's bucket
@@ -36,7 +43,9 @@ use tracing::warn;
 pub struct RateLimitConfig {
     /// Maximum requests allowed per window.
     pub max_requests: u32,
-    /// Duration of the sliding window.
+    /// Duration of each fixed window. The request count resets once this much
+    /// time has passed since the window started, so up to `2 * max_requests`
+    /// requests can land in a short burst across a window boundary.
     pub window: Duration,
     /// Maximum number of tracked buckets to retain in memory.
     pub max_buckets: usize,

@@ -48,6 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- `--network-passphrase` flag and `ROUTER_NETWORK_PASSPHRASE` environment variable. They were
+  parsed but never used by the exporter; setting them had no effect.
+
 ### Planned
 - Support for custom metric labels via configuration
 - Support for scraping `router-access` contract metrics (role counts, blacklist size)

@@ -78,11 +78,6 @@ Options:
       [env: ROUTER_RPC_URL]
       [default: https://soroban-testnet.stellar.org]
 
-  --network-passphrase <PASSPHRASE>
-      Stellar network passphrase (used to decode XDR correctly)
-      [env: ROUTER_NETWORK_PASSPHRASE]
-      [default: Test SDF Network ; September 2015]
-
   --core-contract-id <CONTRACT_ID>
       Contract ID of the deployed router-core contract
       [env: ROUTER_CORE_CONTRACT_ID]
@@ -149,7 +144,6 @@ export ROUTER_LISTEN="0.0.0.0:9090"
 
 ```bash
 export ROUTER_RPC_URL="https://soroban-mainnet.stellar.org"
-export ROUTER_NETWORK_PASSPHRASE="Public Global Stellar Network ; September 2015"
 export ROUTER_CORE_CONTRACT_ID="CBGTG...YOUR_CONTRACT_ID"
 export ROUTER_MIDDLEWARE_CONTRACT_ID="CBGTG...YOUR_CONTRACT_ID"
 export ROUTER_QUOTE_CONTRACT_ID="CBGTG...YOUR_CONTRACT_ID"

@@ -12,6 +12,19 @@ const SURGE_THRESHOLD_BPS: u32 = 8_000;
 const SURGE_MULTIPLIER: u32 = 200;
 const NORMAL_MULTIPLIER: u32 = 100;
 
+/// Applies the surge multiplier to compute `total_fee`.
+///
+/// Uses saturating arithmetic (Issue #1606): `resource_fee` is parsed from
+/// the RPC's `minResourceFee` string or derived from the client-controlled
+/// `amount`, so `(base_fee + resource_fee) * multiplier` can overflow `i64`
+/// — a panic in debug builds and a negative fee in release builds.
+fn total_fee_with_surge(base_fee: i64, resource_fee: i64, surge_multiplier: u32) -> i64 {
+    base_fee
+        .saturating_add(resource_fee)
+        .saturating_mul(surge_multiplier as i64)
+        / 100
+}
+
 #[derive(Debug, Clone)]
 pub struct SorobanRpcClient {
     pub rpc_url: String,
@@ -134,7 +147,9 @@ impl SorobanRpcClient {
             Ok(result) => {
                 let would_succeed = result.error.is_none();
                 let (resource_fee, fee_estimated) = match result.min_resource_fee.parse::<i64>() {
-                    Ok(v) => (v, true),
+                    // Clamp negatives: a bogus negative minResourceFee from
+                    // the RPC must not yield a negative total (Issue #1606).
+                    Ok(v) => (v.max(0), true),
                     Err(_) => {
                         warn!(
                             raw = %result.min_resource_fee,
@@ -149,7 +164,7 @@ impl SorobanRpcClient {
                 } else {
                     (NORMAL_MULTIPLIER, false)
                 };
-                let total_fee = (base_fee + resource_fee) * surge_multiplier as i64 / 100;
+                let total_fee = total_fee_with_surge(base_fee, resource_fee, surge_multiplier);
                 let diagnostics = Self::format_events(&result.events);
                 Ok(FeeBreakdown {
                     base_fee,
@@ -456,7 +471,7 @@ impl SorobanRpcClient {
         } else {
             (NORMAL_MULTIPLIER, false)
         };
-        let total_fee = (base_fee + resource_fee) * surge_multiplier as i64 / 100;
+        let total_fee = total_fee_with_surge(base_fee, resource_fee, surge_multiplier);
         FeeBreakdown {
             base_fee,
             resource_fee,
@@ -574,6 +589,33 @@ mod tests {
         // amount / 1_000 = 0, which is below the 100 floor
         let result = SorobanRpcClient::heuristic_estimate(50, 0);
         assert_eq!(result.resource_fee, 100);
+    }
+
+    #[test]
+    fn total_fee_with_surge_saturates_instead_of_overflowing() {
+        // Issue #1606: (base_fee + i64::MAX) * 200 overflows i64. It must
+        // saturate to a non-negative value, not panic (debug) or wrap
+        // negative (release).
+        let total = total_fee_with_surge(BASE_FEE, i64::MAX, SURGE_MULTIPLIER);
+        assert!(
+            total >= 0,
+            "saturated total_fee must not be negative, got {total}"
+        );
+    }
+
+    #[test]
+    fn heuristic_estimate_i64_max_amount_at_surge_does_not_panic() {
+        // Issue #1606 acceptance: amount = i64::MAX with network_load_bps =
+        // 10000 (surge) must return a saturated, non-negative fee.
+        let result = SorobanRpcClient::heuristic_estimate(i64::MAX, 10_000);
+        assert!(result.high_load);
+        assert_eq!(result.surge_multiplier, SURGE_MULTIPLIER);
+        assert!(
+            result.total_fee >= 0,
+            "total_fee must not be negative, got {}",
+            result.total_fee
+        );
+        assert!(result.resource_fee >= 0);
     }
 
     #[test]
