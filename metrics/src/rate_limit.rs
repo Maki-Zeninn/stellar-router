@@ -85,20 +85,19 @@ impl RateLimiter {
     pub fn check(&self, key: &str) -> bool {
         let now = Instant::now();
         let key_owned = key.to_string();
-        let inserted = self.buckets.get(&key_owned).is_none();
+        let mut inserted = false;
 
-        if inserted {
-            self.buckets.insert(
-                key_owned.clone(),
+        let should_allow = {
+            // The entry API holds the shard lock from lookup through update, so
+            // two concurrent first requests for a key cannot both create the
+            // bucket (the second would reset `count`) or both queue it below.
+            let mut entry = self.buckets.entry(key_owned.clone()).or_insert_with(|| {
+                inserted = true;
                 BucketEntry {
                     count: 0,
                     window_start: now,
-                },
-            );
-        }
-
-        let should_allow = {
-            let mut entry = self.buckets.get_mut(&key_owned).unwrap();
+                }
+            });
 
             // Reset window if expired
             if now.duration_since(entry.window_start) >= self.config.window {
@@ -264,6 +263,34 @@ mod tests {
         assert!(rl.check("192.168.1.1"));
         assert!(rl.check("192.168.1.2")); // different key — should pass
         assert!(!rl.check("192.168.1.1")); // same key — should fail
+    }
+
+    #[test]
+    fn concurrent_first_requests_create_one_bucket() {
+        const THREADS: u32 = 16;
+        let rl = limiter(1_000, 60);
+
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                scope.spawn(|| {
+                    rl.check("203.0.113.50");
+                });
+            }
+        });
+
+        let queued = rl
+            .eviction_order
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|k| k.as_str() == "203.0.113.50")
+            .count();
+        assert_eq!(queued, 1, "key must be queued for eviction exactly once");
+        assert_eq!(
+            rl.buckets.get("203.0.113.50").unwrap().count,
+            THREADS,
+            "every request must be counted"
+        );
     }
 
     #[test]
