@@ -148,36 +148,7 @@ async fn main() -> Result<()> {
         args.rpc_timeout_secs,
     );
 
-    let cors = build_cors_layer(&args.cors_origins);
-
-    let docs = SwaggerUi::new("/docs/{tail:.*}").url("/openapi.json", ApiDoc::openapi());
-
-    let app = Router::new()
-        .route("/health", get(handlers::health))
-        .route("/ready", get(handlers::ready))
-        .route("/simulate", post(handlers::simulate))
-        .route("/routes", get(handlers::list_routes))
-        .route("/routes/:name", get(handlers::get_route))
-        .route("/ws", get(websocket::ws_handler))
-        .route("/openapi.json", get(openapi_json))
-        .merge(docs)
-        // Layers are applied outermost-last: the last `.layer()` call wraps
-        // everything added before it, so it sees every request first and
-        // every response last. `rate_limit_middleware` must be innermost
-        // (added first here) so that `request_id_middleware` and `cors`
-        // wrap it — otherwise a 429 it returns bypasses CORS entirely
-        // (browsers see an opaque CORS failure instead of the 429 body) and
-        // never gets an `x-request-id`, and CORS preflight `OPTIONS`
-        // requests get counted against the limit before `cors` can answer
-        // them.
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            rate_limit::rate_limit_middleware,
-        ))
-        .layer(DefaultBodyLimit::max(1024 * 1024))
-        .layer(cors)
-        .layer(middleware::from_fn(request_id_middleware))
-        .with_state(state);
+    let app = build_app(state, &args.cors_origins);
 
     let addr: SocketAddr = args
         .listen
@@ -218,6 +189,44 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Builds the production router shared by `main()` and the tests (Issue
+/// #1608): every route, Swagger UI, rate limiting, the 1 MiB body limit,
+/// CORS and the request-id middleware, in the canonical layer order.
+/// Having tests call this means drift in route registration or layer order
+/// shows up as a test failure instead of a production bug.
+pub(crate) fn build_app(state: AppState, cors_origins: &[String]) -> Router {
+    let cors = build_cors_layer(cors_origins);
+
+    let docs = SwaggerUi::new("/docs/{tail:.*}").url("/openapi.json", ApiDoc::openapi());
+
+    Router::new()
+        .route("/health", get(handlers::health))
+        .route("/ready", get(handlers::ready))
+        .route("/simulate", post(handlers::simulate))
+        .route("/routes", get(handlers::list_routes))
+        .route("/routes/:name", get(handlers::get_route))
+        .route("/ws", get(websocket::ws_handler))
+        .route("/openapi.json", get(openapi_json))
+        .merge(docs)
+        // Layers are applied outermost-last: the last `.layer()` call wraps
+        // everything added before it, so it sees every request first and
+        // every response last. `rate_limit_middleware` must be innermost
+        // (added first here) so that `request_id_middleware` and `cors`
+        // wrap it — otherwise a 429 it returns bypasses CORS entirely
+        // (browsers see an opaque CORS failure instead of the 429 body) and
+        // never gets an `x-request-id`, and CORS preflight `OPTIONS`
+        // requests get counted against the limit before `cors` can answer
+        // them.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::rate_limit_middleware,
+        ))
+        .layer(DefaultBodyLimit::max(1024 * 1024))
+        .layer(cors)
+        .layer(middleware::from_fn(request_id_middleware))
+        .with_state(state)
 }
 
 /// Resolves only after `shutdown_started` has fired *and* `drain_timeout`

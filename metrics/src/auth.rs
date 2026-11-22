@@ -10,7 +10,7 @@
 
 use axum::{
     extract::{Request, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -92,11 +92,14 @@ fn constant_time_equals(lhs: &str, rhs: &str) -> bool {
 
 /// Extract API key from request headers.
 fn extract_api_key(headers: &HeaderMap) -> Option<String> {
-    // Try Authorization: Bearer <key>
+    // Try Authorization: Bearer <key>. The scheme is case-insensitive
+    // (RFC 7235 §2.1), so `bearer` and `BEARER` are accepted too.
     if let Some(auth_header) = headers.get("authorization") {
         if let Ok(auth_str) = auth_header.to_str() {
-            if let Some(key) = auth_str.strip_prefix("Bearer ") {
-                return Some(key.to_string());
+            if let Some((scheme, key)) = auth_str.split_once(' ') {
+                if scheme.eq_ignore_ascii_case("bearer") {
+                    return Some(key.to_string());
+                }
             }
         }
     }
@@ -127,7 +130,8 @@ impl IntoResponse for AuthError {
             AuthError::InvalidKey => (StatusCode::UNAUTHORIZED, "Invalid API key"),
         };
 
-        (status, message).into_response()
+        // RFC 7235 §3.1: a 401 response must carry a WWW-Authenticate challenge.
+        (status, [(header::WWW_AUTHENTICATE, "Bearer")], message).into_response()
     }
 }
 
@@ -185,6 +189,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().get(header::WWW_AUTHENTICATE).unwrap(),
+            "Bearer"
+        );
         assert_eq!(body_string(response).await, "Missing API key");
     }
 
@@ -207,7 +215,34 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().get(header::WWW_AUTHENTICATE).unwrap(),
+            "Bearer"
+        );
         assert_eq!(body_string(response).await, "Invalid API key");
+    }
+
+    #[tokio::test]
+    async fn test_middleware_accepts_case_insensitive_bearer_scheme() {
+        for scheme in ["bearer", "BEARER", "BeArEr"] {
+            let app = test_router(AuthConfig {
+                enabled: true,
+                api_key: Some("secret".to_string()),
+            });
+
+            let response = app
+                .oneshot(
+                    HttpRequest::builder()
+                        .uri("/")
+                        .header("authorization", format!("{scheme} secret"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK, "scheme {scheme} must authenticate");
+        }
     }
 
     #[tokio::test]
@@ -285,6 +320,34 @@ mod tests {
 
         let key = extract_api_key(&headers);
         assert_eq!(key, Some("test-key-123".to_string()));
+    }
+
+    #[test]
+    fn test_extract_bearer_token_scheme_is_case_insensitive() {
+        for value in ["bearer test-key-123", "BEARER test-key-123"] {
+            let mut headers = HeaderMap::new();
+            headers.insert("authorization", value.parse().unwrap());
+            assert_eq!(extract_api_key(&headers), Some("test-key-123".to_string()));
+        }
+    }
+
+    #[test]
+    fn test_extract_ignores_non_bearer_scheme() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Basic dXNlcjpwYXNz".parse().unwrap());
+        assert_eq!(extract_api_key(&headers), None);
+    }
+
+    #[test]
+    fn test_auth_error_responses_include_www_authenticate() {
+        for error in [AuthError::MissingKey, AuthError::InvalidKey] {
+            let response = error.into_response();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                response.headers().get(header::WWW_AUTHENTICATE).unwrap(),
+                "Bearer"
+            );
+        }
     }
 
     #[test]

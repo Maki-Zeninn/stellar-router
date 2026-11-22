@@ -1,6 +1,13 @@
-//! Token-bucket rate limiter middleware.
+//! Fixed-window rate limiter middleware.
 //!
-//! Limits requests per IP address. The client cannot influence its own
+//! Limits requests per IP address with a fixed-window counter: each key may
+//! make up to `max_requests` requests per `window`, and the counter resets to
+//! zero once `window` has elapsed since the window started. Because the
+//! windows are fixed rather than sliding, a client can send up to
+//! `2 * max_requests` requests in a short burst straddling a window boundary
+//! (the end of one window plus the start of the next).
+//!
+//! The client cannot influence its own
 //! bucket key: an unauthenticated, client-supplied override (e.g. a header)
 //! would let an attacker pick a fresh key per request and dodge the limit
 //! entirely, and would also let them evict every other client's bucket
@@ -36,7 +43,9 @@ use tracing::warn;
 pub struct RateLimitConfig {
     /// Maximum requests allowed per window.
     pub max_requests: u32,
-    /// Duration of the sliding window.
+    /// Duration of each fixed window. The request count resets once this much
+    /// time has passed since the window started, so up to `2 * max_requests`
+    /// requests can land in a short burst across a window boundary.
     pub window: Duration,
     /// Maximum number of tracked buckets to retain in memory.
     pub max_buckets: usize,
@@ -85,20 +94,19 @@ impl RateLimiter {
     pub fn check(&self, key: &str) -> bool {
         let now = Instant::now();
         let key_owned = key.to_string();
-        let inserted = self.buckets.get(&key_owned).is_none();
+        let mut inserted = false;
 
-        if inserted {
-            self.buckets.insert(
-                key_owned.clone(),
+        let should_allow = {
+            // The entry API holds the shard lock from lookup through update, so
+            // two concurrent first requests for a key cannot both create the
+            // bucket (the second would reset `count`) or both queue it below.
+            let mut entry = self.buckets.entry(key_owned.clone()).or_insert_with(|| {
+                inserted = true;
                 BucketEntry {
                     count: 0,
                     window_start: now,
-                },
-            );
-        }
-
-        let should_allow = {
-            let mut entry = self.buckets.get_mut(&key_owned).unwrap();
+                }
+            });
 
             // Reset window if expired
             if now.duration_since(entry.window_start) >= self.config.window {
@@ -264,6 +272,34 @@ mod tests {
         assert!(rl.check("192.168.1.1"));
         assert!(rl.check("192.168.1.2")); // different key — should pass
         assert!(!rl.check("192.168.1.1")); // same key — should fail
+    }
+
+    #[test]
+    fn concurrent_first_requests_create_one_bucket() {
+        const THREADS: u32 = 16;
+        let rl = limiter(1_000, 60);
+
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                scope.spawn(|| {
+                    rl.check("203.0.113.50");
+                });
+            }
+        });
+
+        let queued = rl
+            .eviction_order
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|k| k.as_str() == "203.0.113.50")
+            .count();
+        assert_eq!(queued, 1, "key must be queued for eviction exactly once");
+        assert_eq!(
+            rl.buckets.get("203.0.113.50").unwrap().count,
+            THREADS,
+            "every request must be counted"
+        );
     }
 
     #[test]

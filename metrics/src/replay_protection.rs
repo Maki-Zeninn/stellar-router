@@ -13,10 +13,12 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
+use std::collections::VecDeque;
 use std::env;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
@@ -68,6 +70,9 @@ pub struct NonceCache {
     cache: Arc<DashMap<String, NonceEntry>>,
     config: ReplayProtectionConfig,
     last_swept_at: Arc<AtomicU64>,
+    /// Nonces in insertion order with their timestamps, so the oldest entry
+    /// can be evicted without scanning the whole map.
+    eviction_order: Arc<Mutex<VecDeque<(String, u64)>>>,
 }
 
 impl NonceCache {
@@ -77,6 +82,7 @@ impl NonceCache {
             cache: Arc::new(DashMap::new()),
             config,
             last_swept_at: Arc::new(AtomicU64::new(0)),
+            eviction_order: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -90,21 +96,40 @@ impl NonceCache {
         // the hot path pays for a full DashMap scan/lock of every shard.
         self.maybe_cleanup_expired(now);
 
-        // Check if nonce already exists
-        if self.cache.contains_key(nonce) {
-            debug!("Replay attack detected: nonce {} already seen", nonce);
-            return false;
-        }
-
         // If still at capacity after TTL cleanup, evict the oldest entry to
-        // bound memory use rather than rejecting a legitimate nonce.
-        if self.cache.len() >= self.config.cache_size {
+        // bound memory use rather than rejecting a legitimate nonce. This runs
+        // before taking the entry below: `evict_oldest` scans every shard and
+        // must not run while that entry's shard lock is held.
+        if self.cache.len() >= self.config.cache_size && !self.cache.contains_key(nonce) {
             self.evict_oldest();
         }
 
+        // Check and insert under one shard lock, so concurrent requests with
+        // the same nonce cannot both see it as new. An entry whose TTL has
+        // elapsed is treated as absent (and overwritten) even if no sweep has
+        // removed it yet, so the effective lifetime is exactly the TTL.
+        let ttl = self.config.nonce_ttl_secs;
+        match self.cache.entry(nonce.to_string()) {
+            Entry::Occupied(mut occupied) => {
+                if now.saturating_sub(occupied.get().timestamp) < ttl {
+                    debug!("Replay attack detected: nonce {} already seen", nonce);
+                    return false;
+                }
+                occupied.insert(NonceEntry { timestamp: now });
+                true
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(NonceEntry { timestamp: now });
+                true
+            }
+        }
         // Add nonce to cache
         self.cache
             .insert(nonce.to_string(), NonceEntry { timestamp: now });
+        self.eviction_order
+            .lock()
+            .unwrap()
+            .push_back((nonce.to_string(), now));
 
         true
     }
@@ -132,17 +157,33 @@ impl NonceCache {
         let ttl = self.config.nonce_ttl_secs;
         self.cache
             .retain(|_, entry| now.saturating_sub(entry.timestamp) < ttl);
+
+        // The queue is in insertion (timestamp) order, so expired nonces sit at
+        // the front; drop them so the queue doesn't outgrow the map.
+        let mut order = self.eviction_order.lock().unwrap();
+        while let Some((_, timestamp)) = order.front() {
+            if now.saturating_sub(*timestamp) < ttl {
+                break;
+            }
+            order.pop_front();
+        }
     }
 
     /// Evict the single oldest nonce to make room for a new entry.
+    ///
+    /// Pops from the front of the insertion-order queue, so eviction is O(1)
+    /// amortised. Queue entries whose nonce was already removed (or re-added
+    /// later with a newer timestamp) are skipped.
     fn evict_oldest(&self) {
-        if let Some(oldest_key) = self
-            .cache
-            .iter()
-            .min_by_key(|entry| entry.value().timestamp)
-            .map(|entry| entry.key().clone())
-        {
-            self.cache.remove(&oldest_key);
+        let mut order = self.eviction_order.lock().unwrap();
+        while let Some((key, timestamp)) = order.pop_front() {
+            if self
+                .cache
+                .remove_if(&key, |_, entry| entry.timestamp == timestamp)
+                .is_some()
+            {
+                break;
+            }
         }
     }
 }
@@ -250,6 +291,134 @@ mod tests {
         // Cache is now full (size 2). check_and_add evicts the oldest entry
         // rather than rejecting a legitimate new nonce (see evict_oldest).
         assert!(cache.check_and_add("nonce-3"));
+        assert_eq!(cache.cache.len(), 2);
+    }
+
+    #[test]
+    fn test_nonce_reused_after_ttl_is_accepted_without_sweep() {
+        let config = ReplayProtectionConfig {
+            enabled: true,
+            cache_size: 100,
+            nonce_ttl_secs: 1,
+        };
+        let cache = NonceCache::new(config);
+
+        assert!(cache.check_and_add("nonce-ttl"));
+        // Block the periodic sweep so only the duplicate check can see the
+        // expiry, then age the entry past its 1s TTL.
+        cache.last_swept_at.store(u64::MAX, Ordering::Relaxed);
+        cache.cache.get_mut("nonce-ttl").unwrap().timestamp -= 1;
+
+        assert!(cache.check_and_add("nonce-ttl"));
+        // The reuse refreshed the entry, so an immediate replay is rejected.
+        assert!(!cache.check_and_add("nonce-ttl"));
+    }
+
+    #[test]
+    fn test_nonce_within_ttl_is_still_rejected() {
+        let config = ReplayProtectionConfig {
+            enabled: true,
+            cache_size: 100,
+            nonce_ttl_secs: 1,
+        };
+        let cache = NonceCache::new(config);
+
+        assert!(cache.check_and_add("nonce-live"));
+        cache.last_swept_at.store(u64::MAX, Ordering::Relaxed);
+        // Keep the entry inside its TTL even if a second boundary passes
+        // between the two calls.
+        cache.cache.get_mut("nonce-live").unwrap().timestamp += 1;
+
+        assert!(!cache.check_and_add("nonce-live"));
+    }
+
+    #[test]
+    fn test_concurrent_replays_of_one_nonce_accept_exactly_one() {
+        const THREADS: usize = 32;
+        let cache = NonceCache::new(ReplayProtectionConfig {
+            enabled: true,
+            cache_size: 100,
+            nonce_ttl_secs: 3600,
+        });
+        let barrier = std::sync::Barrier::new(THREADS);
+        let accepted = AtomicU64::new(0);
+
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                scope.spawn(|| {
+                    barrier.wait();
+                    if cache.check_and_add("nonce-race") {
+                        accepted.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.cache.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_tasks_replaying_one_nonce_accept_exactly_one() {
+        const TASKS: usize = 32;
+        let cache = NonceCache::new(ReplayProtectionConfig {
+            enabled: true,
+            cache_size: 100,
+            nonce_ttl_secs: 3600,
+        });
+
+        let handles: Vec<_> = (0..TASKS)
+            .map(|_| {
+                let cache = cache.clone();
+                tokio::spawn(async move { cache.check_and_add("nonce-task-race") })
+            })
+            .collect();
+
+        let mut accepted = 0;
+        for handle in handles {
+            if handle.await.unwrap() {
+                accepted += 1;
+            }
+        }
+        assert_eq!(accepted, 1);
+    fn test_nonce_cache_evicts_oldest_in_insertion_order() {
+        let config = ReplayProtectionConfig {
+            enabled: true,
+            cache_size: 2,
+            nonce_ttl_secs: 3600,
+        };
+        let cache = NonceCache::new(config);
+
+        assert!(cache.check_and_add("nonce-1"));
+        assert!(cache.check_and_add("nonce-2"));
+        assert!(cache.check_and_add("nonce-3"));
+
+        assert!(!cache.cache.contains_key("nonce-1"), "oldest nonce is evicted");
+        assert!(cache.cache.contains_key("nonce-2"));
+        assert!(cache.cache.contains_key("nonce-3"));
+        assert_eq!(cache.eviction_order.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_nonce_cache_eviction_skips_entries_already_removed() {
+        let config = ReplayProtectionConfig {
+            enabled: true,
+            cache_size: 2,
+            nonce_ttl_secs: 3600,
+        };
+        let cache = NonceCache::new(config);
+
+        assert!(cache.check_and_add("nonce-1"));
+        assert!(cache.check_and_add("nonce-2"));
+        // Simulate nonce-1 having been removed by TTL cleanup.
+        cache.cache.remove("nonce-1");
+        assert!(cache.check_and_add("nonce-3"));
+        assert!(cache.check_and_add("nonce-4"));
+
+        // The stale queue entry for nonce-1 is skipped; nonce-2 is evicted.
+        assert!(!cache.cache.contains_key("nonce-2"));
+        assert!(cache.cache.contains_key("nonce-3"));
+        assert!(cache.cache.contains_key("nonce-4"));
         assert_eq!(cache.cache.len(), 2);
     }
 

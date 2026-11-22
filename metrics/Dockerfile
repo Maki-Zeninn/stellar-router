@@ -1,5 +1,5 @@
 # Multi-stage build for minimal final image
-FROM rust:1.88-slim AS builder
+FROM rust:1.88.0-slim AS builder
 
 # curl is required by utoipa-swagger-ui's build script, which downloads the
 # Swagger UI release archive at compile time.

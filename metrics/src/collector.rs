@@ -19,6 +19,8 @@
 //! Each contract scrape is timed and any error increments the
 //! `router_scrape_errors_total` counter for that contract label.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -27,18 +29,24 @@ use tracing::{error, info, warn};
 
 use crate::cli::Args;
 use crate::metrics::RouterMetrics;
-use crate::rpc::{RpcClient, SorobanRpcClient};
+use crate::rpc::{ContractEvent, RpcClient, SorobanRpcClient};
 
 /// Drives the periodic scrape loop.
 #[derive(Clone)]
 pub struct Collector {
     args: Args,
     metrics: RouterMetrics,
+    /// Cursor state for quote events, keyed by (contract_id, topic).
+    quote_cursors: Arc<Mutex<HashMap<(String, String), String>>>,
 }
 
 impl Collector {
     pub fn new(args: Args, metrics: RouterMetrics) -> Self {
-        Self { args, metrics }
+        Self {
+            args,
+            metrics,
+            quote_cursors: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Run forever, scraping on the configured interval.
@@ -325,22 +333,26 @@ impl Collector {
         let start = Instant::now();
         info!(contract_id, "scraping router-quote");
 
-        let quote_events = client
-            .get_events(contract_id, &["quote_calculated"], 0)
+        let quote_events = self
+            .fetch_all_events(client, contract_id, "quote_calculated")
             .await?;
-        let fee_events = client
-            .get_events(contract_id, &["fee_estimated"], 0)
+        let fee_events = self
+            .fetch_all_events(client, contract_id, "fee_estimated")
             .await?;
 
-        self.metrics
-            .quote_total_generated
-            .with_label_values(&[contract_id])
-            .set(quote_events.len() as f64);
+        if !quote_events.is_empty() {
+            self.metrics
+                .quote_total_generated
+                .with_label_values(&[contract_id])
+                .inc_by(quote_events.len() as f64);
+        }
 
-        self.metrics
-            .quote_total_fee_estimated
-            .with_label_values(&[contract_id])
-            .set(fee_events.len() as f64);
+        if !fee_events.is_empty() {
+            self.metrics
+                .quote_total_fee_estimated
+                .with_label_values(&[contract_id])
+                .inc_by(fee_events.len() as f64);
+        }
 
         let elapsed = start.elapsed().as_secs_f64();
         self.metrics
@@ -356,6 +368,52 @@ impl Collector {
             "quote scrape done"
         );
         Ok(())
+    }
+
+    /// Fetch all events for a given topic, following pagination until the page is empty.
+    /// Maintains a cursor per (contract, topic) to only fetch new events each cycle.
+    async fn fetch_all_events(
+        &self,
+        client: &dyn RpcClient,
+        contract_id: &str,
+        topic: &str,
+    ) -> Result<Vec<ContractEvent>> {
+        let key = (contract_id.to_string(), topic.to_string());
+        let mut cursor = {
+            let cursors = self.quote_cursors.lock().unwrap();
+            cursors.get(&key).cloned()
+        };
+
+        let mut all_events = Vec::new();
+        loop {
+            let (events, next_cursor) = client
+                .get_events(contract_id, &[topic], cursor.as_deref())
+                .await?;
+
+            if events.is_empty() {
+                break;
+            }
+
+            all_events.extend(events.clone());
+
+            let page_cursor = next_cursor
+                .or_else(|| events.last().map(|e| e.id.clone()))
+                .filter(|c| !c.is_empty());
+
+            if page_cursor.is_none() || page_cursor.as_ref() == cursor.as_ref() {
+                cursor = page_cursor;
+                break;
+            }
+
+            cursor = page_cursor;
+        }
+
+        if let Some(ref c) = cursor {
+            let mut cursors = self.quote_cursors.lock().unwrap();
+            cursors.insert(key, c.clone());
+        }
+
+        Ok(all_events)
     }
 
     // ── router-execution ──────────────────────────────────────────────────────
@@ -385,9 +443,11 @@ impl Collector {
         // Parse each entry. The value XDR is a base64-encoded ScVal::U64.
         // We extract the numeric value from the JSON representation returned
         // by the RPC server (which decodes XDR to JSON automatically).
-        let total_executions = extract_u64_from_entry(&entries, "TotalExecutions").unwrap_or(0);
-        let total_errors = extract_u64_from_entry(&entries, "TotalErrors").unwrap_or(0);
-        let max_retries = extract_u64_from_entry(&entries, "MaxRetries").unwrap_or(0);
+        let total_executions =
+            extract_u64_from_entry(&entries, contract_id, "TotalExecutions").unwrap_or(0);
+        let total_errors =
+            extract_u64_from_entry(&entries, contract_id, "TotalErrors").unwrap_or(0);
+        let max_retries = extract_u64_from_entry(&entries, contract_id, "MaxRetries").unwrap_or(0);
 
         self.metrics
             .execution_total_executions
@@ -436,10 +496,16 @@ fn encode_contract_data_key(contract_id: &str, storage_key: &str) -> String {
 /// The RPC server returns entries with a `xdr` field containing base64-encoded
 /// `LedgerEntryData` XDR. In the JSON-decoded representation (used by some RPC
 /// versions) the value is available directly. We try both paths.
-fn extract_u64_from_entry(entries: &[crate::rpc::LedgerEntry], key_name: &str) -> Option<u64> {
+fn extract_u64_from_entry(
+    entries: &[crate::rpc::LedgerEntry],
+    contract_id: &str,
+    key_name: &str,
+) -> Option<u64> {
+    // Match the encoded key exactly: a substring match would let a key such as
+    // `MaxRetriesOverride` satisfy a lookup for `MaxRetries`.
+    let expected_key = encode_contract_data_key(contract_id, key_name);
     for entry in entries {
-        // The key field encodes the storage key name; we match by suffix.
-        if entry.key.ends_with(key_name) || entry.key.contains(key_name) {
+        if entry.key == expected_key {
             // Try to parse the xdr field as a plain u64 (mock / JSON path).
             if let Ok(n) = entry.xdr.parse::<u64>() {
                 return Some(n);
@@ -537,7 +603,6 @@ mod tests {
         let metrics = RouterMetrics::new(&reg).unwrap();
         let args = Args {
             rpc_url: String::new(),
-            network_passphrase: String::new(),
             core_contract_id: core.to_string(),
             middleware_contract_id: middleware.to_string(),
             registry_contract_id: registry_id.to_string(),
@@ -698,8 +763,9 @@ mod tests {
         use crate::rpc::ContractEvent;
         let (collector, metrics) = make_collector_full("", "", "", "QUOTE_ID", "");
 
-        let make_event = |topic: &str| ContractEvent {
+        let make_event = |topic: &str, id: &str| ContractEvent {
             contract_id: "QUOTE_ID".to_string(),
+            id: id.to_string(),
             topic: vec![serde_json::json!(topic)],
             value: serde_json::json!({}),
         };
@@ -709,14 +775,14 @@ mod tests {
                 "QUOTE_ID",
                 "quote_calculated",
                 vec![
-                    make_event("quote_calculated"),
-                    make_event("quote_calculated"),
+                    make_event("quote_calculated", "1"),
+                    make_event("quote_calculated", "2"),
                 ],
             )
             .with_events(
                 "QUOTE_ID",
                 "fee_estimated",
-                vec![make_event("fee_estimated")],
+                vec![make_event("fee_estimated", "3")],
             );
 
         let ok = collector.scrape_all(&mock).await;
@@ -735,6 +801,76 @@ mod tests {
                 .with_label_values(&["QUOTE_ID"])
                 .get(),
             1.0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scrape_quote_accumulates_across_cycles() {
+        use crate::rpc::ContractEvent;
+        let (collector, metrics) = make_collector_full("", "", "", "QUOTE_ID", "");
+
+        let make_event = |topic: &str, id: &str| ContractEvent {
+            contract_id: "QUOTE_ID".to_string(),
+            id: id.to_string(),
+            topic: vec![serde_json::json!(topic)],
+            value: serde_json::json!({}),
+        };
+
+        // Two pages/cycles of events
+        let mock = MockRpcClient::new()
+            .with_event_pages(
+                "QUOTE_ID",
+                "quote_calculated",
+                vec![
+                    vec![make_event("quote_calculated", "1")],
+                    vec![make_event("quote_calculated", "2"), make_event("quote_calculated", "3")],
+                ],
+            )
+            .with_event_pages(
+                "QUOTE_ID",
+                "fee_estimated",
+                vec![
+                    vec![make_event("fee_estimated", "10")],
+                    vec![make_event("fee_estimated", "11")],
+                ],
+            );
+
+        // Cycle 1
+        let ok1 = collector.scrape_all(&mock).await;
+        assert!(ok1);
+
+        assert_eq!(
+            metrics
+                .quote_total_generated
+                .with_label_values(&["QUOTE_ID"])
+                .get(),
+            1.0
+        );
+        assert_eq!(
+            metrics
+                .quote_total_fee_estimated
+                .with_label_values(&["QUOTE_ID"])
+                .get(),
+            1.0
+        );
+
+        // Cycle 2
+        let ok2 = collector.scrape_all(&mock).await;
+        assert!(ok2);
+
+        assert_eq!(
+            metrics
+                .quote_total_generated
+                .with_label_values(&["QUOTE_ID"])
+                .get(),
+            3.0 // 1 + 2
+        );
+        assert_eq!(
+            metrics
+                .quote_total_fee_estimated
+                .with_label_values(&["QUOTE_ID"])
+                .get(),
+            2.0 // 1 + 1
         );
     }
 
@@ -789,6 +925,46 @@ mod tests {
             3.0
         );
     }
+    #[test]
+    fn test_extract_u64_from_entry_matches_key_exactly() {
+        use crate::rpc::LedgerEntry;
+        // `MaxRetries` is a substring of `MaxRetriesOverride`; the longer key
+        // comes first so a loose match would return its value.
+        let entries = vec![
+            LedgerEntry {
+                key: "EXEC_ID:MaxRetriesOverride".to_string(),
+                xdr: "99".to_string(),
+            },
+            LedgerEntry {
+                key: "EXEC_ID:MaxRetries".to_string(),
+                xdr: "3".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            extract_u64_from_entry(&entries, "EXEC_ID", "MaxRetries"),
+            Some(3)
+        );
+        assert_eq!(
+            extract_u64_from_entry(&entries, "EXEC_ID", "MaxRetriesOverride"),
+            Some(99)
+        );
+    }
+
+    #[test]
+    fn test_extract_u64_from_entry_ignores_other_contracts() {
+        use crate::rpc::LedgerEntry;
+        let entries = vec![LedgerEntry {
+            key: "OTHER_ID:MaxRetries".to_string(),
+            xdr: "7".to_string(),
+        }];
+
+        assert_eq!(
+            extract_u64_from_entry(&entries, "EXEC_ID", "MaxRetries"),
+            None
+        );
+    }
+
     #[test]
     fn test_extract_route_paused_true() {
         let val = json!({

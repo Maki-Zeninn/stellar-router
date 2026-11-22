@@ -1,0 +1,9 @@
+# Pinned toolchain shared by CI, Docker (rust:1.88.0-slim) and local builds
+# (Issue #1611). A floating `stable` can change the produced WASM or break the
+# build with no code change here: from Rust 1.82, wasm32-unknown-unknown enables
+# WebAssembly features (e.g. reference-types) by default that older Soroban
+# hosts reject, and soroban-sdk 21 predates the wasm32v1-none target.
+[toolchain]
+channel = "1.88.0"
+targets = ["wasm32-unknown-unknown"]
+components = ["rustfmt", "clippy"]

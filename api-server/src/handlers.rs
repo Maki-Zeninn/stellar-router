@@ -124,6 +124,17 @@ pub async fn simulate(
         ));
     }
 
+    if req.amount < 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_field(
+                ErrorCode::ValidationError,
+                "amount must be a non-negative integer",
+                "amount",
+            )),
+        ));
+    }
+
     info!(target = %req.target, function = %req.function, "simulating transaction");
 
     let tx_id = req.tx_id.clone().filter(|id| !id.is_empty());
