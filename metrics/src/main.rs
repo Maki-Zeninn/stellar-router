@@ -23,8 +23,8 @@
 //! | `router_middleware_circuit_open` | Gauge | `contract`, `route` | 1 if the circuit breaker is open |
 //! | `router_middleware_failure_count` | Gauge | `contract`, `route` | Consecutive failure count |
 //! | `router_registry_total_names` | Gauge | `contract` | Total contract names registered in the registry |
-//! | `router_quote_total_generated` | Gauge | `contract` | Running total of quote_generated events |
-//! | `router_quote_total_fee_estimated` | Gauge | `contract` | Running total of fee_estimated events |
+//! | `router_quote_total_generated` | Counter | `contract` | Running total of quote_generated events |
+//! | `router_quote_total_fee_estimated` | Counter | `contract` | Running total of fee_estimated events |
 //! | `router_execution_total_executions` | Gauge | `contract` | Cumulative executions recorded on-chain |
 //! | `router_execution_total_errors` | Gauge | `contract` | Cumulative execution errors recorded on-chain |
 //! | `router_execution_max_retries` | Gauge | `contract` | Configured maximum retries read from on-chain storage |

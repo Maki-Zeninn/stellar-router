@@ -5,9 +5,10 @@
 
 use anyhow::Result;
 use prometheus::{
-    register_counter_vec_with_registry, register_gauge_vec_with_registry,
-    register_gauge_with_registry, register_histogram_vec_with_registry, CounterVec, Gauge,
-    GaugeVec, HistogramVec, Registry,
+    register_counter_vec_with_registry, register_counter_with_registry,
+    register_gauge_vec_with_registry, register_gauge_with_registry,
+    register_histogram_vec_with_registry, Counter, CounterVec, Gauge, GaugeVec, HistogramVec,
+    Registry,
 };
 
 /// Bucket boundaries (seconds) for the scrape-duration histogram.
@@ -48,10 +49,10 @@ pub struct RouterMetrics {
 
     // ── router-quote ──────────────────────────────────────────────────────────
     /// Running total of `quote_generated` events observed.
-    pub quote_total_generated: GaugeVec,
+    pub quote_total_generated: CounterVec,
 
     /// Running total of `fee_estimated` events observed.
-    pub quote_total_fee_estimated: GaugeVec,
+    pub quote_total_fee_estimated: CounterVec,
 
     // ── router-execution ──────────────────────────────────────────────────────
     /// Cumulative number of executions recorded in on-chain storage.
@@ -135,14 +136,14 @@ impl RouterMetrics {
             registry
         )?;
 
-        let quote_total_generated = register_gauge_vec_with_registry!(
+        let quote_total_generated = register_counter_vec_with_registry!(
             "router_quote_total_generated",
             "Running total of quote_generated events observed from router-quote",
             &["contract"],
             registry
         )?;
 
-        let quote_total_fee_estimated = register_gauge_vec_with_registry!(
+        let quote_total_fee_estimated = register_counter_vec_with_registry!(
             "router_quote_total_fee_estimated",
             "Running total of fee_estimated events observed from router-quote",
             &["contract"],
