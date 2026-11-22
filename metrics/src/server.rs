@@ -133,8 +133,14 @@ async fn request_id_middleware(req: Request<axum::body::Body>, next: Next) -> Re
     tag = "metrics",
     responses(
         (status = 200, description = "Prometheus metrics in text format", content_type = "text/plain; version=0.0.4"),
+        (status = 400, description = "Missing `X-Nonce` header (replay protection)"),
+        (status = 401, description = "Missing or invalid API key"),
+        (status = 409, description = "Duplicate `X-Nonce` (replayed request)"),
+        (status = 429, description = "Rate limit exceeded",
+            headers(("Retry-After" = u64, description = "Seconds until the rate-limit window resets"))),
         (status = 500, description = "Failed to encode metrics"),
     ),
+    security(("api_key" = []), ("bearer" = [])),
 )]
 async fn metrics_handler(State(state): State<AppState>) -> Response {
     let encoder = TextEncoder::new();
@@ -166,6 +172,8 @@ async fn metrics_handler(State(state): State<AppState>) -> Response {
     tag = "health",
     responses(
         (status = 200, description = "Exporter is alive"),
+        (status = 429, description = "Rate limit exceeded",
+            headers(("Retry-After" = u64, description = "Seconds until the rate-limit window resets"))),
     ),
 )]
 async fn health_handler() -> impl IntoResponse {
@@ -174,7 +182,9 @@ async fn health_handler() -> impl IntoResponse {
 
 /// `GET /ready` — readiness probe.
 #[utoipa::path(get, path = "/ready", tag = "health",
-    responses((status = 200, description = "Ready"), (status = 503, description = "Not ready")))]
+    responses((status = 200, description = "Ready"), (status = 503, description = "Not ready"),
+        (status = 429, description = "Rate limit exceeded",
+            headers(("Retry-After" = u64, description = "Seconds until the rate-limit window resets")))))]
 async fn ready_handler(State(state): State<AppState>) -> impl IntoResponse {
     // Readiness is intentionally independent of router_up. A single failing
     // contract must not remove the exporter from service for healthy contracts.
