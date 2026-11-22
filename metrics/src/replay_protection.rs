@@ -14,9 +14,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use dashmap::DashMap;
+use std::collections::VecDeque;
 use std::env;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
@@ -68,6 +69,9 @@ pub struct NonceCache {
     cache: Arc<DashMap<String, NonceEntry>>,
     config: ReplayProtectionConfig,
     last_swept_at: Arc<AtomicU64>,
+    /// Nonces in insertion order with their timestamps, so the oldest entry
+    /// can be evicted without scanning the whole map.
+    eviction_order: Arc<Mutex<VecDeque<(String, u64)>>>,
 }
 
 impl NonceCache {
@@ -77,6 +81,7 @@ impl NonceCache {
             cache: Arc::new(DashMap::new()),
             config,
             last_swept_at: Arc::new(AtomicU64::new(0)),
+            eviction_order: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -105,6 +110,10 @@ impl NonceCache {
         // Add nonce to cache
         self.cache
             .insert(nonce.to_string(), NonceEntry { timestamp: now });
+        self.eviction_order
+            .lock()
+            .unwrap()
+            .push_back((nonce.to_string(), now));
 
         true
     }
@@ -132,17 +141,33 @@ impl NonceCache {
         let ttl = self.config.nonce_ttl_secs;
         self.cache
             .retain(|_, entry| now.saturating_sub(entry.timestamp) < ttl);
+
+        // The queue is in insertion (timestamp) order, so expired nonces sit at
+        // the front; drop them so the queue doesn't outgrow the map.
+        let mut order = self.eviction_order.lock().unwrap();
+        while let Some((_, timestamp)) = order.front() {
+            if now.saturating_sub(*timestamp) < ttl {
+                break;
+            }
+            order.pop_front();
+        }
     }
 
     /// Evict the single oldest nonce to make room for a new entry.
+    ///
+    /// Pops from the front of the insertion-order queue, so eviction is O(1)
+    /// amortised. Queue entries whose nonce was already removed (or re-added
+    /// later with a newer timestamp) are skipped.
     fn evict_oldest(&self) {
-        if let Some(oldest_key) = self
-            .cache
-            .iter()
-            .min_by_key(|entry| entry.value().timestamp)
-            .map(|entry| entry.key().clone())
-        {
-            self.cache.remove(&oldest_key);
+        let mut order = self.eviction_order.lock().unwrap();
+        while let Some((key, timestamp)) = order.pop_front() {
+            if self
+                .cache
+                .remove_if(&key, |_, entry| entry.timestamp == timestamp)
+                .is_some()
+            {
+                break;
+            }
         }
     }
 }
@@ -250,6 +275,48 @@ mod tests {
         // Cache is now full (size 2). check_and_add evicts the oldest entry
         // rather than rejecting a legitimate new nonce (see evict_oldest).
         assert!(cache.check_and_add("nonce-3"));
+        assert_eq!(cache.cache.len(), 2);
+    }
+
+    #[test]
+    fn test_nonce_cache_evicts_oldest_in_insertion_order() {
+        let config = ReplayProtectionConfig {
+            enabled: true,
+            cache_size: 2,
+            nonce_ttl_secs: 3600,
+        };
+        let cache = NonceCache::new(config);
+
+        assert!(cache.check_and_add("nonce-1"));
+        assert!(cache.check_and_add("nonce-2"));
+        assert!(cache.check_and_add("nonce-3"));
+
+        assert!(!cache.cache.contains_key("nonce-1"), "oldest nonce is evicted");
+        assert!(cache.cache.contains_key("nonce-2"));
+        assert!(cache.cache.contains_key("nonce-3"));
+        assert_eq!(cache.eviction_order.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_nonce_cache_eviction_skips_entries_already_removed() {
+        let config = ReplayProtectionConfig {
+            enabled: true,
+            cache_size: 2,
+            nonce_ttl_secs: 3600,
+        };
+        let cache = NonceCache::new(config);
+
+        assert!(cache.check_and_add("nonce-1"));
+        assert!(cache.check_and_add("nonce-2"));
+        // Simulate nonce-1 having been removed by TTL cleanup.
+        cache.cache.remove("nonce-1");
+        assert!(cache.check_and_add("nonce-3"));
+        assert!(cache.check_and_add("nonce-4"));
+
+        // The stale queue entry for nonce-1 is skipped; nonce-2 is evicted.
+        assert!(!cache.cache.contains_key("nonce-2"));
+        assert!(cache.cache.contains_key("nonce-3"));
+        assert!(cache.cache.contains_key("nonce-4"));
         assert_eq!(cache.cache.len(), 2);
     }
 
