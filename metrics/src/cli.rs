@@ -22,16 +22,6 @@ pub struct Args {
     )]
     pub rpc_url: String,
 
-    /// Stellar network passphrase (used to decode XDR correctly).
-    ///
-    /// Defaults to the public testnet passphrase.
-    #[arg(
-        long,
-        env = "ROUTER_NETWORK_PASSPHRASE",
-        default_value = "Test SDF Network ; September 2015"
-    )]
-    pub network_passphrase: String,
-
     /// Contract ID of the deployed `router-core` contract.
     ///
     /// Leave empty to skip scraping this contract.
