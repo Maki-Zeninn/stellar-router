@@ -279,7 +279,7 @@ The exporter calls view functions on each contract via `simulateTransaction`:
 - **router-middleware**: `total_calls()`, `get_configured_routes()`, `circuit_breaker_state(route)` for each route
 - **router-registry**: `get_all_names()` (total count)
 - **router-quote**: `quote_generated` and `fee_estimated` events via `getEvents` RPC
-- **router-execution**: `TotalExecutions`, `TotalErrors`, `MaxRetries` from on-chain storage via `getLedgerEntries`
+- **router-execution**: `stats()` (`TotalExecutions`, `TotalErrors`) and `max_retries()`
 
 Each contract scrape is timed and any error increments the `router_scrape_errors_total` counter.
 
