@@ -8,6 +8,7 @@
 //! - `ROUTER_API_KEY` — API key for authentication (if not set, authentication is disabled)
 //! - `ROUTER_AUTH_ENABLED` — Set to "true" to enable authentication (default: false)
 
+use crate::config::env_bool;
 use axum::{
     extract::{Request, State},
     http::{header, HeaderMap, StatusCode},
@@ -30,11 +31,11 @@ pub struct AuthConfig {
 impl AuthConfig {
     /// Load authentication configuration from environment variables.
     pub fn from_env() -> Self {
-        let enabled = env::var("ROUTER_AUTH_ENABLED")
-            .map(|v| v.to_lowercase() == "true")
-            .unwrap_or(false);
+        let enabled = env_bool("ROUTER_AUTH_ENABLED", false);
 
-        let api_key = env::var("ROUTER_API_KEY").ok();
+        let api_key = env::var("ROUTER_API_KEY")
+            .ok()
+            .filter(|k| !k.trim().is_empty());
 
         if enabled && api_key.is_none() {
             warn!("Authentication enabled but ROUTER_API_KEY not set. Authentication will be disabled.");
@@ -97,7 +98,7 @@ fn extract_api_key(headers: &HeaderMap) -> Option<String> {
     if let Some(auth_header) = headers.get("authorization") {
         if let Ok(auth_str) = auth_header.to_str() {
             if let Some((scheme, key)) = auth_str.split_once(' ') {
-                if scheme.eq_ignore_ascii_case("bearer") {
+                if scheme.eq_ignore_ascii_case("bearer") && !key.is_empty() {
                     return Some(key.to_string());
                 }
             }
@@ -107,7 +108,9 @@ fn extract_api_key(headers: &HeaderMap) -> Option<String> {
     // Try X-API-Key: <key>
     if let Some(api_key_header) = headers.get("x-api-key") {
         if let Ok(key) = api_key_header.to_str() {
-            return Some(key.to_string());
+            if !key.is_empty() {
+                return Some(key.to_string());
+            }
         }
     }
 
@@ -311,6 +314,63 @@ mod tests {
             Some(v) => env::set_var("ROUTER_API_KEY", v),
             None => env::remove_var("ROUTER_API_KEY"),
         }
+    }
+
+    #[test]
+    fn test_from_env_empty_key_falls_back_to_disabled() {
+        let prev_enabled = env::var("ROUTER_AUTH_ENABLED").ok();
+        let prev_key = env::var("ROUTER_API_KEY").ok();
+
+        env::set_var("ROUTER_AUTH_ENABLED", "true");
+        for empty in ["", "   "] {
+            env::set_var("ROUTER_API_KEY", empty);
+
+            let config = AuthConfig::from_env();
+            assert!(!config.enabled);
+            assert!(config.api_key.is_none());
+        }
+
+        match prev_enabled {
+            Some(v) => env::set_var("ROUTER_AUTH_ENABLED", v),
+            None => env::remove_var("ROUTER_AUTH_ENABLED"),
+        }
+        match prev_key {
+            Some(v) => env::set_var("ROUTER_API_KEY", v),
+            None => env::remove_var("ROUTER_API_KEY"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_middleware_rejects_empty_x_api_key() {
+        let app = test_router(AuthConfig {
+            enabled: true,
+            api_key: Some("secret".to_string()),
+        });
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/")
+                    .header("x-api-key", "")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body_string(response).await, "Missing API key");
+    }
+
+    #[test]
+    fn test_extract_empty_api_key_is_none() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", "".parse().unwrap());
+        assert_eq!(extract_api_key(&headers), None);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer ".parse().unwrap());
+        assert_eq!(extract_api_key(&headers), None);
     }
 
     #[test]

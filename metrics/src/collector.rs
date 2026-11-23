@@ -259,8 +259,7 @@ impl Collector {
             .for_each(|(route, cb_result)| async {
                 match cb_result {
                     Ok(val) => {
-                        let (is_open, failure_count) =
-                            extract_circuit_breaker_state(&val).unwrap_or((false, 0));
+                        let (is_open, failure_count) = extract_circuit_breaker_state(&val);
                         self.metrics
                             .middleware_circuit_open
                             .with_label_values(&[contract_id, &route])
@@ -418,36 +417,18 @@ impl Collector {
 
     // ── router-execution ──────────────────────────────────────────────────────
 
-    /// Scrape `router-execution` by reading `TotalExecutions`, `TotalErrors`,
-    /// and `MaxRetries` from on-chain storage via `getLedgerEntries`.
+    /// Scrape `router-execution` by calling its `stats()` view function
+    /// (`TotalExecutions`, `TotalErrors`) and `max_retries()`.
     ///
-    /// The storage keys are encoded as Soroban `ContractData` XDR keys.
-    /// We use the `call_u64` simulation path as a fallback since full XDR
-    /// key construction requires the `stellar-xdr` crate.
+    /// A value that cannot be read fails the scrape instead of being reported
+    /// as 0.
     async fn scrape_execution(&self, client: &dyn RpcClient, contract_id: &str) -> Result<()> {
         let start = Instant::now();
         info!(contract_id, "scraping router-execution");
 
-        // Build the XDR keys for the three instance-storage entries.
-        // Key format: base64(LedgerKey::ContractData { contract, key: ScVal::Symbol("..."), durability: Persistent })
-        // We encode the symbol name as a hex placeholder matching the existing
-        // encode_string_arg convention; a production deployment should use
-        // stellar-xdr to produce correct XDR.
-        let keys: Vec<String> = ["TotalExecutions", "TotalErrors", "MaxRetries"]
-            .iter()
-            .map(|k| encode_contract_data_key(contract_id, k))
-            .collect();
-
-        let entries = client.get_ledger_entries(keys).await?;
-
-        // Parse each entry. The value XDR is a base64-encoded ScVal::U64.
-        // We extract the numeric value from the JSON representation returned
-        // by the RPC server (which decodes XDR to JSON automatically).
-        let total_executions =
-            extract_u64_from_entry(&entries, contract_id, "TotalExecutions").unwrap_or(0);
-        let total_errors =
-            extract_u64_from_entry(&entries, contract_id, "TotalErrors").unwrap_or(0);
-        let max_retries = extract_u64_from_entry(&entries, contract_id, "MaxRetries").unwrap_or(0);
+        let stats = client.simulate_invoke(contract_id, "stats", vec![]).await?;
+        let (total_executions, total_errors) = extract_execution_stats(&stats)?;
+        let max_retries = client.call_u64(contract_id, "max_retries").await?;
 
         self.metrics
             .execution_total_executions
@@ -482,48 +463,6 @@ impl Collector {
     }
 }
 
-/// Encode a `ContractData` ledger key for a named instance-storage entry.
-///
-/// Produces a string key that the mock client can match on. In production
-/// this should be replaced with proper XDR encoding via the `stellar-xdr` crate.
-// TODO: replace with real base64-encoded XDR LedgerKey construction using stellar-xdr.
-fn encode_contract_data_key(contract_id: &str, storage_key: &str) -> String {
-    format!("{contract_id}:{storage_key}")
-}
-
-/// Extract a `u64` value from a `getLedgerEntries` response for the given key name.
-///
-/// The RPC server returns entries with a `xdr` field containing base64-encoded
-/// `LedgerEntryData` XDR. In the JSON-decoded representation (used by some RPC
-/// versions) the value is available directly. We try both paths.
-fn extract_u64_from_entry(
-    entries: &[crate::rpc::LedgerEntry],
-    contract_id: &str,
-    key_name: &str,
-) -> Option<u64> {
-    // Match the encoded key exactly: a substring match would let a key such as
-    // `MaxRetriesOverride` satisfy a lookup for `MaxRetries`.
-    let expected_key = encode_contract_data_key(contract_id, key_name);
-    for entry in entries {
-        if entry.key == expected_key {
-            // Try to parse the xdr field as a plain u64 (mock / JSON path).
-            if let Ok(n) = entry.xdr.parse::<u64>() {
-                return Some(n);
-            }
-            // Try JSON-decoded path: `{"u64": <n>}`.
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&entry.xdr) {
-                if let Some(n) = v.get("u64").and_then(|n| n.as_u64()) {
-                    return Some(n);
-                }
-                if let Some(n) = v.as_u64() {
-                    return Some(n);
-                }
-            }
-        }
-    }
-    None
-}
-
 /// Encode a plain string as a base64 XDR `ScVal::String` argument.
 ///
 /// This is a placeholder — a real implementation would use the `stellar-xdr`
@@ -553,7 +492,7 @@ fn extract_route_paused(val: &serde_json::Value) -> Option<bool> {
 }
 
 /// Extract `(is_open, failure_count)` from a `CircuitBreakerState` JSON value.
-fn extract_circuit_breaker_state(val: &serde_json::Value) -> Option<(bool, u32)> {
+fn extract_circuit_breaker_state(val: &serde_json::Value) -> (bool, u32) {
     let retval = val
         .get("results")
         .and_then(|r| r.get(0))
@@ -562,7 +501,7 @@ fn extract_circuit_breaker_state(val: &serde_json::Value) -> Option<(bool, u32)>
 
     // Handle Option<CircuitBreakerState> — None means no state recorded yet
     if retval.is_null() || retval.get("none").is_some() {
-        return Some((false, 0));
+        return (false, 0);
     }
 
     let state = retval.get("some").unwrap_or(retval);
@@ -573,9 +512,36 @@ fn extract_circuit_breaker_state(val: &serde_json::Value) -> Option<(bool, u32)>
     let failure_count = state
         .get("failure_count")
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+        .unwrap_or(0);
 
-    Some((is_open, failure_count))
+    (is_open, failure_count)
+}
+
+/// Extract `(total_executions, total_errors)` from the `(u64, u64)` returned
+/// by `router-execution`'s `stats()` view function.
+fn extract_execution_stats(val: &serde_json::Value) -> Result<(u64, u64)> {
+    let retval = val
+        .get("results")
+        .and_then(|r| r.get(0))
+        .and_then(|r| r.get("retval"))
+        .unwrap_or(val);
+
+    // A tuple is an `ScVal::Vec`, decoded either as a bare array or as `{"vec": [...]}`.
+    let items = retval
+        .as_array()
+        .or_else(|| retval.get("vec").and_then(|v| v.as_array()))
+        .filter(|items| items.len() == 2)
+        .ok_or_else(|| anyhow::anyhow!("could not find (u64, u64) in stats result: {val}"))?;
+
+    let as_u64 =
+        |v: &serde_json::Value| v.as_u64().or_else(|| v.get("u64").and_then(|n| n.as_u64()));
+    match (as_u64(&items[0]), as_u64(&items[1])) {
+        (Some(executions), Some(errors)) => Ok((executions, errors)),
+        _ => Err(anyhow::anyhow!(
+            "could not find (u64, u64) in stats result: {val}"
+        )),
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -875,30 +841,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scrape_execution_reads_ledger_entries() {
-        use crate::rpc::LedgerEntry;
+    async fn test_scrape_execution_reads_view_functions() {
         let (collector, metrics) = make_collector_full("", "", "", "", "EXEC_ID");
 
-        // get_ledger_entries is called once with all three keys; mock returns
-        // entries for the first key only. We need a single mock that returns all.
-        // Use a combined mock keyed on the first key.
-        let mock = MockRpcClient::new().with_ledger_entries(
-            "EXEC_ID:TotalExecutions",
-            vec![
-                LedgerEntry {
-                    key: "EXEC_ID:TotalExecutions".to_string(),
-                    xdr: "42".to_string(),
-                },
-                LedgerEntry {
-                    key: "EXEC_ID:TotalErrors".to_string(),
-                    xdr: "5".to_string(),
-                },
-                LedgerEntry {
-                    key: "EXEC_ID:MaxRetries".to_string(),
-                    xdr: "3".to_string(),
-                },
-            ],
-        );
+        let mock = MockRpcClient::new()
+            .with_simulate(
+                "EXEC_ID",
+                "stats",
+                json!({ "results": [{ "retval": [{ "u64": 42 }, { "u64": 5 }] }] }),
+            )
+            .with_u64("EXEC_ID", "max_retries", 3);
 
         let ok = collector.scrape_all(&mock).await;
         assert!(ok);
@@ -925,44 +877,45 @@ mod tests {
             3.0
         );
     }
-    #[test]
-    fn test_extract_u64_from_entry_matches_key_exactly() {
-        use crate::rpc::LedgerEntry;
-        // `MaxRetries` is a substring of `MaxRetriesOverride`; the longer key
-        // comes first so a loose match would return its value.
-        let entries = vec![
-            LedgerEntry {
-                key: "EXEC_ID:MaxRetriesOverride".to_string(),
-                xdr: "99".to_string(),
-            },
-            LedgerEntry {
-                key: "EXEC_ID:MaxRetries".to_string(),
-                xdr: "3".to_string(),
-            },
-        ];
 
-        assert_eq!(
-            extract_u64_from_entry(&entries, "EXEC_ID", "MaxRetries"),
-            Some(3)
+    #[tokio::test]
+    async fn test_scrape_execution_fails_when_values_are_missing() {
+        let (collector, metrics) = make_collector_full("", "", "", "", "EXEC_ID");
+
+        // `stats` returns something that is not a (u64, u64) tuple and
+        // `max_retries` has no response at all.
+        let mock = MockRpcClient::new().with_simulate(
+            "EXEC_ID",
+            "stats",
+            json!({ "results": [{ "retval": null }] }),
         );
+
+        let ok = collector.scrape_all(&mock).await;
+        assert!(!ok);
         assert_eq!(
-            extract_u64_from_entry(&entries, "EXEC_ID", "MaxRetriesOverride"),
-            Some(99)
+            metrics
+                .scrape_errors_total
+                .with_label_values(&["EXEC_ID"])
+                .get(),
+            1.0
         );
     }
 
     #[test]
-    fn test_extract_u64_from_entry_ignores_other_contracts() {
-        use crate::rpc::LedgerEntry;
-        let entries = vec![LedgerEntry {
-            key: "OTHER_ID:MaxRetries".to_string(),
-            xdr: "7".to_string(),
-        }];
+    fn test_extract_execution_stats_formats() {
+        let bare = json!({ "results": [{ "retval": [7, 2] }] });
+        assert_eq!(extract_execution_stats(&bare).unwrap(), (7, 2));
 
-        assert_eq!(
-            extract_u64_from_entry(&entries, "EXEC_ID", "MaxRetries"),
-            None
-        );
+        let vec = json!({ "results": [{ "retval": { "vec": [{ "u64": 9 }, { "u64": 1 }] } }] });
+        assert_eq!(extract_execution_stats(&vec).unwrap(), (9, 1));
+    }
+
+    #[test]
+    fn test_extract_execution_stats_rejects_missing_values() {
+        for retval in [json!(null), json!([1]), json!(["a", "b"])] {
+            let val = json!({ "results": [{ "retval": retval }] });
+            assert!(extract_execution_stats(&val).is_err());
+        }
     }
 
     #[test]
@@ -992,7 +945,7 @@ mod tests {
                 }
             }]
         });
-        assert_eq!(extract_circuit_breaker_state(&val), Some((true, 5)));
+        assert_eq!(extract_circuit_breaker_state(&val), (true, 5));
     }
 
     #[test]
@@ -1000,7 +953,7 @@ mod tests {
         let val = json!({
             "results": [{ "retval": null }]
         });
-        assert_eq!(extract_circuit_breaker_state(&val), Some((false, 0)));
+        assert_eq!(extract_circuit_breaker_state(&val), (false, 0));
     }
 
     #[test]
@@ -1016,6 +969,22 @@ mod tests {
                 }
             }]
         });
-        assert_eq!(extract_circuit_breaker_state(&val), Some((false, 2)));
+        assert_eq!(extract_circuit_breaker_state(&val), (false, 2));
+    }
+
+    #[test]
+    fn test_extract_circuit_breaker_failure_count_saturates() {
+        let val = json!({
+            "results": [{
+                "retval": {
+                    "some": {
+                        "is_open": true,
+                        "failure_count": u64::from(u32::MAX) + 1,
+                        "opened_at": 0
+                    }
+                }
+            }]
+        });
+        assert_eq!(extract_circuit_breaker_state(&val), (true, u32::MAX));
     }
 }

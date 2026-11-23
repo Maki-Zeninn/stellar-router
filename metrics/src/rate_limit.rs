@@ -36,6 +36,8 @@ use dashmap::DashMap;
 use serde::Serialize;
 use tracing::warn;
 
+use crate::config::env_parse;
+
 // ── Config ────────────────────────────────────────────────────────────────────
 
 /// Rate-limit configuration (injected via CLI / env).
@@ -198,24 +200,15 @@ pub async fn rate_limit_middleware(
 /// Parse rate-limit config from environment / defaults.
 /// Extend [`crate::cli::Args`] with these fields to make them configurable.
 pub fn config_from_env() -> RateLimitConfig {
-    let max_requests = std::env::var("ROUTER_RATE_LIMIT_MAX_REQUESTS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(60u32);
+    let max_requests = env_parse("ROUTER_RATE_LIMIT_MAX_REQUESTS", 60u32);
 
-    let window_secs = std::env::var("ROUTER_RATE_LIMIT_WINDOW_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(60u64);
+    let window_secs = env_parse("ROUTER_RATE_LIMIT_WINDOW_SECS", 60u64);
 
     // Issue #1200: max_buckets was hardcoded here even though it's a regular
     // constructor field (used by RateLimiter::check's eviction logic to
     // bound memory), not a private constant — every deployment got exactly
     // 1024 tracked buckets regardless of configuration.
-    let max_buckets = std::env::var("ROUTER_RATE_LIMIT_MAX_BUCKETS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1024usize);
+    let max_buckets = env_parse("ROUTER_RATE_LIMIT_MAX_BUCKETS", 1024usize);
 
     RateLimitConfig {
         max_requests,
