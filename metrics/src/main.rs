@@ -38,6 +38,7 @@
 mod auth;
 mod cli;
 mod collector;
+mod config;
 mod logging;
 mod metrics;
 mod openapi;

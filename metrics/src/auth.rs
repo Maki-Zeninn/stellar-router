@@ -8,6 +8,7 @@
 //! - `ROUTER_API_KEY` — API key for authentication (if not set, authentication is disabled)
 //! - `ROUTER_AUTH_ENABLED` — Set to "true" to enable authentication (default: false)
 
+use crate::config::env_bool;
 use axum::{
     extract::{Request, State},
     http::{header, HeaderMap, StatusCode},
@@ -30,9 +31,7 @@ pub struct AuthConfig {
 impl AuthConfig {
     /// Load authentication configuration from environment variables.
     pub fn from_env() -> Self {
-        let enabled = env::var("ROUTER_AUTH_ENABLED")
-            .map(|v| v.to_lowercase() == "true")
-            .unwrap_or(false);
+        let enabled = env_bool("ROUTER_AUTH_ENABLED", false);
 
         let api_key = env::var("ROUTER_API_KEY").ok();
 

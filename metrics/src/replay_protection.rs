@@ -7,6 +7,7 @@
 //! - `ROUTER_NONCE_CACHE_SIZE` — Maximum number of nonces to cache (default: 10000)
 //! - `ROUTER_NONCE_TTL_SECS` — Time-to-live for nonces in seconds (default: 3600)
 
+use crate::config::{env_bool, env_parse};
 use axum::{
     extract::{Request, State},
     http::{HeaderMap, StatusCode},
@@ -16,7 +17,6 @@ use axum::{
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use std::collections::VecDeque;
-use std::env;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -36,19 +36,11 @@ pub struct ReplayProtectionConfig {
 impl ReplayProtectionConfig {
     /// Load replay protection configuration from environment variables.
     pub fn from_env() -> Self {
-        let enabled = env::var("ROUTER_REPLAY_PROTECTION_ENABLED")
-            .map(|v| v.to_lowercase() == "true")
-            .unwrap_or(false);
+        let enabled = env_bool("ROUTER_REPLAY_PROTECTION_ENABLED", false);
 
-        let cache_size = env::var("ROUTER_NONCE_CACHE_SIZE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(10000);
+        let cache_size = env_parse("ROUTER_NONCE_CACHE_SIZE", 10000);
 
-        let nonce_ttl_secs = env::var("ROUTER_NONCE_TTL_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(3600);
+        let nonce_ttl_secs = env_parse("ROUTER_NONCE_TTL_SECS", 3600);
 
         ReplayProtectionConfig {
             enabled,
