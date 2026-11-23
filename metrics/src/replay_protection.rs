@@ -116,16 +116,11 @@ impl NonceCache {
                     return false;
                 }
                 occupied.insert(NonceEntry { timestamp: now });
-                true
             }
             Entry::Vacant(vacant) => {
                 vacant.insert(NonceEntry { timestamp: now });
-                true
             }
         }
-        // Add nonce to cache
-        self.cache
-            .insert(nonce.to_string(), NonceEntry { timestamp: now });
         self.eviction_order
             .lock()
             .unwrap()
@@ -381,6 +376,9 @@ mod tests {
             }
         }
         assert_eq!(accepted, 1);
+    }
+
+    #[test]
     fn test_nonce_cache_evicts_oldest_in_insertion_order() {
         let config = ReplayProtectionConfig {
             enabled: true,
@@ -393,7 +391,10 @@ mod tests {
         assert!(cache.check_and_add("nonce-2"));
         assert!(cache.check_and_add("nonce-3"));
 
-        assert!(!cache.cache.contains_key("nonce-1"), "oldest nonce is evicted");
+        assert!(
+            !cache.cache.contains_key("nonce-1"),
+            "oldest nonce is evicted"
+        );
         assert!(cache.cache.contains_key("nonce-2"));
         assert!(cache.cache.contains_key("nonce-3"));
         assert_eq!(cache.eviction_order.lock().unwrap().len(), 2);
@@ -438,13 +439,7 @@ mod tests {
         assert_eq!(nonce, None);
     }
 
-    use axum::{
-        body::Body,
-        http::Request as HttpRequest,
-        middleware,
-        routing::get,
-        Router,
-    };
+    use axum::{body::Body, http::Request as HttpRequest, middleware, routing::get, Router};
     use tower::ServiceExt;
 
     fn test_config(enabled: bool) -> ReplayProtectionConfig {
@@ -547,5 +542,132 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&body[..], b"ok");
+    }
+
+    // from_env reads process-global env vars, so env tests run serially
+    // (same pattern as `rate_limit.rs`).
+    static ENV_GUARD: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+    fn with_env_lock<T>(f: impl FnOnce() -> T) -> T {
+        let guard = ENV_GUARD.get_or_init(|| std::sync::Mutex::new(()));
+        let _lock = guard.lock().unwrap_or_else(|e| e.into_inner());
+        f()
+    }
+
+    const ENV_VARS: [&str; 3] = [
+        "ROUTER_REPLAY_PROTECTION_ENABLED",
+        "ROUTER_NONCE_CACHE_SIZE",
+        "ROUTER_NONCE_TTL_SECS",
+    ];
+
+    // Safety: only called inside `with_env_lock`.
+    fn set_env(key: &str, value: &str) {
+        unsafe { std::env::set_var(key, value) };
+    }
+
+    fn clear_env() {
+        for key in ENV_VARS {
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+
+    fn cache_with_ttl(ttl: u64) -> NonceCache {
+        NonceCache::new(ReplayProtectionConfig {
+            enabled: true,
+            cache_size: 100,
+            nonce_ttl_secs: ttl,
+        })
+    }
+
+    #[test]
+    fn from_env_uses_defaults_when_unset() {
+        with_env_lock(|| {
+            clear_env();
+            let config = ReplayProtectionConfig::from_env();
+            assert!(!config.enabled);
+            assert_eq!(config.cache_size, 10000);
+            assert_eq!(config.nonce_ttl_secs, 3600);
+        });
+    }
+
+    #[test]
+    fn from_env_parses_valid_values() {
+        with_env_lock(|| {
+            set_env("ROUTER_REPLAY_PROTECTION_ENABLED", "TRUE");
+            set_env("ROUTER_NONCE_CACHE_SIZE", "42");
+            set_env("ROUTER_NONCE_TTL_SECS", "120");
+            let config = ReplayProtectionConfig::from_env();
+            assert!(config.enabled);
+            assert_eq!(config.cache_size, 42);
+            assert_eq!(config.nonce_ttl_secs, 120);
+            clear_env();
+        });
+    }
+
+    #[test]
+    fn from_env_falls_back_on_unparsable_values() {
+        with_env_lock(|| {
+            set_env("ROUTER_REPLAY_PROTECTION_ENABLED", "yes");
+            set_env("ROUTER_NONCE_CACHE_SIZE", "not-a-number");
+            set_env("ROUTER_NONCE_TTL_SECS", "-5");
+            let config = ReplayProtectionConfig::from_env();
+            assert!(!config.enabled);
+            assert_eq!(config.cache_size, 10000);
+            assert_eq!(config.nonce_ttl_secs, 3600);
+            clear_env();
+        });
+    }
+
+    #[test]
+    fn nonce_accepted_again_after_ttl_cleanup() {
+        let ttl = 60;
+        let cache = cache_with_ttl(ttl);
+        assert!(cache.check_and_add("nonce-ttl"));
+        assert!(!cache.check_and_add("nonce-ttl"));
+
+        let inserted_at = cache.cache.get("nonce-ttl").unwrap().timestamp;
+        cache.cleanup_expired(inserted_at + ttl);
+        assert!(!cache.cache.contains_key("nonce-ttl"));
+
+        assert!(cache.check_and_add("nonce-ttl"));
+    }
+
+    #[test]
+    fn cleanup_expired_keeps_unexpired_nonces() {
+        let ttl = 60;
+        let cache = cache_with_ttl(ttl);
+        assert!(cache.check_and_add("nonce-live"));
+        let inserted_at = cache.cache.get("nonce-live").unwrap().timestamp;
+        cache.cleanup_expired(inserted_at + ttl - 1);
+        assert!(cache.cache.contains_key("nonce-live"));
+    }
+
+    #[test]
+    fn maybe_cleanup_expired_sweeps_at_most_once_per_interval() {
+        let ttl = 100; // sweep interval = ttl / 10 = 10s
+        let cache = cache_with_ttl(ttl);
+        let base = 1_000_000;
+        cache
+            .cache
+            .insert("old".to_string(), NonceEntry { timestamp: base });
+
+        // First sweep at base + ttl runs and removes the expired entry.
+        cache.maybe_cleanup_expired(base + ttl);
+        assert!(!cache.cache.contains_key("old"));
+        assert_eq!(cache.last_swept_at.load(Ordering::Relaxed), base + ttl);
+
+        // An entry that has expired, but the interval since the last sweep
+        // hasn't elapsed, so no sweep runs.
+        cache
+            .cache
+            .insert("stale".to_string(), NonceEntry { timestamp: base });
+        cache.maybe_cleanup_expired(base + ttl + 9);
+        assert!(cache.cache.contains_key("stale"));
+        assert_eq!(cache.last_swept_at.load(Ordering::Relaxed), base + ttl);
+
+        // Once the interval has elapsed, the next call sweeps again.
+        cache.maybe_cleanup_expired(base + ttl + 10);
+        assert!(!cache.cache.contains_key("stale"));
+        assert_eq!(cache.last_swept_at.load(Ordering::Relaxed), base + ttl + 10);
     }
 }

@@ -25,7 +25,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use futures::{stream, StreamExt};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::cli::Args;
 use crate::metrics::RouterMetrics;
@@ -49,21 +49,14 @@ impl Collector {
         }
     }
 
-    /// Run forever, scraping on the configured interval.
-    pub async fn run(self) {
+    /// Run forever, scraping on the configured interval using `client`.
+    pub async fn run(self, client: SorobanRpcClient) {
         let interval = tokio::time::Duration::from_secs(self.args.scrape_interval_secs);
         info!(
             interval_secs = self.args.scrape_interval_secs,
             "scrape loop started"
         );
 
-        let client = match SorobanRpcClient::new(&self.args.rpc_url, self.args.rpc_timeout_secs) {
-            Ok(c) => c,
-            Err(e) => {
-                error!("failed to create RPC client: {e:#}");
-                return;
-            }
-        };
         self.metrics.rpc_up.set(1.0);
 
         let mut ticker = tokio::time::interval(interval);
@@ -194,7 +187,7 @@ impl Collector {
                 (route, route_result)
             })
             .buffer_unordered(self.args.scrape_concurrency.max(1))
-            .for_each(|(route, route_result)| async {
+            .for_each(|(route, route_result)| async move {
                 match route_result {
                     Ok(val) => {
                         let paused = extract_route_paused(&val).unwrap_or(false);
@@ -256,7 +249,7 @@ impl Collector {
                 (route, cb_result)
             })
             .buffer_unordered(self.args.scrape_concurrency.max(1))
-            .for_each(|(route, cb_result)| async {
+            .for_each(|(route, cb_result)| async move {
                 match cb_result {
                     Ok(val) => {
                         let (is_open, failure_count) =
@@ -823,7 +816,10 @@ mod tests {
                 "quote_calculated",
                 vec![
                     vec![make_event("quote_calculated", "1")],
-                    vec![make_event("quote_calculated", "2"), make_event("quote_calculated", "3")],
+                    vec![
+                        make_event("quote_calculated", "2"),
+                        make_event("quote_calculated", "3"),
+                    ],
                 ],
             )
             .with_event_pages(

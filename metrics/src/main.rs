@@ -56,6 +56,7 @@ use collector::Collector;
 use logging::init_logging;
 use metrics::RouterMetrics;
 use rate_limit::{config_from_env, RateLimiter};
+use rpc::SorobanRpcClient;
 use server::serve;
 use validation::{
     validate_contract_id, validate_listen_addr, validate_rpc_timeout, validate_scrape_interval,
@@ -101,12 +102,21 @@ async fn main() -> Result<()> {
     let router_metrics = RouterMetrics::new(&registry)?;
 
     // ── Background scrape loop ────────────────────────────────────────────────
+    // Build the RPC client up front so a construction failure exits the process.
+    let client = SorobanRpcClient::new(&args.rpc_url, args.rpc_timeout_secs)
+        .map_err(|e| anyhow::anyhow!("failed to create RPC client: {e:#}"))?;
     let collector = Collector::new(args.clone(), router_metrics.clone());
-    tokio::spawn(async move {
-        collector.run().await;
-    });
+    let mut collector_task = tokio::spawn(collector.run(client));
 
     // ── HTTP server ───────────────────────────────────────────────────────────
+    // A collector exit or panic terminates the process instead of leaving
+    // `/health` returning 200 with no scrapes happening.
     let limiter = RateLimiter::new(config_from_env());
-    serve(args.listen, registry, limiter).await
+    tokio::select! {
+        res = serve(args.listen, registry, limiter) => res,
+        res = &mut collector_task => match res {
+            Ok(()) => Err(anyhow::anyhow!("collector task exited unexpectedly")),
+            Err(e) => Err(anyhow::anyhow!("collector task failed: {e}")),
+        },
+    }
 }

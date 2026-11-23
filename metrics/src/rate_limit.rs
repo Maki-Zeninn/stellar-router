@@ -425,4 +425,69 @@ mod tests {
             remove_env("ROUTER_RATE_LIMIT_WINDOW_SECS");
         });
     }
+
+    #[test]
+    fn config_from_env_reads_max_buckets() {
+        with_env_lock(|| {
+            set_env("ROUTER_RATE_LIMIT_MAX_BUCKETS", "7");
+            assert_eq!(config_from_env().max_buckets, 7);
+
+            set_env("ROUTER_RATE_LIMIT_MAX_BUCKETS", "not-a-number");
+            assert_eq!(config_from_env().max_buckets, 1024);
+
+            remove_env("ROUTER_RATE_LIMIT_MAX_BUCKETS");
+        });
+    }
+
+    #[test]
+    fn window_resets_after_window_elapses() {
+        let rl = RateLimiter::new(RateLimitConfig {
+            max_requests: 1,
+            window: Duration::from_millis(50),
+            max_buckets: 1024,
+        });
+        assert!(rl.check("9.9.9.9"));
+        assert!(!rl.check("9.9.9.9"));
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(rl.check("9.9.9.9"), "count should reset after the window");
+    }
+
+    #[tokio::test]
+    async fn middleware_returns_429_with_retry_after_and_json_body() {
+        use axum::{
+            body::to_bytes, extract::connect_info::MockConnectInfo, middleware::from_fn_with_state,
+            routing::get, Router,
+        };
+        use tower::ServiceExt;
+
+        let max = 2;
+        let app = Router::new()
+            .route("/", get(|| async { "ok" }))
+            .layer(from_fn_with_state(limiter(max, 60), rate_limit_middleware))
+            .layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4000))));
+
+        let request = || Request::builder().uri("/").body(Body::empty()).unwrap();
+        for _ in 0..max {
+            let res = app.clone().oneshot(request()).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+        }
+
+        let res = app.oneshot(request()).await.unwrap();
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry_after: u64 = res.headers()["retry-after"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((1..=60).contains(&retry_after));
+
+        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "rate_limit_exceeded");
+        assert_eq!(json["retry_after_secs"], retry_after);
+        assert_eq!(
+            json["message"],
+            format!("Too many requests. Retry after {retry_after} second(s).")
+        );
+    }
 }
