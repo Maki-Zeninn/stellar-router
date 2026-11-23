@@ -259,8 +259,7 @@ impl Collector {
             .for_each(|(route, cb_result)| async {
                 match cb_result {
                     Ok(val) => {
-                        let (is_open, failure_count) =
-                            extract_circuit_breaker_state(&val).unwrap_or((false, 0));
+                        let (is_open, failure_count) = extract_circuit_breaker_state(&val);
                         self.metrics
                             .middleware_circuit_open
                             .with_label_values(&[contract_id, &route])
@@ -553,7 +552,7 @@ fn extract_route_paused(val: &serde_json::Value) -> Option<bool> {
 }
 
 /// Extract `(is_open, failure_count)` from a `CircuitBreakerState` JSON value.
-fn extract_circuit_breaker_state(val: &serde_json::Value) -> Option<(bool, u32)> {
+fn extract_circuit_breaker_state(val: &serde_json::Value) -> (bool, u32) {
     let retval = val
         .get("results")
         .and_then(|r| r.get(0))
@@ -562,7 +561,7 @@ fn extract_circuit_breaker_state(val: &serde_json::Value) -> Option<(bool, u32)>
 
     // Handle Option<CircuitBreakerState> — None means no state recorded yet
     if retval.is_null() || retval.get("none").is_some() {
-        return Some((false, 0));
+        return (false, 0);
     }
 
     let state = retval.get("some").unwrap_or(retval);
@@ -573,9 +572,10 @@ fn extract_circuit_breaker_state(val: &serde_json::Value) -> Option<(bool, u32)>
     let failure_count = state
         .get("failure_count")
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+        .unwrap_or(0);
 
-    Some((is_open, failure_count))
+    (is_open, failure_count)
 }
 #[cfg(test)]
 mod tests {
@@ -992,7 +992,7 @@ mod tests {
                 }
             }]
         });
-        assert_eq!(extract_circuit_breaker_state(&val), Some((true, 5)));
+        assert_eq!(extract_circuit_breaker_state(&val), (true, 5));
     }
 
     #[test]
@@ -1000,7 +1000,7 @@ mod tests {
         let val = json!({
             "results": [{ "retval": null }]
         });
-        assert_eq!(extract_circuit_breaker_state(&val), Some((false, 0)));
+        assert_eq!(extract_circuit_breaker_state(&val), (false, 0));
     }
 
     #[test]
@@ -1016,6 +1016,22 @@ mod tests {
                 }
             }]
         });
-        assert_eq!(extract_circuit_breaker_state(&val), Some((false, 2)));
+        assert_eq!(extract_circuit_breaker_state(&val), (false, 2));
+    }
+
+    #[test]
+    fn test_extract_circuit_breaker_failure_count_saturates() {
+        let val = json!({
+            "results": [{
+                "retval": {
+                    "some": {
+                        "is_open": true,
+                        "failure_count": u64::from(u32::MAX) + 1,
+                        "opened_at": 0
+                    }
+                }
+            }]
+        });
+        assert_eq!(extract_circuit_breaker_state(&val), (true, u32::MAX));
     }
 }
