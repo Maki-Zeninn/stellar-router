@@ -53,9 +53,15 @@ pub fn validate_contract_id(id: &str) -> Result<(), ValidationError> {
             "contract_id must be exactly {STELLAR_CONTRACT_ID_LEN} characters"
         )));
     }
-    if !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+    if !id.starts_with('C') {
+        return Err(ValidationError::new("contract_id must start with 'C'"));
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c))
+    {
         return Err(ValidationError::new(
-            "contract_id must contain only alphanumeric characters",
+            "contract_id must contain only base32 characters (A-Z, 2-7)",
         ));
     }
     Ok(())
@@ -130,8 +136,9 @@ mod tests {
 
     #[test]
     fn valid_contract_id() {
-        let id = "A".repeat(STELLAR_CONTRACT_ID_LEN);
-        assert!(validate_contract_id(&id).is_ok());
+        let id = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+        assert_eq!(id.len(), STELLAR_CONTRACT_ID_LEN);
+        assert!(validate_contract_id(id).is_ok());
     }
 
     #[test]
@@ -148,6 +155,26 @@ mod tests {
     fn contract_id_with_special_chars_rejected() {
         let id = format!("{}!", "A".repeat(STELLAR_CONTRACT_ID_LEN - 1));
         assert!(validate_contract_id(&id).is_err());
+    }
+
+    #[test]
+    fn contract_id_lowercase_rejected() {
+        let id = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC".to_lowercase();
+        assert!(validate_contract_id(&id).is_err());
+    }
+
+    #[test]
+    fn account_id_rejected() {
+        let id = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7";
+        assert!(validate_contract_id(id).is_err());
+    }
+
+    #[test]
+    fn contract_id_with_invalid_base32_digits_rejected() {
+        for d in ['0', '1', '8', '9'] {
+            let id = format!("C{}{}", d, "A".repeat(STELLAR_CONTRACT_ID_LEN - 2));
+            assert!(validate_contract_id(&id).is_err(), "digit {d} accepted");
+        }
     }
 
     #[test]
